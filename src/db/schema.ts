@@ -70,6 +70,12 @@ export const approvalRequests = pgTable('approval_requests', {
   lastMintedAt: timestamp('last_minted_at').defaultNow().notNull(),
   openedAt: timestamp('opened_at'),
   approvedAt: timestamp('approved_at'),
+  // When FGAC emailed this request's link to the owner's own inbox (one
+  // email per request, ever — claimed atomically before the send so a
+  // looping agent or a concurrent mint cannot produce a second one). NULL =
+  // never emailed (owner lacks the Gmail scope, cap hit, send failed, or
+  // the row predates the feature).
+  notifiedAt: timestamp('notified_at'),
   // Human-readable title of the file behind a sheets/docs request, when the
   // agent supplied one via request_access. The approve page can only show
   // Google's file id for a file Google does not share with FGAC yet, and the

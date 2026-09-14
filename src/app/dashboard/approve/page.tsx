@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { headers } from "next/headers";
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { classifyApproveClient, type ApproveClient } from "@/lib/approveClientClass";
+import { EMAIL_LINK_SOURCE_VALUE } from "@/lib/approvalNotifyCopy";
 import { describeApproval, peekApprovalParams, APPROVAL_PARAMS, type ApprovalPayload, type ApprovalSearchParams } from "@/lib/approvalLinks";
 import { markApprovalRequestOpened, getApprovalRequestResourceName } from "@/lib/approvalRequests";
 import { captureServerEvent } from "@/lib/posthogServer";
@@ -80,6 +81,8 @@ export default async function ApprovePage({
   searchParams: Promise<{
     a?: string; k?: string; r?: string; s?: string;
     result?: string; message?: string; sid?: string; did?: string; notice?: string;
+    /** `email` when the link came from FGAC's own notification email (approvalNotify.ts). */
+    src?: string;
   }>;
 }) {
   const params = await searchParams;
@@ -159,6 +162,10 @@ export default async function ApprovePage({
       resolved.status === "invalid" ? peekApprovalParams(link).action
         : resolved.status === "wrong_account" ? resolved.details.action
           : resolved.payload.action,
+    // Which channel delivered the URL: the notification email appends
+    // `src=email` (not part of the signed params, so it changes nothing
+    // about verification); anything else came through the agent's reply.
+    link_source: params.src === EMAIL_LINK_SOURCE_VALUE ? "email" : "agent",
     ...client,
   });
   if (resolved.status === "fresh" || resolved.status === "already_granted") {
