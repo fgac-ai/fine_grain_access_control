@@ -1572,3 +1572,90 @@ pre-2026-09-09 Picker page. `analytics.md` (the approval funnel section) has
 the reading; the change is judged working if same-target mints stop
 climbing while distinct-target batches are unaffected.
 
+**7.23 — Approval-link delivery: did the email move the open step?** Added
+2026-09-14 with owner notification (`src/lib/approvalNotify.ts`). Before the
+change, per request (`uniq(request_id)`, external users, 7 d to 2026-09-12):
+128 minted → 71 opened (55%) → 58 approved; the week before, 90 → 41 (46%) →
+33. The open step is where every lost request is lost (opened → approved runs
+~82%), and the people who never open cluster on agent surfaces that collapse
+the tool result. The change is judged working if `opened / minted` rises
+for `notify_status = 'sent'` requests against the pre-deploy baseline, and
+`link_source = 'email'` opens appear for requests the chat did not open.
+Read per request, never per event (`approval_link_opened` fires per render,
+2.09 rows per request in the same window).
+
+```sql
+-- 7.23a — open rate by delivery outcome, per request (7 d). Split on the
+-- FIRST mint's notify_status: later mints of the same request always read
+-- already_sent. Compare `sent` against `skipped_*` (owners FGAC could not
+-- email) — the skipped rows are the closest thing to a control group.
+WITH minted AS (
+  SELECT properties.request_id AS rid,
+         argMin(toString(properties.notify_status), timestamp) AS first_notify,
+         any(properties.action) AS action
+  FROM events
+  WHERE event = 'approval_link_minted' AND properties.environment = 'production'
+    AND timestamp > now() - INTERVAL 7 DAY
+    AND person.properties.email NOT IN (/* internal + QA accounts — the same list every §7 query uses, never inline them here */)
+  GROUP BY rid),
+opened AS (
+  SELECT properties.request_id AS rid,
+         countIf(toString(properties.link_source) = 'email') > 0 AS via_email
+  FROM events
+  WHERE event = 'approval_link_opened' AND timestamp > now() - INTERVAL 30 DAY
+  GROUP BY rid),
+appr AS (SELECT DISTINCT properties.request_id AS rid FROM events
+  WHERE event = 'approval_link_approved' AND timestamp > now() - INTERVAL 30 DAY)
+SELECT m.first_notify,
+       count()                                   AS requests,
+       countIf(o.rid != '')                      AS opened,
+       countIf(o.via_email)                      AS opened_via_email,
+       countIf(a.rid != '')                      AS approved,
+       round(100 * countIf(o.rid != '') / count(), 1) AS pct_opened
+FROM minted m
+LEFT JOIN opened o ON o.rid = m.rid
+LEFT JOIN appr   a ON a.rid = m.rid
+GROUP BY m.first_notify ORDER BY requests DESC
+```
+
+```sql
+-- 7.23b — before/after the deploy, per request, same shape as the table
+-- above. Set the boundary to the production deploy timestamp.
+SELECT if(m.first_mint < toDateTime('2026-09-15 00:00:00'), 'before', 'after') AS period,
+       count() AS requests,
+       countIf(o.rid != '') AS opened,
+       countIf(a.rid != '') AS approved,
+       round(100 * countIf(o.rid != '') / count(), 1) AS pct_opened
+FROM (SELECT properties.request_id AS rid, min(timestamp) AS first_mint FROM events
+      WHERE event = 'approval_link_minted' AND properties.environment = 'production'
+        AND timestamp > toDateTime('2026-09-15 00:00:00') - INTERVAL 14 DAY
+        AND person.properties.email NOT IN (/* internal + QA accounts */)
+      GROUP BY rid) m
+LEFT JOIN (SELECT DISTINCT properties.request_id AS rid FROM events
+           WHERE event = 'approval_link_opened' AND timestamp > now() - INTERVAL 30 DAY) o ON o.rid = m.rid
+LEFT JOIN (SELECT DISTINCT properties.request_id AS rid FROM events
+           WHERE event = 'approval_link_approved' AND timestamp > now() - INTERVAL 30 DAY) a ON a.rid = m.rid
+GROUP BY period
+```
+
+```sql
+-- 7.23c — delivery health (7 d): skips and failures by reason. A rising
+-- `failed` means Gmail rejected the self-send (check server logs for
+-- "[approvalNotify]"); `skipped_rate_capped` above a handful means a batch
+-- agent is minting many recipients per turn (7.22 tells you who).
+SELECT toString(properties.notify_status) AS status, count() AS mints, uniq(properties.request_id) AS requests, uniq(person_id) AS people
+FROM events
+WHERE event = 'approval_link_minted' AND properties.environment = 'production'
+  AND timestamp > now() - INTERVAL 7 DAY
+  AND person.properties.email NOT IN (/* internal + QA accounts */)
+GROUP BY status ORDER BY mints DESC
+```
+
+Two cautions. `skipped_no_gmail_scope` is the Sheets/Docs-only population
+(49 of 104 minting people in the 30 d before the change had no successful
+Gmail call) — they get no email and no other out-of-band channel, so their
+open rate is the unchanged baseline, not a regression. And an open with
+`link_source = 'email'` on a request the chat ALSO opened is not incremental;
+`opened_via_email` in 7.23a counts requests with at least one email open,
+so read it beside `opened`, not instead of it.
+
