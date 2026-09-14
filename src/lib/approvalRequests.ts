@@ -109,7 +109,9 @@ export async function markApprovalRequestApproved(requestId: string): Promise<vo
  * notified" — the safe direction: a lost email costs a channel, a duplicate
  * costs trust.
  */
-export async function claimApprovalNotification(requestId: string): Promise<{ claimed: boolean; notifiedAt: Date | null }> {
+export async function claimApprovalNotification(requestId: string): Promise<
+  { claimed: true; notifiedAt: Date | null } | { claimed: false; notifiedAt: Date | null; reason: 'already' | 'missing' | 'error' }
+> {
   try {
     const [row] = await db.update(approvalRequests)
       .set({ notifiedAt: sql`now()` })
@@ -120,10 +122,13 @@ export async function claimApprovalNotification(requestId: string): Promise<{ cl
       .from(approvalRequests)
       .where(eq(approvalRequests.requestId, requestId))
       .limit(1).then(r => r[0]);
-    return { claimed: false, notifiedAt: existing?.notifiedAt ?? null };
+    // No ledger row (the mint record failed): there is nothing to claim on,
+    // and "already emailed" would be a lie — report it as missing instead.
+    if (!existing) return { claimed: false, notifiedAt: null, reason: 'missing' };
+    return { claimed: false, notifiedAt: existing.notifiedAt, reason: 'already' };
   } catch (err) {
     console.error('[approvalRequests] notification claim failed:', err);
-    return { claimed: false, notifiedAt: null };
+    return { claimed: false, notifiedAt: null, reason: 'error' };
   }
 }
 

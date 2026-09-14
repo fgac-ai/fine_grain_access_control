@@ -106,7 +106,12 @@ export async function notifyOwnerOfApprovalLinks(opts: NotifyOwnerOpts): Promise
 
 async function attempt(opts: NotifyOwnerOpts, primary: NotifyLink, subject: string): Promise<NotifyOwnerResult> {
   const claim = await claimApprovalNotification(primary.requestId);
-  if (!claim.claimed) return { status: 'already_sent', notifiedAt: claim.notifiedAt, subject };
+  if (!claim.claimed) {
+    // Only a held claim means an email exists; a missing ledger row or a DB
+    // error is a delivery failure, and the denial must not claim otherwise.
+    if (claim.reason === 'already') return { status: 'already_sent', notifiedAt: claim.notifiedAt, subject };
+    return { status: 'failed', notifiedAt: null, subject };
+  }
 
   const release = async (status: NotifyStatus): Promise<NotifyOwnerResult> => {
     await releaseApprovalNotification(primary.requestId);
