@@ -193,6 +193,19 @@ export async function parseInitializeClientInfo(req: Request): Promise<McpClient
  *                  for every one of them; nothing is blocked or rate-limited
  *                  on this value — it is a measurement label only.
  *   - `direct`   — everything else: unknown MCP clients, browsers, curl.
+ *                  Within it, `client_class_signal = 'ua:stock-runtime-no-name'`
+ *                  marks a request from a bare HTTP runtime (`Bun/1.1.45`,
+ *                  `Python/3.11 aiohttp/…`, `Go-http-client/2.0`, `node`,
+ *                  `undici`, `python-httpx/…`) that carried NO `clientInfo`
+ *                  — nothing to name it by. Still `direct` (a stock runtime is
+ *                  not evidence of a crawler: the Python and TypeScript MCP
+ *                  SDKs run on exactly these), but a tokenless one is not an
+ *                  SDK install flow either — every SDK's first request is an
+ *                  `initialize` that names itself — so the daily review can
+ *                  read those rows as unnamed automation rather than as a
+ *                  real client that broke. Measured 2026-09-12: 142 of the
+ *                  206 `direct` failures since the listing were this shape,
+ *                  and none of the UAs had authenticated in 14 days.
  *
  * Why both user_agent and client_name: the registry ecosystem is split. Most
  * crawlers announce themselves in the user-agent (`SmitheryBot/1.0
@@ -209,8 +222,11 @@ export async function parseInitializeClientInfo(req: Request): Promise<McpClient
  *   1. explicit names / user-agent prefixes for sources whose strings say
  *      nothing (`glama`, `span-pipeline`, `frndOS`, `python-httpx2/…`);
  *   2. a vocabulary match on whole tokens of either string (`probe`,
- *      `scanner`, `crawler`, `health`, `registry`, `census`, …, plus the
- *      `…Bot` suffix), which is how most of them describe themselves;
+ *      `scanner`, `crawler`, `health`, `registry`, `census`, `audit`, …,
+ *      plus the `…Bot` suffix), which is how most of them describe
+ *      themselves — CamelCase words are split too, so `MCPScoringEngine`
+ *      is read as `mcp scoring engine` (it sat in `direct` for three days
+ *      as one opaque token; 2026-09-12);
  *   3. the crawler self-identification convention `(+https://…)` /
  *      `(+mailto:…)` in the user-agent, which no interactive MCP client uses.
  *
@@ -223,7 +239,10 @@ export type McpClientClass = 'claude' | 'internal' | 'scanner' | 'direct';
 
 export interface McpClientClassification {
   client_class: McpClientClass;
-  /** Which rule matched, e.g. `ua:SmitheryBot/`, `name:glama`, `keyword:probe`, `ua:self-link`. */
+  /**
+   * Which rule matched, e.g. `ua:SmitheryBot/`, `name:glama`, `keyword:probe`,
+   * `ua:self-link`; on `direct`, `ua:stock-runtime-no-name` or absent.
+   */
   client_class_signal?: string;
 }
 
@@ -267,6 +286,9 @@ const SCANNER_CLIENT_NAMES = new Set([
   'mcp-selection-lab-prospective-gold-lock',
   'selection lab prospective gold lock',
   'directory-admin-dashboard',
+  // 2026-09-12: a daily tokenless initialize on a stock `node` UA; the name
+  // says what it is, but `check` alone is too common a word to be vocabulary.
+  'rpg-connect-check',
 ]);
 const SCANNER_UA_PREFIXES = [
   // Not the real httpx UA (`python-httpx/`): the junk-bearer sender that was
@@ -278,11 +300,22 @@ const SCANNER_UA_PREFIXES = [
 ];
 
 /**
- * Whole-token vocabulary. Tokens are runs of letters/digits; `bot`,
- * `scan`, `scanner`, `probe`, `crawler` and `index` also match as suffixes
- * (`SmitheryBot`, `mcpscan`, `agentprobe`, `mcpindex`). Deliberately absent: `inspector`
- * (the official MCP Inspector is a person debugging), `client`, `agent`,
- * `gateway`, `router` (aggregators can front real users).
+ * Whole-token vocabulary. Tokens are runs of letters/digits, and a token
+ * written in CamelCase is additionally split at its case boundaries
+ * (`MCPScoringEngine` → `mcp`, `scoring`, `engine`; `AgentPulse` → `agent`,
+ * `pulse`) — the raw token is tried first so `GoogleOther` still matches
+ * whole. `bot`, `scan`, `scanner`, `probe`, `crawler` and `index` also match
+ * as suffixes (`SmitheryBot`, `mcpscan`, `agentprobe`, `mcpindex`).
+ * Deliberately absent: `inspector` (the official MCP Inspector is a person
+ * debugging), `client`, `agent`, `gateway`, `router` (aggregators can front
+ * real users), `engine`, `check` (too generic to be a tell on their own).
+ *
+ * `audit`, `scoring`, `study`, `inventory`, `canary`, `pulse` were added
+ * 2026-09-12 from the `direct` remainder of the first three days after the
+ * registry listing (`SaSame-MCP-Audit/0.1`, `MCPScoringEngine/1.0`,
+ * `schema-study/0.1`, `mcp-inventory/0.1` + `mcp-inventory-canary`,
+ * `AgentPulse`); none of those words appeared in any authenticated
+ * client_name or user-agent in the 14 days before.
  */
 const SCANNER_KEYWORDS = new Set([
   'bot', 'bots', 'crawler', 'crawl', 'spider',
@@ -293,18 +326,48 @@ const SCANNER_KEYWORDS = new Set([
   'indexer', 'index', 'catalog', 'registry', 'marketplace', 'sync', 'archive', 'ledger',
   'verify', 'checker', 'grader', 'reputation', 'research', 'inspection', 'introspect',
   'discovery', 'explorer', 'enricher', 'lab', 'googleother',
+  'audit', 'auditor', 'scoring', 'study', 'inventory', 'canary', 'pulse',
 ]);
 const SCANNER_SUFFIXES = ['bot', 'scan', 'scanner', 'probe', 'crawler', 'index'];
 const SELF_LINK = /\(\+(https?:\/\/|mailto:|[a-z])/i;
+
+/**
+ * The user-agents of bare HTTP runtimes and SDK transports — what a request
+ * looks like when nobody set a product string. Matched only when the request
+ * also carries no `clientInfo.name`; see `ua:stock-runtime-no-name` above.
+ * `curl`/`wget` are deliberately not here: those are tools a person runs.
+ */
+const STOCK_RUNTIME_UA = new RegExp(
+  '^(?:Bun|node-fetch|axios|Deno|python-httpx|python-requests|Python-urllib|Python|aiohttp'
+  + '|Go-http-client|okhttp|Java|Apache-HttpClient|GuzzleHttp|reqwest|Dart|ReactorNetty|libcurl)/'
+  + '|^(?:node|undici)$',
+);
+
+function tokenHit(t: string): string | undefined {
+  if (SCANNER_KEYWORDS.has(t)) return t;
+  for (const suf of SCANNER_SUFFIXES) {
+    if (t.length > suf.length && t.endsWith(suf)) return suf;
+  }
+  return undefined;
+}
 
 function keywordHit(s: string | undefined): string | undefined {
   if (!s) return undefined;
   for (const raw of s.split(/[^A-Za-z0-9]+/)) {
     if (!raw) continue;
-    const t = raw.toLowerCase();
-    if (SCANNER_KEYWORDS.has(t)) return t;
-    for (const suf of SCANNER_SUFFIXES) {
-      if (t.length > suf.length && t.endsWith(suf)) return suf;
+    const whole = tokenHit(raw.toLowerCase());
+    if (whole) return whole;
+    // CamelCase: `MCPScoringEngine` → MCP | Scoring | Engine. Only worth a
+    // second pass when the token actually mixes cases.
+    if (!/[a-z]/.test(raw) || !/[A-Z]/.test(raw)) continue;
+    const parts = raw
+      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+      .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+      .split(' ');
+    if (parts.length < 2) continue;
+    for (const part of parts) {
+      const hit = tokenHit(part.toLowerCase());
+      if (hit) return hit;
     }
   }
   return undefined;
@@ -343,6 +406,14 @@ export function classifyMcpClient(input: {
   const kw = keywordHit(name) ?? keywordHit(ua);
   if (kw) return { client_class: 'scanner', client_class_signal: `keyword:${kw}` };
   if (ua && SELF_LINK.test(ua)) return { client_class: 'scanner', client_class_signal: 'ua:self-link' };
+
+  // Unnamed automation on a bare runtime: still `direct` (a stock UA is what
+  // the real SDKs send too), but labelled so the review can tell it from an
+  // unknown client that self-identified. No clientInfo means this request was
+  // not an SDK's `initialize`.
+  if (ua && !name && STOCK_RUNTIME_UA.test(ua)) {
+    return { client_class: 'direct', client_class_signal: 'ua:stock-runtime-no-name' };
+  }
 
   return { client_class: 'direct' };
 }

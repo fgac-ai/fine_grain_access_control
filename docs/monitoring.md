@@ -25,7 +25,7 @@ Captured in `verifyMcpAuth` (`src/app/api/mcp/route.ts`):
 | `connection_resolve` | what the auth layer's eager `resolveConnection` did on this request: `ran` (four Neon round trips), `skipped` (touched within the last 5 minutes by the same user+client — `src/lib/connectionTouchMemo.ts`), `error`. Added 2026-09-08 |
 | `connection_resolve_ms` | wall time of that eager resolve when it ran; the per-request DB cost of a handshake (see 7.16) |
 | `user_agent`, `client_name` | who failed: the request's UA and, when the unauthenticated request was an MCP `initialize`, its self-reported `clientInfo.name`. Added 2026-09-10 so a 401 spike is diagnosable from this event alone (the registry-launch spike had to be attributed by joining `connector_install_started` by minute) |
-| `client_class`, `client_class_signal` | `claude` \| `internal` \| `scanner` \| `direct`, and the rule that decided it (`ua:SmitheryBot/`, `name:glama`, `keyword:probe`, `ua:self-link`). `scanner` = MCP registry crawlers, directory health probes, "MCP security" scanners, SEO bots — classified from **both** fields because about a third of them run on a stock `node` / `undici` / `Go-http-client` / `python-httpx` UA and only identify themselves in `clientInfo.name`. `classifyMcpClient` in `src/lib/mcpClientSignals.ts`; also stamped on `connector_install_started`. A measurement label only: nothing is blocked or rate-limited on it, and a 401 is the correct answer to every probe. Added 2026-09-10; see 7.21 |
+| `client_class`, `client_class_signal` | `claude` \| `internal` \| `scanner` \| `direct`, and the rule that decided it (`ua:SmitheryBot/`, `name:glama`, `keyword:probe`, `ua:self-link`). `scanner` = MCP registry crawlers, directory health probes, "MCP security" scanners, SEO bots — classified from **both** fields because about a third of them run on a stock `node` / `undici` / `Go-http-client` / `python-httpx` UA and only identify themselves in `clientInfo.name`. `classifyMcpClient` in `src/lib/mcpClientSignals.ts`; also stamped on `connector_install_started`. Since 2026-09-12 a `direct` row can carry `client_class_signal = 'ua:stock-runtime-no-name'`: a bare HTTP runtime UA (`Bun/`, `Python/… aiohttp/`, `Go-http-client/`, `node`, `undici`, `python-httpx/`) with no `clientInfo` at all — unnamed automation, still `direct` because the real SDKs run on the same runtimes, but not a client that broke (every SDK's first request is an `initialize` that names itself). A measurement label only: nothing is blocked or rate-limited on it, and a 401 is the correct answer to every probe. Added 2026-09-10; see 7.21 |
 
 Volume control: failures always capture; successes are sampled **1 in 20 per
 request** (`success_sample_rate` carries the factor). Multiply `outcome=ok`
@@ -1405,11 +1405,42 @@ What the 09-10 population looked like (~60 distinct sources in nine hours):
   without a token; **left `direct`** until that is established (it is a
   constant, not part of the 09-10 delta).
 
+**The `direct` remainder, three days in (2026-09-12).** The daily review
+found `direct` growing (30 → 65 → 111 `no_token` rows on 09-10/11/12) and
+7.21b showed it was crawler traffic, not people. Established before changing
+anything: none of the UAs or names below appeared on any authenticated event
+(`mcp_auth_attempt` ok, `mcp_client_initialize`, `$mcp_tool_call`) in the
+14 days to 09-12 — since the classifier deployed (09-10 12:28Z) every
+authenticated request has carried a `Claude-User` or `claude-code/` UA.
+
+| shape | rows 09-10→12 | what it was | rule since 2026-09-12 |
+| --- | --- | --- | --- |
+| `Python/3.11 aiohttp/3.14.3`, no clientInfo, POST | 75 (all on 09-12, 15 h) | bare tokenless POSTs from one runtime, no `initialize` | `direct` + `ua:stock-runtime-no-name` |
+| `Bun/1.1.45`, GET | 40 (23 distinct hours) | hourly GET health check | `direct` + `ua:stock-runtime-no-name` |
+| `python-httpx/0.28.1`, GET, no name | 21 | same shape | `direct` + `ua:stock-runtime-no-name` |
+| `Go-http-client/2.0` · bare `node` / HEAD, no name | 6 | daily crons | `direct` + `ua:stock-runtime-no-name` |
+| `MCPScoringEngine/1.0` / name `MCPScoringEngine` | 11 | a scoring service; slipped through because `keywordHit` saw one opaque token | `scanner` (`keyword:scoring` — CamelCase is now split) |
+| `python-httpx/0.28.1` / name `AgentPulse` | 9 | a monitor | `scanner` (`keyword:pulse`) |
+| `SaSame-MCP-Audit/0.1` | 6 | an audit crawler | `scanner` (`keyword:audit`) |
+| `schema-study/0.1`, `mcp-inventory/0.1` + `mcp-inventory-canary`, `node` + `rpg-connect-check` | 5 | named probes | `scanner` (`keyword:study` / `keyword:inventory` / `name:rpg-connect-check`) |
+| `python-httpx/0.28.1` / `Anthropic` (12), `undici` / `obolo-gateway` (11), `python-httpx` / `mcp` (3), `node` / `otter` (2), `curl` (3), one junk browser row | 32 | named but unidentified, or a person | **stay `direct`, unlabelled** — `gateway` and the SDK default name `mcp` are deliberately not tells |
+
+The rule for the stock-runtime rows is a *signal*, not a class, on purpose:
+a runtime UA is what the Python and TypeScript MCP SDKs send too, so it is
+not evidence of a crawler, and the review reads `direct` as "possible real
+client broke" — precision there matters more than recall. What makes the
+rows readable as automation is the *absence* of `clientInfo`: an SDK install
+flow always begins with an `initialize` that names the client. Replayed over
+the three days, the change moves 34 rows to `scanner` and labels 143 of the
+remaining 176 `direct` rows, leaving 12 / 17 / 4 unlabelled per day — the
+named-but-unknown set above — and reclassifies zero authenticated pairs
+(`scripts/test-mcp-client-class.ts` pins every string in the table).
+
 ```sql
 -- 7.21a — daily auth failures by class (14 d). `direct` is the unclassified
 -- remainder: a jump there is either a crawler the classifier misses (add it
 -- to src/lib/mcpClientSignals.ts) or a real client that broke — split by
--- 7.21b before deciding.
+-- 7.21e (unnamed stock runtime vs the rest) and then 7.21b before deciding.
 SELECT toDate(timestamp) AS day,
        coalesce(properties.client_class, 'pre-deploy') AS class,
        countIf(properties.outcome = 'no_token')      AS no_token,
@@ -1461,12 +1492,33 @@ WHERE event = 'mcp_auth_attempt' AND properties.environment = 'production'
 GROUP BY 1, 2
 ```
 
+```sql
+-- 7.21e — the `direct` remainder, split (14 d). `ua:stock-runtime-no-name`
+-- is unnamed automation on a bare runtime (a health check or a crawler that
+-- never sends initialize); `unlabelled` is what the review actually has to
+-- read — a named client the classifier does not know, or a person on curl /
+-- a browser. Only the unlabelled column can contain a real client that broke.
+SELECT toDate(timestamp) AS day,
+       countIf(properties.client_class_signal = 'ua:stock-runtime-no-name') AS stock_runtime_no_name,
+       countIf(coalesce(properties.client_class_signal, '') = '')            AS unlabelled,
+       uniqIf(properties.user_agent,
+              coalesce(properties.client_class_signal, '') = '')              AS unlabelled_uas,
+       groupUniqArrayIf(properties.client_name,
+              coalesce(properties.client_class_signal, '') = '')              AS unlabelled_names
+FROM events
+WHERE event = 'mcp_auth_attempt' AND properties.environment = 'production'
+  AND properties.outcome != 'ok' AND properties.client_class = 'direct'
+  AND timestamp > now() - INTERVAL 14 DAY
+GROUP BY day ORDER BY day
+```
+
 Reading it, in the daily review: one line of *traffic* — "registry probes:
 N/day from M sources, floor ~K/h" — never an auth finding. Do not block or
 rate-limit any of it: several sources are the registry's own health checks
 and a 401 is what keeps the listing healthy. It becomes a flag only when
-7.21d is non-empty, or when `direct`-class failures jump and 7.21b shows a
-real client behind them. Our own probe is `internal` by its `fgac-auth-probe`
+7.21d is non-empty, or when the *unlabelled* half of `direct` (7.21e) jumps
+and 7.21b shows a real client behind it — the `ua:stock-runtime-no-name`
+half is unnamed automation and moves with the crawler population. Our own probe is `internal` by its `fgac-auth-probe`
 UA (since 2026-09-10; before that its `no_token` rows sat under `node`,
 indistinguishable from glama on the same runtime) and its `invalid_token`
 rows still carry `kid = 'probe'` — keep both exclusions.
