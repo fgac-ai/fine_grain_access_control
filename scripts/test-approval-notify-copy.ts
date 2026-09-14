@@ -9,7 +9,7 @@
  * Run: npx tsx scripts/test-approval-notify-copy.ts (part of `npm run mcp:lint`).
  */
 import {
-  approvalEmailBody, approvalEmailRaw, approvalEmailSubject, emailLinkUrl, notifyDenialLine, sanitizeLine,
+  approvalEmailBody, approvalEmailRaw, approvalEmailSubject, emailLinkUrl, encodeHeaderWord, notifyDenialLine, sanitizeLine,
   NOTIFY_MAX_PER_HOUR, type NotifyLink,
 } from '../src/lib/approvalNotifyCopy';
 
@@ -51,7 +51,10 @@ check('empty agent label falls back', approvalEmailBody({ agentLabel: '', links:
 
 console.log('raw message');
 const raw = approvalEmailRaw({ to: 'owner@example.com', subject, body });
-check('To/Subject headers then a blank line', /^To: owner@example\.com\r\nSubject: [^\r\n]+\r\nContent-Type: text\/plain; charset=utf-8\r\n\r\n/.test(raw));
+check('To/Subject/MIME headers then a blank line', /^To: owner@example\.com\r\nSubject: [^\r\n]+\r\nMIME-Version: 1\.0\r\nContent-Type: text\/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n/.test(raw));
+check('non-ASCII subject is an RFC 2047 encoded word', /\r\nSubject: =\?UTF-8\?B\?[A-Za-z0-9+/=]+\?=\r\n/.test(raw));
+check('the encoded word decodes back to the subject', Buffer.from(raw.match(/Subject: =\?UTF-8\?B\?([A-Za-z0-9+/=]+)\?=/)![1], 'base64').toString('utf8') === subject);
+check('pure-ASCII headers are left readable', encodeHeaderWord('FGAC: plain') === 'FGAC: plain');
 check('a CRLF in the recipient cannot add a header', !approvalEmailRaw({ to: 'a@b.c\r\nBcc: x@y.z', subject: 's', body: '' }).includes('\r\nBcc'));
 
 console.log('denial line');

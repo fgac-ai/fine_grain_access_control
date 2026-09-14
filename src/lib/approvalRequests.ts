@@ -14,7 +14,7 @@
  */
 import { db } from '@/db';
 import { approvalRequests } from '@/db/schema';
-import { and, eq, gt, isNull, sql } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 
 /**
  * Record one mint ATTEMPT. First attempt inserts; retries increment
@@ -101,38 +101,59 @@ export async function markApprovalRequestApproved(requestId: string): Promise<vo
 
 // ─── Out-of-band notification bookkeeping (approvalNotify.ts) ───────────────
 
+/** Whether this request exists and whether its link was already emailed. */
+export async function getApprovalNotificationState(requestId: string): Promise<
+  { kind: 'row'; notifiedAt: Date | null } | { kind: 'missing' } | { kind: 'error' }
+> {
+  try {
+    const row = await db.select({ notifiedAt: approvalRequests.notifiedAt })
+      .from(approvalRequests)
+      .where(eq(approvalRequests.requestId, requestId))
+      .limit(1).then(r => r[0]);
+    return row ? { kind: 'row', notifiedAt: row.notifiedAt } : { kind: 'missing' };
+  } catch (err) {
+    console.error('[approvalRequests] notification state read failed:', err);
+    return { kind: 'error' };
+  }
+}
+
 /**
  * Claim the right to email this request's link: flips `notified_at` from
- * NULL to now() atomically, so two concurrent mints (or a looping agent)
- * cannot both send. Returns `claimed: true` with the stamp, or the existing
- * stamp when the request was already notified. A DB error reads as "already
- * notified" — the safe direction: a lost email costs a channel, a duplicate
- * costs trust.
+ * NULL to now() atomically, and only while the owner is under `maxPerHour`
+ * emails in the last hour — cap and claim in ONE statement, so concurrent
+ * mints cannot each pass a separate count check. Returns the stamp when
+ * claimed; otherwise says why (already emailed, capped, no ledger row, or a
+ * DB error — the last two are delivery failures, never "already emailed").
  */
-export async function claimApprovalNotification(requestId: string): Promise<
-  { claimed: true; notifiedAt: Date | null } | { claimed: false; notifiedAt: Date | null; reason: 'already' | 'missing' | 'error' }
+export async function claimApprovalNotification(requestId: string, userId: string, maxPerHour: number): Promise<
+  { claimed: true; notifiedAt: Date | null }
+  | { claimed: false; notifiedAt: Date | null; reason: 'already' | 'capped' | 'missing' | 'error' }
 > {
   try {
     const [row] = await db.update(approvalRequests)
       .set({ notifiedAt: sql`now()` })
-      .where(and(eq(approvalRequests.requestId, requestId), isNull(approvalRequests.notifiedAt)))
+      .where(and(
+        eq(approvalRequests.requestId, requestId),
+        isNull(approvalRequests.notifiedAt),
+        sql`(SELECT count(*) FROM ${approvalRequests} AS recent
+             WHERE recent.user_id = ${userId} AND recent.notified_at > now() - interval '1 hour') < ${maxPerHour}`,
+      ))
       .returning({ notifiedAt: approvalRequests.notifiedAt });
     if (row) return { claimed: true, notifiedAt: row.notifiedAt };
     const existing = await db.select({ notifiedAt: approvalRequests.notifiedAt })
       .from(approvalRequests)
       .where(eq(approvalRequests.requestId, requestId))
       .limit(1).then(r => r[0]);
-    // No ledger row (the mint record failed): there is nothing to claim on,
-    // and "already emailed" would be a lie — report it as missing instead.
     if (!existing) return { claimed: false, notifiedAt: null, reason: 'missing' };
-    return { claimed: false, notifiedAt: existing.notifiedAt, reason: 'already' };
+    if (existing.notifiedAt) return { claimed: false, notifiedAt: existing.notifiedAt, reason: 'already' };
+    return { claimed: false, notifiedAt: null, reason: 'capped' };
   } catch (err) {
     console.error('[approvalRequests] notification claim failed:', err);
     return { claimed: false, notifiedAt: null, reason: 'error' };
   }
 }
 
-/** Undo a claim whose send did not happen, so the next mint can try again. */
+/** Undo a claim whose send definitely did not happen, so the next mint can try again. */
 export async function releaseApprovalNotification(requestId: string): Promise<void> {
   try {
     await db.update(approvalRequests)
@@ -140,19 +161,5 @@ export async function releaseApprovalNotification(requestId: string): Promise<vo
       .where(eq(approvalRequests.requestId, requestId));
   } catch (err) {
     console.error('[approvalRequests] notification release failed:', err);
-  }
-}
-
-/** Emails sent to this owner in the last hour (the per-owner cap input). */
-export async function countRecentApprovalNotifications(userId: string): Promise<number> {
-  try {
-    const [row] = await db.select({ n: sql<number>`count(*)::int` })
-      .from(approvalRequests)
-      .where(and(eq(approvalRequests.userId, userId), gt(approvalRequests.notifiedAt, sql`now() - interval '1 hour'`)));
-    return row?.n ?? 0;
-  } catch (err) {
-    console.error('[approvalRequests] notification count failed:', err);
-    // Unknown = treat as capped: never risk a burst on a broken read.
-    return Number.MAX_SAFE_INTEGER;
   }
 }

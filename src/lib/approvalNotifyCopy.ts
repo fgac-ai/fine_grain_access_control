@@ -97,9 +97,19 @@ export function approvalEmailBody(opts: { agentLabel: string; links: NotifyLink[
   return lines.join('\n');
 }
 
+/** RFC 2047 encoded-word for a header that may carry non-ASCII (the subject's em dash). */
+export function encodeHeaderWord(value: string): string {
+  if (/^[\x20-\x7e]*$/.test(value)) return value;
+  return `=?UTF-8?B?${Buffer.from(value, 'utf8').toString('base64')}?=`;
+}
+
 /** The RFC 2822 message the Gmail API sends, base64url-encoded by the caller. */
 export function approvalEmailRaw(opts: { to: string; subject: string; body: string }): string {
-  return `To: ${sanitizeLine(opts.to, 254)}\r\nSubject: ${sanitizeLine(opts.subject, 200)}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${opts.body}`;
+  return `To: ${sanitizeLine(opts.to, 254)}\r\n` +
+    `Subject: ${encodeHeaderWord(sanitizeLine(opts.subject, 200))}\r\n` +
+    `MIME-Version: 1.0\r\n` +
+    `Content-Type: text/plain; charset=utf-8\r\n` +
+    `Content-Transfer-Encoding: 8bit\r\n\r\n${opts.body}`;
 }
 
 function whenUtc(d: Date): string {

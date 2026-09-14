@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, uuid, uniqueIndex, jsonb, integer, boolean } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, uuid, uniqueIndex, index, jsonb, integer, boolean } from 'drizzle-orm/pg-core';
 
 // ─── Users ───────────────────────────────────────────────────────────────────
 // Core user table. proxyKey removed — keys now live in proxy_keys table.
@@ -83,7 +83,11 @@ export const approvalRequests = pgTable('approval_requests', {
   // opaque id onto a sheet title themselves (the 2026-09 Picker-cancel leak).
   // First non-empty value wins; never carried in the URL.
   resourceName: text('resource_name'),
-});
+}, (table) => [
+  // The per-owner hourly email cap counts this owner's recent notified_at
+  // stamps on every first mint; keep that a range scan as the ledger grows.
+  index('approval_requests_user_notified_idx').on(table.userId, table.notifiedAt),
+]);
 
 // ─── Email Delegations ───────────────────────────────────────────────────────
 // Tracks cross-user email delegation. Owner grants delegate permission to

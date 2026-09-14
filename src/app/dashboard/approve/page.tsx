@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { headers } from "next/headers";
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { classifyApproveClient, type ApproveClient } from "@/lib/approveClientClass";
-import { EMAIL_LINK_SOURCE_VALUE } from "@/lib/approvalNotifyCopy";
+import { EMAIL_LINK_SOURCE_PARAM, EMAIL_LINK_SOURCE_VALUE } from "@/lib/approvalNotifyCopy";
 import { describeApproval, peekApprovalParams, APPROVAL_PARAMS, type ApprovalPayload, type ApprovalSearchParams } from "@/lib/approvalLinks";
 import { markApprovalRequestOpened, getApprovalRequestResourceName } from "@/lib/approvalRequests";
 import { captureServerEvent } from "@/lib/posthogServer";
@@ -66,12 +66,15 @@ function Card({ children }: { children: React.ReactNode }) {
 
 /** Rebuild the link's own query string, so every redirect can return to the
  *  LIVE approve URL rather than a parameter-less dead end. */
-function linkQuery(params: ApprovalSearchParams): string {
+function linkQuery(params: ApprovalSearchParams, src?: string): string {
   const q = new URLSearchParams();
   if (params.a) q.set(APPROVAL_PARAMS.action, params.a);
   if (params.k) q.set(APPROVAL_PARAMS.key, params.k);
   if (params.r) q.set(APPROVAL_PARAMS.target, params.r);
   if (params.s) q.set(APPROVAL_PARAMS.signature, params.s);
+  // Keep the delivery marker through sign-out / try-again round trips, so
+  // the open that finally converts is still attributed to the email.
+  if (src === EMAIL_LINK_SOURCE_VALUE) q.set(EMAIL_LINK_SOURCE_PARAM, src);
   return q.toString();
 }
 
@@ -115,7 +118,7 @@ export default async function ApprovePage({
     );
   }
   if (params.result === "error") {
-    const q = linkQuery(link);
+    const q = linkQuery(link, params.src);
     return (
       <Card>
         <h1 className="mb-2 text-xl font-bold text-foreground">Approval failed</h1>
@@ -191,7 +194,7 @@ export default async function ApprovePage({
           Sign out and sign back in as <strong>{w.maskedOwnerEmail}</strong> —
           this link stays valid and will bring you right back here.
         </p>
-        <SignOutAndReturn returnTo={`/dashboard/approve?${linkQuery(link)}`} />
+        <SignOutAndReturn returnTo={`/dashboard/approve?${linkQuery(link, params.src)}`} />
       </Card>
     );
   }

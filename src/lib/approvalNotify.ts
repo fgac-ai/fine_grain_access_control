@@ -6,18 +6,23 @@
  * surface that hides or paraphrases the tool result.
  *
  * Invariants:
- *   - ONE email per request id, ever. `claimApprovalNotification` flips
- *     `approval_requests.notified_at` atomically before anything is sent,
- *     so a concurrent mint or a scheduled job re-minting the same request
- *     hourly (observed 2026-09-05 → 09-11) cannot produce a second email.
- *     A send that does not happen releases the claim.
- *   - Owner only. `to` is the key owner's own address and the token is the
- *     owner's own; nothing here can address anyone else, whatever the
- *     denial was about.
+ *   - AT MOST one email per request id. `claimApprovalNotification` flips
+ *     `approval_requests.notified_at` atomically — together with the
+ *     per-owner hourly cap, in one statement — before anything is sent, so a
+ *     concurrent mint or a scheduled job re-minting the same request hourly
+ *     (observed 2026-09-05 → 09-11) cannot produce a second email. The claim
+ *     is released only on a DEFINITE non-send (Gmail answered with an
+ *     error). An ambiguous outcome — timeout, network error — keeps the
+ *     claim: a lost email costs a channel the chat link still covers, a
+ *     duplicate costs trust.
+ *   - Owner only. The message is addressed to the mailbox the token belongs
+ *     to (Gmail's own profile, falling back to the ledger address) and the
+ *     token is the owner's own; nothing here can address anyone else,
+ *     whatever the denial was about.
  *   - Bounded. Per-owner cap of NOTIFY_MAX_PER_HOUR (a batch of N recipients
- *     in one turn is N requests), and the whole attempt is capped at
- *     NOTIFY_BUDGET_MS so a slow Clerk or Gmail round-trip cannot stall the
- *     denial the agent is waiting on.
+ *     in one turn is N requests); each upstream call carries its own short
+ *     timeout so a slow Clerk or Gmail round-trip cannot stall the denial
+ *     the agent is waiting on. Repeat mints cost one SELECT.
  *   - Best-effort. Every failure degrades to "link only", exactly the
  *     response the agent got before this existed. Nothing here throws.
  */
@@ -26,16 +31,15 @@ import {
   type NotifyLink, type NotifyStatus,
 } from './approvalNotifyCopy';
 import {
-  claimApprovalNotification, countRecentApprovalNotifications, releaseApprovalNotification,
+  claimApprovalNotification, getApprovalNotificationState, releaseApprovalNotification,
 } from './approvalRequests';
 import { captureServerEvent } from './posthogServer';
 import { withTimeout } from './upstreamTimeouts';
 
 export type { NotifyLink, NotifyStatus } from './approvalNotifyCopy';
 
-/** Whole-attempt ceiling: token fetch + Gmail send. */
-const NOTIFY_BUDGET_MS = 6_000;
-const GMAIL_SEND_TIMEOUT_MS = 4_000;
+const TOKEN_TIMEOUT_MS = 4_000;
+const GMAIL_TIMEOUT_MS = 4_000;
 
 /** Flip to disable delivery without a deploy (empty/unset = enabled). */
 export function approvalEmailEnabled(): boolean {
@@ -48,6 +52,11 @@ export interface OwnerToken {
   hasGmailScope?: boolean;
 }
 
+export type SendResult =
+  | { ok: true }
+  /** `definite`: Gmail answered and refused — nothing went out, safe to release the claim. */
+  | { ok: false; definite: boolean; error: string };
+
 export interface NotifyOwnerOpts {
   owner: { id: string; email: string; clerkUserId: string };
   /** Connection nickname or client name, for the email's first line. */
@@ -55,10 +64,17 @@ export interface NotifyOwnerOpts {
   /** First entry is the request the claim is made on; the rest ride along. */
   links: NotifyLink[];
   dashboardUrl: string;
-  /** The owner's own Google token, or null when it cannot be fetched. */
+  /**
+   * The owner's own Google grant when the denied call already resolved it
+   * (the target mailbox was the owner's) — saves the Clerk round-trip.
+   * `null` = resolution already failed; `undefined` = not known, fetch it.
+   */
+  ownerGrant?: OwnerToken | null;
+  /** Fetches the owner's own Google token; null when it cannot be had. */
   fetchOwnerToken: () => Promise<OwnerToken | null>;
-  /** Test seam; defaults to the Gmail API. */
-  send?: (token: string, raw: string) => Promise<{ ok: true } | { ok: false; error: string }>;
+  /** Test seams; default to the Gmail API. */
+  send?: (token: string, raw: string) => Promise<SendResult>;
+  resolveMailbox?: (token: string) => Promise<string | null>;
 }
 
 export interface NotifyOwnerResult {
@@ -68,18 +84,39 @@ export interface NotifyOwnerResult {
   subject: string;
 }
 
-async function gmailSendSelf(token: string, raw: string): Promise<{ ok: true } | { ok: false; error: string }> {
+async function gmailSendSelf(token: string, raw: string): Promise<SendResult> {
   try {
     const res = await withTimeout(fetch('https://www.googleapis.com/gmail/v1/users/me/messages/send', {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ raw }),
-    }), GMAIL_SEND_TIMEOUT_MS);
+    }), GMAIL_TIMEOUT_MS);
     if (res.ok) return { ok: true };
     const text = await res.text().catch(() => '');
-    return { ok: false, error: `HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ''}` };
+    // A 5xx may have been accepted upstream before the error surfaced; only a
+    // 4xx is a refusal we can be sure sent nothing.
+    return { ok: false, definite: res.status >= 400 && res.status < 500, error: `HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ''}` };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? `${err.name}: ${err.message}` : String(err) };
+    return { ok: false, definite: false, error: err instanceof Error ? `${err.name}: ${err.message}` : String(err) };
+  }
+}
+
+/**
+ * The address the token actually belongs to. `users.email` can lag the
+ * Clerk primary (the identity-drift population, self-healing since PR #107),
+ * and an approval link must not land in a mailbox the person left behind.
+ * Falls back to the ledger address when Gmail does not answer in time.
+ */
+async function gmailProfileAddress(token: string): Promise<string | null> {
+  try {
+    const res = await withTimeout(fetch('https://www.googleapis.com/gmail/v1/users/me/profile', {
+      headers: { Authorization: `Bearer ${token}` },
+    }), GMAIL_TIMEOUT_MS);
+    if (!res.ok) return null;
+    const data = await res.json() as { emailAddress?: string };
+    return typeof data.emailAddress === 'string' && data.emailAddress.includes('@') ? data.emailAddress : null;
+  } catch {
+    return null;
   }
 }
 
@@ -92,46 +129,43 @@ export async function notifyOwnerOfApprovalLinks(opts: NotifyOwnerOpts): Promise
   if (!primary) return { status: 'skipped_no_links', notifiedAt: null, subject: '' };
   const subject = approvalEmailSubject(primary);
   if (!approvalEmailEnabled()) return { status: 'disabled', notifiedAt: null, subject };
-
   try {
-    return await withTimeout(attempt(opts, primary, subject), NOTIFY_BUDGET_MS);
+    return await attempt(opts, primary, subject);
   } catch (err) {
-    // Budget exceeded (or an unexpected throw): the claim may be held with no
-    // email behind it — release it so the next mint can try again.
-    console.error('[approvalNotify] attempt aborted:', err instanceof Error ? err.message : err);
-    await releaseApprovalNotification(primary.requestId);
+    console.error('[approvalNotify] attempt failed:', err instanceof Error ? err.message : err);
     return { status: 'failed', notifiedAt: null, subject };
   }
 }
 
 async function attempt(opts: NotifyOwnerOpts, primary: NotifyLink, subject: string): Promise<NotifyOwnerResult> {
-  const claim = await claimApprovalNotification(primary.requestId);
+  // Cheap first: a repeat mint answers from one SELECT, no Clerk, no claim.
+  const state = await getApprovalNotificationState(primary.requestId);
+  if (state.kind === 'error' || state.kind === 'missing') return { status: 'failed', notifiedAt: null, subject };
+  if (state.notifiedAt) return { status: 'already_sent', notifiedAt: state.notifiedAt, subject };
+
+  // Grant before claim: a scope-less owner costs no claim/release churn.
+  const grant = opts.ownerGrant !== undefined
+    ? opts.ownerGrant
+    : await withTimeout(opts.fetchOwnerToken(), TOKEN_TIMEOUT_MS).catch(() => null);
+  if (!grant) return { status: 'skipped_token_unavailable', notifiedAt: null, subject };
+  if (grant.hasGmailScope === false) return { status: 'skipped_no_gmail_scope', notifiedAt: null, subject };
+
+  // Claim + cap in one statement, before the send.
+  const claim = await claimApprovalNotification(primary.requestId, opts.owner.id, NOTIFY_MAX_PER_HOUR);
   if (!claim.claimed) {
-    // Only a held claim means an email exists; a missing ledger row or a DB
-    // error is a delivery failure, and the denial must not claim otherwise.
     if (claim.reason === 'already') return { status: 'already_sent', notifiedAt: claim.notifiedAt, subject };
+    if (claim.reason === 'capped') return { status: 'skipped_rate_capped', notifiedAt: null, subject };
     return { status: 'failed', notifiedAt: null, subject };
   }
 
-  const release = async (status: NotifyStatus): Promise<NotifyOwnerResult> => {
-    await releaseApprovalNotification(primary.requestId);
-    return { status, notifiedAt: null, subject };
-  };
-
-  // The claim counts toward the cap the moment it is stamped, so ">" not ">=".
-  const recent = await countRecentApprovalNotifications(opts.owner.id);
-  if (recent > NOTIFY_MAX_PER_HOUR) return release('skipped_rate_capped');
-
-  const grant = await opts.fetchOwnerToken();
-  if (!grant) return release('skipped_token_unavailable');
-  if (grant.hasGmailScope === false) return release('skipped_no_gmail_scope');
-
+  const to = (await (opts.resolveMailbox ?? gmailProfileAddress)(grant.token)) ?? opts.owner.email;
   const body = approvalEmailBody({ agentLabel: opts.agentLabel, links: opts.links, dashboardUrl: opts.dashboardUrl });
-  const raw = Buffer.from(approvalEmailRaw({ to: opts.owner.email, subject, body })).toString('base64url');
+  const raw = Buffer.from(approvalEmailRaw({ to, subject, body })).toString('base64url');
   const sent = await (opts.send ?? gmailSendSelf)(grant.token, raw);
   if (!sent.ok) {
-    console.error('[approvalNotify] Gmail send failed:', sent.error);
-    return release('failed');
+    console.error(`[approvalNotify] Gmail send ${sent.definite ? 'refused' : 'unconfirmed'}:`, sent.error);
+    if (sent.definite) await releaseApprovalNotification(primary.requestId);
+    return { status: 'failed', notifiedAt: null, subject };
   }
 
   captureServerEvent(opts.owner.clerkUserId, 'approval_link_notified', {

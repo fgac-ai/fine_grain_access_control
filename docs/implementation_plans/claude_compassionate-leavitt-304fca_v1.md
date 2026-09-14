@@ -94,10 +94,14 @@ the cluster still not opening.
 
 - Runs in the three mint paths: `policyDenialWithLink`, `sendDenialWithLinks`
   (one email carrying both links), and the `request_access` tool.
-- **One email per `request_id`, ever.** `approval_requests.notified_at` is
+- **At most one email per `request_id`.** `approval_requests.notified_at` is
   claimed atomically (`UPDATE … SET notified_at = now() WHERE request_id = ?
-  AND notified_at IS NULL RETURNING …`) *before* any send, so two concurrent
-  mints cannot both email; a failed send releases the claim. The
+  AND notified_at IS NULL AND <owner's emails in the last hour> < cap
+  RETURNING …`) *before* any send, so two concurrent mints cannot both
+  email and the hourly cap cannot be raced by parallel claims. Only a
+  DEFINITE non-send (Gmail answered 4xx) releases the claim; a timeout or
+  network error keeps it, because a lost email costs a channel the chat
+  link still covers while a duplicate costs trust. The
   deterministic `request_id` is what makes the hourly-job case safe: the
   scheduled job that re-minted one `sheets_expose` request for days would
   have produced exactly one email.
@@ -109,13 +113,20 @@ the cluster still not opening.
 - Skipped without a claim when the owner's grant has no Gmail scope, when
   the token cannot be fetched, or when the cap is hit; the denial text is
   then unchanged (link only). The denial itself never fails because the
-  email did: every step is best-effort with a 6 s ceiling, and the mint
-  path already awaited two DB round-trips.
+  email did: every step is best-effort, each upstream call (Clerk token,
+  Gmail profile, Gmail send) carries a 4 s timeout, and a repeat mint costs
+  one SELECT. When the denied call already resolved the owner's own grant,
+  the notification reuses it instead of a second Clerk fetch.
+- The message is addressed to the mailbox the token belongs to (Gmail's
+  `users/me/profile`, falling back to the ledger address), so a stale
+  `users.email` (the identity-drift population) cannot route an approval
+  link to an address the person left behind.
 
 ### The email
 
 Plain text, `To:` the owner's own address, sent as the owner (the Gmail API
-sets `From` from the token). Subject: `FGAC: approve your agent's request —
+sets `From` from the token); the subject is an RFC 2047 encoded word when
+it carries non-ASCII. Subject: `FGAC: approve your agent's request —
 <one-line grant description>`. Body: what the agent (connection label)
 tried, the approval URL(s) with `&src=email` appended, and a line saying
 that doing nothing keeps the agent blocked. Agent-controlled strings
@@ -150,7 +161,8 @@ Prefix invariants hold: the 🚫 refusal sentence stays first.
 
 ### Schema
 
-`approval_requests.notified_at timestamp` (nullable). Migration 0013.
+`approval_requests.notified_at timestamp` (nullable) plus an index on
+`(user_id, notified_at)` for the hourly cap. Migration 0013.
 
 ## Files
 
