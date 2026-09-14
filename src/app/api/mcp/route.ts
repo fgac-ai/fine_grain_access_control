@@ -709,9 +709,17 @@ async function policyDenialWithLink(
 
 // AGENT_APPROVAL_PROTOCOL lives in src/lib/denialCopy.ts (tested by scripts/test-denial-copy.ts).
 
-/** What the email calls the agent: the connection's nickname, else the MCP client name. */
+/**
+ * What the email calls the agent: the connection's nickname, else the MCP
+ * client's registered name. A connection created without a name carries its
+ * client_id as `clientName` (resolveConnection's fallback), and "72T5NfMm…
+ * just tried to" is not a sentence for a person — an id-shaped name falls
+ * back to the generic label (observed in local QA, 2026-09-14).
+ */
 function agentLabel(conn: ConnectionApproved): string {
-  return conn.nickname || conn.clientName || 'Your AI agent';
+  const name = conn.nickname || conn.clientName || '';
+  const idShaped = /^[A-Za-z0-9_-]{12,}$/.test(name) && !/[aeiou]{2}|\s/i.test(name);
+  return name && !idShaped ? name : 'Your AI agent';
 }
 
 /**
