@@ -489,3 +489,51 @@ attributable to it.
   in whatever browser the person actually uses; only a server-side record
   keyed on the owner can send them back from there — the wall cookie is
   same-browser only
+
+### A24: Link delivery is measurable per request (emailed vs agent-furnished)
+- Run capability 14 A16, then query the user's events for the last hour:
+  `SELECT event, properties.request_id, properties.action,
+  properties.notify_status, properties.link_source, properties.link_count,
+  properties.mint_count FROM events WHERE event IN ('approval_link_minted',
+  'approval_link_notified','approval_link_opened') AND timestamp >= now() -
+  INTERVAL 1 HOUR ORDER BY timestamp`
+- **Expected**: the first two send-denial mints carry `notify_status:
+  'not_due'`; the third carries `'sent'` on BOTH its rows (`send_whitelist`
+  and `send_all`) with ONE `approval_link_notified {channel: 'email',
+  trigger: 'repeat_mint', link_count: 2, mint_count: 3}` row on the
+  `send_whitelist` request id; the fourth carries `'already_sent'` and no
+  second notified row exists. The open from the emailed link carries
+  `link_source: 'email'`; an open from the chat's URL carries `'agent'`. A
+  capped repeat carries `'skipped_rate_capped'` and no notified row; with
+  no sender key every mint carries `'disabled'`. Each sent reminder is also
+  one `proxy_request {service: 'gmail', outcome: 'success'}` row under the
+  sender's proxy key
+- **Regression guard**: `notify_status` must be present on EVERY mint path —
+  policy denials, send denials, and `request_access` — or the delivery split
+  in `monitoring.md` 7.26 silently drops that path into the unlabelled bucket
+
+
+### A25: The refusal that mints no link is measurable, with the refused value
+- Run capability 14 A17, then query the user's events for the last hour:
+  `SELECT event, properties.$mcp_tool_name, properties.denial_code,
+  properties.account_requested, properties.account_refusal_count,
+  properties.notify_status, properties.refusal_count, properties.tool FROM
+  events WHERE event IN ('$mcp_tool_call','account_refusal_notified',
+  'approval_link_minted') AND timestamp >= now() - INTERVAL 1 HOUR ORDER BY
+  timestamp`
+- **Expected**: the four `$mcp_tool_call` rows for the first value carry
+  `outcome: 'denied_by_policy'`, `denial_code: 'account_not_permitted'`,
+  `account_requested` = the value lower-cased, `account_refusal_count` 1, 2,
+  3, 4 in order, and `notify_status` `not_due`, `not_due`, `sent`,
+  `already_sent`; exactly ONE `account_refusal_notified {channel: 'email',
+  trigger: 'account_not_permitted', tool: 'sheets_read_range',
+  refusal_count: 3, usable_account_count: 1}` row, and ONE
+  `proxy_request {service: 'gmail', outcome: 'success'}` row under the
+  sender's key. The different value's row carries `account_refusal_count:
+  1` and `notify_status: 'not_due'`. NO `approval_link_minted` row exists
+  for any of them. With the sender unset every refusal carries
+  `notify_status: 'disabled'` and `account_requested` is still present
+- **Regression guard**: `account_requested` must be present on every
+  caller-chosen `account_not_permitted` refusal — it is the only record of
+  what the task passes (`monitoring.md` 7.26d); before 2026-09-16 that value
+  had to be inferred from `response_chars`

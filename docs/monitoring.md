@@ -1852,3 +1852,146 @@ FROM recorded r
 LEFT JOIN routed ro ON ro.rid = r.rid
 LEFT JOIN opened o ON o.rid = r.rid
 ```
+
+**7.26 — Approval-link reminder email: does the emailed link get more
+interaction than the one the agent was handed?** Added 2026-09-15 with the
+repeat-request reminder (`src/lib/approvalNotify.ts`; sender = FGAC's
+support mailbox, never a user's grant). Per request (`uniq(request_id)`,
+external users, 7 d to 2026-09-12): 128 minted → 71 opened (55%) → 58
+approved; the week before 90 → 41 (46%) → 33. The open step is where every
+lost request is lost, and the people who never open cluster on agent
+surfaces that collapse the tool result. Read per request, never per event
+(`approval_link_opened` fires per render, ~2 rows per request).
+
+```sql
+-- 7.26a — emailed vs agent-only requests: open and approve rates (30 d).
+-- A request is "emailed" if approval_link_notified fired for it; every
+-- other minted request relied on the agent alone. Emailed requests are BY
+-- CONSTRUCTION the ones the agent already failed to deliver (a repeat ask
+-- with no open), so read `pct_opened` for the emailed row against the
+-- never-opened baseline (0%) that those requests would otherwise have had,
+-- not against the agent-only row.
+WITH minted AS (
+  SELECT properties.request_id AS rid, any(properties.action) AS action, min(timestamp) AS first_mint
+  FROM events
+  WHERE event = 'approval_link_minted' AND properties.environment = 'production'
+    AND timestamp > now() - INTERVAL 30 DAY
+    AND person.properties.email NOT IN (/* internal + QA accounts — the same list every §7 query uses, never inline them here */)
+  GROUP BY rid),
+emailed AS (SELECT DISTINCT properties.request_id AS rid FROM events
+  WHERE event = 'approval_link_notified' AND timestamp > now() - INTERVAL 30 DAY),
+opened AS (
+  SELECT properties.request_id AS rid,
+         countIf(toString(properties.link_source) = 'email') > 0 AS via_email,
+         min(timestamp) AS first_open
+  FROM events
+  WHERE event = 'approval_link_opened' AND timestamp > now() - INTERVAL 30 DAY
+  GROUP BY rid),
+appr AS (SELECT DISTINCT properties.request_id AS rid FROM events
+  WHERE event = 'approval_link_approved' AND timestamp > now() - INTERVAL 30 DAY)
+SELECT if(e.rid != '', 'emailed', 'agent_only') AS delivery,
+       count()                                        AS requests,
+       countIf(o.rid != '')                           AS opened,
+       countIf(o.via_email)                           AS opened_via_email,
+       countIf(a.rid != '')                           AS approved,
+       round(100 * countIf(o.rid != '') / count(), 1) AS pct_opened,
+       round(100 * countIf(a.rid != '') / count(), 1) AS pct_approved
+FROM minted m
+LEFT JOIN emailed e ON e.rid = m.rid
+LEFT JOIN opened  o ON o.rid = m.rid
+LEFT JOIN appr    a ON a.rid = m.rid
+GROUP BY delivery
+```
+
+```sql
+-- 7.26b — volume and the cap (7 d): reminders per person per day. Anything
+-- at 3 is the cap doing its job; a person at 3 on several days is an agent
+-- asking for many files repeatedly — look at 7.22 for who.
+SELECT toDate(timestamp) AS d, cityHash64(toString(person_id)) % 100000 AS who,
+       count() AS reminders, uniq(properties.request_id) AS requests,
+       max(properties.mint_count) AS max_asks
+FROM events
+WHERE event = 'approval_link_notified' AND properties.environment = 'production'
+  AND timestamp > now() - INTERVAL 7 DAY
+  AND person.properties.email NOT IN (/* internal + QA accounts */)
+GROUP BY d, who ORDER BY reminders DESC, d DESC LIMIT 20
+```
+
+```sql
+-- 7.26c — delivery health (7 d): mint outcomes by notify_status. `disabled`
+-- everywhere = SUPPORT_FGAC_PROXY_KEY / SUPPORT_SENDER_EMAIL are missing in
+-- that environment; `failed` = FGAC's proxy API or Google refused the send
+-- (a 403 means the support profile lost its send rule; a 401 means the key
+-- was revoked) or it was unconfirmed (server logs: "[approvalNotify]");
+-- `skipped_rate_capped` = the daily cap engaged. The sends themselves are
+-- `proxy_request` rows under the support key — exclude that key's
+-- proxy_key_id (or the support address's account_email) from customer
+-- usage counts.
+SELECT toString(properties.notify_status) AS status, count() AS mints,
+       uniq(properties.request_id) AS requests, uniq(person_id) AS people
+FROM events
+WHERE event = 'approval_link_minted' AND properties.environment = 'production'
+  AND timestamp > now() - INTERVAL 7 DAY
+  AND person.properties.email NOT IN (/* internal + QA accounts */)
+GROUP BY status ORDER BY mints DESC
+```
+
+```sql
+-- 7.26d — the refusal that mints no link (7 d): caller-chosen
+-- account_not_permitted refusals per person, the value the task passes vs.
+-- what the key can use, and whether the owner was emailed. Before 2026-09-16
+-- `account_requested` did not exist and the refused value was recorded
+-- nowhere (a scheduled job: 53 refusals in 6 days, inferred from the
+-- response length). The email fires once EVER per (key, requested value) on
+-- the 3rd refusal in a rolling 24 h; `not_due` on every row of a person
+-- with ≥ 3 refusals in a day means the window reset between them (cadence
+-- > 24 h) or the sender is off (`disabled`). Pair with:
+--   SELECT * FROM account_refusals ORDER BY last_refused_at DESC LIMIT 20
+-- (branch DB or a read-only production query) for the ledger itself.
+SELECT person.properties.email AS who,
+       toString(properties.$mcp_tool_name) AS tool,
+       toString(properties.account_requested) AS requested,
+       count() AS refusals, uniq(toDate(timestamp)) AS days,
+       max(toInt32OrNull(toString(properties.account_refusal_count))) AS max_in_window,
+       groupUniqArray(toString(properties.notify_status)) AS notify,
+       min(timestamp) AS first, max(timestamp) AS last
+FROM events
+WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
+  AND properties.denial_code = 'account_not_permitted'
+  AND timestamp > now() - INTERVAL 7 DAY
+  AND person.properties.email NOT IN (/* internal + QA accounts */)
+GROUP BY who, tool, requested ORDER BY refusals DESC LIMIT 20
+```
+
+```sql
+-- 7.26e — did the account-refusal email change anything (30 d)? For each
+-- emailed person: refusals of that value before vs. after the email, and
+-- whether any call on the key resolved afterwards (account_email set). A
+-- person whose refusals continue unchanged for days after `sent` did not
+-- read the email either, and the next lever is the dashboard, not more mail.
+WITH notified AS (
+  SELECT person_id, min(timestamp) AS emailed_at
+  FROM events WHERE event = 'account_refusal_notified' AND properties.environment = 'production'
+    AND timestamp > now() - INTERVAL 30 DAY
+  GROUP BY person_id
+)
+SELECT person.properties.email AS who, any(n.emailed_at) AS emailed_at,
+       countIf(e.properties.denial_code = 'account_not_permitted' AND e.timestamp < n.emailed_at) AS refusals_before,
+       countIf(e.properties.denial_code = 'account_not_permitted' AND e.timestamp >= n.emailed_at) AS refusals_after,
+       countIf(e.properties.account_email != '' AND e.timestamp >= n.emailed_at) AS resolved_after,
+       max(e.timestamp) AS last_call
+FROM events e JOIN notified n ON n.person_id = e.person_id
+WHERE e.event = '$mcp_tool_call' AND e.timestamp > now() - INTERVAL 30 DAY
+GROUP BY who ORDER BY refusals_after DESC
+```
+
+Before/after: the reminder only fires on a repeat ask that was still
+unopened, so the honest baseline for the emailed row is the pre-deploy open
+rate of *repeat-minted, unopened-at-repeat* requests — which is 0% by
+definition at the moment of the repeat, and ends near 19% of never-opened
+requests ever being re-asked at all (30 d to 2026-09-15: 161 never-opened
+requests, 30 re-minted). The reminder cannot reach the other 131; if
+`opened_via_email` stays near zero after a month while 7.26c shows `sent`
+rows, the email is not being read either and the next lever is the
+dashboard, not more mail.
+

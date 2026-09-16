@@ -35,9 +35,12 @@ import { GOOGLE_FETCH_TIMEOUT_MS, CLERK_TOKEN_TIMEOUT_MS, withTimeout, isUpstrea
 import { classifyMcpClient, classifyTransportRejection, installFingerprint, parseInitializeClientInfo, parseRpcEnvelope, resourceIdHash, type McpClientInfo } from '@/lib/mcpClientSignals';
 import { recordEagerResolve, shouldSkipEagerResolve } from '@/lib/connectionTouchMemo';
 import { after } from 'next/server';
+import { notifyOwnerOfAccountRefusal, notifyOwnerOfApprovalLinks, type NotifyLink } from '@/lib/approvalNotify';
+import { accountRefusalDenialLine, notifyDenialLine } from '@/lib/approvalNotifyCopy';
+import { normalizeRequestedEmail } from '@/lib/accountRefusals';
 import { inSuccessSample, AUTH_SUCCESS_SAMPLE } from '@/lib/authSampling';
 import { ensureDefaultProfile } from '@/db/defaultProfile';
-import { mintApprovalLink, type ApprovalAction } from '@/lib/approvalLinks';
+import { mintApprovalLink, describeApproval, type ApprovalAction, type ApprovalPayload } from '@/lib/approvalLinks';
 import { connectionsDeepLink } from '@/lib/dashboardAgentLinks';
 import { recordApprovalMint, getApprovalRequestResourceName } from '@/lib/approvalRequests';
 import {
@@ -667,8 +670,20 @@ async function policyDenialWithLink(
     const mintCount = await recordApprovalMint({
       requestId, userId: conn.user.id, proxyKeyId, action: action.action, targetHash,
     });
+    // Out-of-band delivery (2026-09-15): when the agent asks for the SAME
+    // link again and the person has still not opened it, FGAC emails the
+    // link from its own support mailbox. Measured 14 d to 2026-09-13, ~half
+    // of minted requests were never opened, and the never-openers cluster
+    // on agent surfaces that collapse the tool result (Claude Code) — the
+    // person never sees the URL however the text is worded. The first
+    // denial still relies on the agent; the email is the repeat's fallback.
+    const notify = await notifyOwnerOfApprovalLinks({
+      owner: conn.user, agentLabel: agentLabel(conn), dashboardUrl: DASHBOARD_URL,
+      links: [{ requestId, action: action.action, url, description: describeApproval(approvalPayloadFor(conn.user.id, proxyKeyId, action, requestId)) }],
+    });
     captureServerEvent(conn.user.clerkUserId, 'approval_link_minted', {
       action: action.action, request_id: requestId, target_hash: targetHash, mint_count: mintCount,
+      notify_status: notify.status,
     });
     addToolCallProps({ approval_request_id: requestId });
     // The user-facing sentence exists because the denial text above is
@@ -678,9 +693,11 @@ async function policyDenialWithLink(
     // clean, so the remaining funnel loss is entirely in getting the click.
     // A quotable, jargon-free line doubles the URL's survival odds in
     // paraphrase and tells the user why clicking is safe.
+    const emailed = notifyDenialLine(notify.status, notify);
     return textResult(
       `${message}\n👉 Share this link with the user to approve it in one click: ${url}\n` +
       `Suggested wording to relay: "FGAC is blocking this until you approve it here: ${url} — one click, and you can revoke it any time from your dashboard."\n` +
+      (emailed ? `${emailed}\n` : '') +
       AGENT_APPROVAL_PROTOCOL,
     );
   } catch (err) {
@@ -690,6 +707,30 @@ async function policyDenialWithLink(
 }
 
 // AGENT_APPROVAL_PROTOCOL lives in src/lib/denialCopy.ts (tested by scripts/test-denial-copy.ts).
+
+/**
+ * What the reminder email calls the agent: the connection's nickname, else
+ * the MCP client's registered name. A connection created without a name
+ * carries its client_id as `clientName` (resolveConnection's fallback), and
+ * "72T5NfMm… asking 3 times" is not a sentence for a person — an id-shaped
+ * name falls back to the generic label (observed in QA, 2026-09-14).
+ */
+function agentLabel(conn: ConnectionApproved): string {
+  const name = conn.nickname || conn.clientName || '';
+  const idShaped = /^[A-Za-z0-9_-]{12,}$/.test(name) && !/[aeiou]{2}|\s/i.test(name);
+  return name && !idShaped ? name : 'Your AI agent';
+}
+
+/** Payload shape `describeApproval` reads, without going through the URL. */
+function approvalPayloadFor(userId: string, proxyKeyId: string, action: ApprovalAction, requestId: string): ApprovalPayload {
+  return {
+    userId, proxyKeyId, action: action.action, requestId,
+    recipient: action.action === 'send_whitelist' ? action.recipient : undefined,
+    spreadsheetId: action.action === 'sheets_expose' || action.action === 'sheets_write' ? action.spreadsheetId : undefined,
+    documentId: action.action === 'docs_expose' || action.action === 'docs_write' ? action.documentId : undefined,
+    resourceName: 'resourceName' in action ? action.resourceName : undefined,
+  };
+}
 
 /**
  * Send denials offer BOTH one-click options: approve just this recipient, or
@@ -706,7 +747,15 @@ async function sendDenialWithLinks(
 ) {
   const lines = [denial.message];
   addToolCallProps({ denial_code: denial.code });
+  // Mint events are buffered until the email outcome is known (they carry
+  // notify_status); the catch below flushes whatever was minted before a
+  // failure so a shown link is never missing from the funnel.
+  const mints: Array<Record<string, unknown>> = [];
   try {
+    // Both links ride in ONE email, keyed on the per-recipient request when
+    // there is one (a new recipient is a new request; the per-owner daily
+    // cap bounds a batch), else on the send-to-anyone request.
+    const emailLinks: NotifyLink[] = [];
     if (denial.deniedRecipient) {
       const one = await mintApprovalLink(DASHBOARD_URL, conn.user.id, proxyKeyId, {
         action: 'send_whitelist', recipient: denial.deniedRecipient,
@@ -716,7 +765,11 @@ async function sendDenialWithLinks(
         requestId: one.requestId, userId: conn.user.id, proxyKeyId,
         action: 'send_whitelist', targetHash: one.targetHash,
       });
-      captureServerEvent(conn.user.clerkUserId, 'approval_link_minted', {
+      emailLinks.push({
+        requestId: one.requestId, action: 'send_whitelist', url: one.url,
+        description: describeApproval(approvalPayloadFor(conn.user.id, proxyKeyId, { action: 'send_whitelist', recipient: denial.deniedRecipient }, one.requestId)),
+      });
+      mints.push({
         action: 'send_whitelist', request_id: one.requestId, target_hash: one.targetHash, via: 'send_denial',
         mint_count: oneMintCount,
       });
@@ -726,13 +779,27 @@ async function sendDenialWithLinks(
     const allMintCount = await recordApprovalMint({
       requestId: all.requestId, userId: conn.user.id, proxyKeyId, action: 'send_all',
     });
-    captureServerEvent(conn.user.clerkUserId, 'approval_link_minted', {
-      action: 'send_all', request_id: all.requestId, via: 'send_denial', mint_count: allMintCount,
+    emailLinks.push({
+      requestId: all.requestId, action: 'send_all', url: all.url,
+      description: describeApproval(approvalPayloadFor(conn.user.id, proxyKeyId, { action: 'send_all' }, all.requestId)),
     });
+    mints.push({ action: 'send_all', request_id: all.requestId, via: 'send_denial', mint_count: allMintCount });
+
+    const notify = await notifyOwnerOfApprovalLinks({
+      owner: conn.user, agentLabel: agentLabel(conn), dashboardUrl: DASHBOARD_URL, links: emailLinks,
+    });
+    for (const props of mints.splice(0)) {
+      captureServerEvent(conn.user.clerkUserId, 'approval_link_minted', { ...props, notify_status: notify.status });
+    }
     lines.push('Present both options and let the user pick; "any recipient" is the convenient choice if they expect to send freely, and it stays revocable from the dashboard rules.');
+    const emailed = notifyDenialLine(notify.status, notify);
+    if (emailed) lines.push(emailed);
     lines.push(AGENT_APPROVAL_PROTOCOL);
   } catch (err) {
     console.error('[MCP] Failed to mint approval link:', err);
+    for (const props of mints.splice(0)) {
+      captureServerEvent(conn.user.clerkUserId, 'approval_link_minted', { ...props, notify_status: 'failed' });
+    }
     lines.push(LINK_UNAVAILABLE_STOP);
   }
   return textResult(lines.join('\n'));
@@ -1556,6 +1623,9 @@ function withToolAnalytics<R extends ToolAnalyticsResult>(
 ) {
   return async (params: unknown, extra: { authInfo?: AuthInfo }): Promise<R> => runWithToolCallProps(async () => {
     const started = Date.now();
+    // Seed the bag with the tool name so code that runs inside the call
+    // (account resolution) can name the tool without a parameter.
+    addToolCallProps({ $mcp_tool_name: tool });
     // Distinct id = the caller's Clerk user id, matching the dashboard's
     // identify() — MCP usage lands on the same PostHog person.
     // Event/property names follow PostHog's canonical MCP Analytics schema
@@ -1675,7 +1745,24 @@ async function resolveAccountAndToken(
       // given, owner's own address not on the key) stays ❌: nothing the
       // caller sent caused it — but it names what would work.
       addToolCallProps({ failure_reason: 'account_not_permitted', denial_code: 'account_not_permitted' });
-      return { error: accountNotPermittedByCaller(targetEmail, usable) };
+      // No link is minted here, so the reminder email on the mint path can
+      // never reach this owner (plan v4): record the refused value and, on
+      // the third refusal of it in 24 h, email the owner once from the
+      // support mailbox naming what the task passes and what would work.
+      const toolName = getToolCallProps().$mcp_tool_name;
+      const notify = await notifyOwnerOfAccountRefusal({
+        owner: conn.user, proxyKeyId: conn.proxyKeyId, agentLabel: agentLabel(conn),
+        requestedAccount: targetEmail, usableAccounts: emails.map(e => e.targetEmail),
+        tool: typeof toolName === 'string' ? toolName : null,
+        dashboardUrl: DASHBOARD_URL,
+      });
+      addToolCallProps({
+        account_requested: normalizeRequestedEmail(targetEmail),
+        account_refusal_count: notify.refusalCount ?? undefined,
+        notify_status: notify.status,
+      });
+      const emailed = accountRefusalDenialLine(notify.status, notify);
+      return { error: accountNotPermittedByCaller(targetEmail, usable) + (emailed ? `\n${emailed}` : '') };
     }
     return resolveFailure('account_not_permitted', accountNotPermittedByDefault(targetEmail, usable));
   }
@@ -3068,11 +3155,19 @@ const handler = createMcpHandler(
         // it — the response should say so rather than ask the agent again
         // (observed in QA 2026-09-08).
         const storedTitle = title ?? (action.action === 'send_whitelist' ? null : await getApprovalRequestResourceName(requestId));
+        const emailPayload = approvalPayloadFor(conn.user.id, conn.proxyKeyId, action, requestId);
+        if (storedTitle && !emailPayload.resourceName) emailPayload.resourceName = storedTitle;
+        const notify = await notifyOwnerOfApprovalLinks({
+          owner: conn.user, agentLabel: agentLabel(conn), dashboardUrl: DASHBOARD_URL,
+          links: [{ requestId, action: action.action, url, description: describeApproval(emailPayload) }],
+        });
         captureServerEvent(conn.user.clerkUserId, 'approval_link_minted', {
           action: action.action, via: 'request_access', request_id: requestId, target_hash: targetHash,
           mint_count: mintCount, has_resource_name: !!storedTitle, resource_name_supplied: !!title,
+          notify_status: notify.status,
         });
         addToolCallProps({ approval_request_id: requestId });
+        const emailed = notifyDenialLine(notify.status, notify);
         return jsonResult({
           status: 'approval_required',
           summary: action.action === 'send_whitelist'
@@ -3081,6 +3176,7 @@ const handler = createMcpHandler(
               ? `Requesting ${type === 'docs_read' ? 'read-only' : 'read & write'} access to document ${storedTitle ? `"${storedTitle}" (${documentId})` : documentId}`
               : `Requesting ${type === 'sheets_read' ? 'read-only' : 'read & write'} access to spreadsheet ${storedTitle ? `"${storedTitle}" (${spreadsheetId})` : spreadsheetId}`,
           approvalUrl: url,
+          ...(emailed ? { emailed } : {}),
           note: 'Nothing has been granted. Show the approval link to the user VERBATIM as a clickable URL — only they can approve it. The link does not expire and stays valid, so re-requesting produces the same URL rather than a new one. Do not retry the original operation until they confirm.'
             + (action.action === 'send_whitelist' ? '' : storedTitle
               ? ` The approval page shows the file as "${storedTitle}".`
