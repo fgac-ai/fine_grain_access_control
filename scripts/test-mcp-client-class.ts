@@ -66,6 +66,21 @@ check('mcp-inventory/0.1 + mcp-inventory-canary → scanner (inventory)', is('mc
 check('AgentPulse on python-httpx → scanner (CamelCase → pulse)', is('python-httpx/0.28.1', 'AgentPulse', 'scanner', 'keyword:pulse'));
 check('rpg-connect-check on node → scanner by exact name', is('node', 'rpg-connect-check', 'scanner', 'name:rpg-connect-check'));
 
+console.log('scanners, the 09-15 direct remainder (after PR #138):');
+check('mcpdd on a bare node UA → scanner by exact name', is('node', 'mcpdd', 'scanner', 'name:mcpdd'));
+check('mcpdd is case-insensitive like every name rule', is('node', 'MCPDD', 'scanner', 'name:mcpdd'));
+check('eyrie-validator/0.1.0 → scanner (validator)', is('eyrie-validator/0.1.0', 'eyrie-validator', 'scanner', 'keyword:validator'));
+check('wormhole-survey on a browser UA → scanner (survey)', is('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36', 'wormhole-survey', 'scanner', 'keyword:survey'));
+check('cadastr-seeder/0.1 → scanner (seeder)', is('cadastr-seeder/0.1', 'cadastr-seeder', 'scanner', 'keyword:seeder'));
+check('LiveAgent with no UA stays plain direct (`agent` is not a tell)', (() => {
+  const r = cls(undefined, 'LiveAgent');
+  return r.client_class === 'direct' && r.client_class_signal === undefined;
+})());
+check('otter on node stays plain direct (named but unidentified)', (() => {
+  const r = cls('node', 'otter');
+  return r.client_class === 'direct' && r.client_class_signal === undefined;
+})());
+
 console.log('direct + ua:stock-runtime-no-name (unnamed automation on a bare runtime):');
 for (const ua of ['Python/3.11 aiohttp/3.14.3', 'Bun/1.1.45', 'python-httpx/0.28.1', 'Go-http-client/2.0', 'node', 'undici', 'python-requests/2.32.3', 'axios/1.7.2', 'Deno/2.1.4']) {
   check(`${ua}, no clientInfo → direct / ua:stock-runtime-no-name`, is(ua, undefined, 'direct', 'ua:stock-runtime-no-name'));

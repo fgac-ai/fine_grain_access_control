@@ -1436,6 +1436,26 @@ remaining 176 `direct` rows, leaving 12 / 17 / 4 unlabelled per day — the
 named-but-unknown set above — and reclassifies zero authenticated pairs
 (`scripts/test-mcp-client-class.ts` pins every string in the table).
 
+**Re-measured 2026-09-15, one day after `ua:stock-runtime-no-name` deployed
+(PR #138).** The stock-runtime rows are labelled as designed (the aiohttp /
+Bun / httpx GET shapes no longer appear in the unlabelled column), and the
+remainder is one source: `client_name = 'mcpdd'` on a bare `node` UA, a
+tokenless POST every 8–10 minutes around the clock — 127 / 148 / 81 rows on
+09-13 / 09-14 / 09-15, 359 since it first appeared on 09-12, **0 with
+`outcome = 'ok'`, 0 `mcp_client_initialize` or `$mcp_tool_call` rows** in 14
+days. It carries no vocabulary, so it is an exact-name rule (`name:mcpdd`).
+The one-off named probes from the same week were each 1–4 rows, never
+authenticated, and are now caught by vocabulary — `eyrie-validator/0.1.0`
+(`keyword:validator`), `wormhole-survey` on a Chrome UA (`keyword:survey`),
+`cadastr-seeder/0.1` (`keyword:seeder`); none of those words appeared on any
+authenticated name or UA in the 14 days before. Still `direct`, unlabelled,
+by design: the `Anthropic` and `mcp` constants above; `LiveAgent` (15
+tokenless POSTs in ten minutes on 09-15, no UA at all — `agent` is not a
+tell); `centinela`, `yado-walker`, `otter` (1–4 rows each, no vocabulary,
+not worth a rule until they recur). On 09-15, the first full day after
+#138, the change labels 82 of the 102 unlabelled `direct` rows (81 mcpdd,
+1 eyrie-validator); the 20 left are LiveAgent 15, `Anthropic` 4, `mcp` 1.
+
 ```sql
 -- 7.21a — daily auth failures by class (14 d). `direct` is the unclassified
 -- remainder: a jump there is either a crawler the classifier misses (add it
