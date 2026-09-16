@@ -49,6 +49,7 @@ import {
   classifyGoogleApiCall, canonicalizeGoogleApiPath, extractSendRecipients, extractDraftSendInfo,
   sheetsApprovalAction, docsApprovalAction, parseDriveFileId,
   templateGoogleApiPath, rawApiFamily, extractGoogleErrorReason,
+  RAW_MODIFY_METHODS, isForwardableGoogleMethod, methodDenial,
   type RawCallClass, type GoogleErrorReason,
 } from './googleApiPolicy';
 import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, kindForMimeType, type DriveFileKind } from '@/lib/driveFileKinds';
@@ -1319,20 +1320,21 @@ function docsDenialAction(perm: FilePermission, documentId: string, isMutating: 
  * mentions denies as not-exposed WITHOUT an approval action: the service is
  * unknown, so no expose action could be minted for it.
  */
-async function checkDriveFilePermission(
+async function driveFileKindFromRules(userId: string, fileId: string): Promise<DriveFileKind | undefined> {
+  const rules = await db.select().from(accessRules).where(eq(accessRules.userId, userId));
+  return ACTIVE_DRIVE_FILE_KINDS.find(k =>
+    rules.some(r => r.service === DRIVE_FILE_KINDS[k].service && (r.targetResourceId === fileId || r.regexPattern === fileId)),
+  );
+}
+
+/** Run the per-file check for a kind already resolved, minting the matching approval action on denial. */
+async function checkResolvedDriveFile(
   conn: ConnectionApproved,
   proxyKeyId: string,
+  kind: DriveFileKind,
   fileId: string,
   isMutating: boolean,
 ): Promise<{ denial: Awaited<ReturnType<typeof policyDenialWithLink>> } | { kind: DriveFileKind; perm: FilePermission }> {
-  const rules = await db.select().from(accessRules).where(eq(accessRules.userId, conn.user.id));
-  const kind = ACTIVE_DRIVE_FILE_KINDS.find(k =>
-    rules.some(r => r.service === DRIVE_FILE_KINDS[k].service && (r.targetResourceId === fileId || r.regexPattern === fileId)),
-  );
-  if (!kind) {
-    addToolCallProps({ denial_code: 'file_not_exposed' });
-    return { denial: textResult(`🚫 Access Denied: File '${fileId}' is not exposed in your FGAC rules. Ask the user to expose the document or spreadsheet via the dashboard picker, or call request_access with the file id.`) };
-  }
   const perm = await checkFilePermission(kind, conn.user.id, proxyKeyId, fileId, isMutating);
   if (!perm.allowed) {
     const action = kind === 'doc'
@@ -1341,6 +1343,83 @@ async function checkDriveFilePermission(
     return { denial: await policyDenialWithLink(conn, proxyKeyId, perm.reason, action) };
   }
   return { kind, perm };
+}
+
+async function checkDriveFilePermission(
+  conn: ConnectionApproved,
+  proxyKeyId: string,
+  fileId: string,
+  isMutating: boolean,
+): Promise<{ denial: Awaited<ReturnType<typeof policyDenialWithLink>> } | { kind: DriveFileKind; perm: FilePermission }> {
+  const kind = await driveFileKindFromRules(conn.user.id, fileId);
+  if (!kind) {
+    addToolCallProps({ denial_code: 'file_not_exposed' });
+    return { denial: textResult(`🚫 Access Denied: File '${fileId}' is not exposed in your FGAC rules. Ask the user to expose the document or spreadsheet via the dashboard picker, or call request_access with the file id.`) };
+  }
+  return checkResolvedDriveFile(conn, proxyKeyId, kind, fileId, isMutating);
+}
+
+/**
+ * Per-file guard for id-addressed Drive file calls (`drive_file` kind:
+ * metadata get/update, permissions, revisions, export, watch, …), mirroring
+ * the REST proxy's "GOOGLE DRIVE PER-FILE ACCESS GUARD": a rule that names
+ * the file decides (Blocked denies; mutations need Read & Write; reads pass
+ * with any rule). Where the two differ is a file NO rule names. The proxy
+ * denies it outright; that is wrong here because FGAC has rule types only
+ * for Sheets and Docs, so a flat denial would strand every other kind
+ * forever — the agent's own `text/plain` creations (drive_create,
+ * `file_created_kind: 'other'`), PDFs the user picked, Slides until that kind
+ * ships. So the route asks Google what the file IS (one metadata GET with the
+ * account's own drive.file token) and lets the answer decide:
+ *   - a Sheets/Docs mimeType → the standard not-exposed denial WITH the
+ *     approval action for the denied level (read → expose, write → write),
+ *     exactly as the typed tools answer — so trashing an unexposed
+ *     spreadsheet is refused and the fix is one click;
+ *   - any other kind → passthrough semantics: Google's per-file drive.file
+ *     grant is the gate, as before (`raw_api_passthrough: true` stamped);
+ *   - 404 on the lookup → the file is invisible to this token (never picked,
+ *     not app-created), which is passthroughErrorResult's id-addressed 🚫
+ *     `file_grant_missing_at_google` answer, returned without a second call.
+ * `drive_file_gate` records which branch decided (`rule` / `mime_gated` /
+ * `mime_other` / `invisible`) so the split is queryable.
+ */
+async function checkDriveFileAccess(
+  conn: ConnectionApproved,
+  resolved: ResolvedAccount,
+  fileId: string,
+  isMutating: boolean,
+): Promise<
+  | { denial: Awaited<ReturnType<typeof policyDenialWithLink>> }
+  | { gate: 'rule'; kind: DriveFileKind; perm: FilePermission }
+  | { gate: 'mime_other' }
+> {
+  const ruleKind = await driveFileKindFromRules(conn.user.id, fileId);
+  if (ruleKind) {
+    addToolCallProps({ drive_file_gate: 'rule' });
+    const check = await checkResolvedDriveFile(conn, resolved.proxyKeyId, ruleKind, fileId, isMutating);
+    return 'denial' in check ? check : { gate: 'rule', kind: check.kind, perm: check.perm };
+  }
+  const meta = await googleFetch(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=mimeType&supportsAllDrives=true`,
+    resolved.token, 'GET', undefined, resolved.targetEmail,
+  );
+  if (!meta.ok) {
+    addToolCallProps({ drive_file_gate: 'invisible' });
+    return { denial: passthroughErrorResult(meta, `drive/v3/files/${fileId}`, resolved) };
+  }
+  const mimeKind = kindForMimeType((meta.data as { mimeType?: unknown })?.mimeType as string | undefined);
+  if (mimeKind) {
+    addToolCallProps({ drive_file_gate: 'mime_gated' });
+    // No rule names this Sheet/Doc: checkFilePermission denies not_exposed
+    // (stamping `${service}_not_exposed` + file_id/file_service) and the
+    // action requests the level the denied operation needs.
+    const check = await checkResolvedDriveFile(conn, resolved.proxyKeyId, mimeKind, fileId, isMutating);
+    if ('denial' in check) return check;
+    // Unreachable in practice (no rule ⇒ not_exposed), but keep the executor total.
+    return { gate: 'rule', kind: check.kind, perm: check.perm };
+  }
+  addToolCallProps({ drive_file_gate: 'mime_other', raw_api_passthrough: true });
+  return { gate: 'mime_other' };
 }
 
 const COMMENT_LIST_FIELDS = 'nextPageToken,comments(id,content,resolved,createdTime,modifiedTime,author(displayName),quotedFileContent(value),replies(id,content,action,createdTime,author(displayName)))';
@@ -1966,6 +2045,15 @@ async function executeRawGoogleCall(
     // the executor stays total over RawCallClass.
     return textResult(cls.reason);
   }
+  // Deletion guard, independent of the tool schema and the classifier: the
+  // `method` type says GET/POST/PUT/PATCH, but this is the last line before
+  // a network call and the product guarantee must not rest on a type alone
+  // (see RAW_MODIFY_METHODS in googleApiPolicy.ts).
+  if (!isForwardableGoogleMethod(method)) {
+    const denial = methodDenial(method);
+    addToolCallProps({ denial_code: denial.code });
+    return textResult(denial.reason);
+  }
 
   // Scope pre-flight, mirroring the dedicated tools: gmail/* needs the Gmail
   // scope; every other family rides drive.file. A token that provably lacks
@@ -2068,6 +2156,26 @@ async function executeRawGoogleCall(
       const commentId = cleanPath.match(/\/comments\/([^/?#]+)/)?.[1];
       return commentsErrorResult(check.kind, result, cls.fileId, commentId && decodeURIComponent(commentId));
     }
+    return jsonResult(result.data);
+  }
+
+  if (cls.kind === 'drive_file') {
+    // Id-addressed Drive file call (metadata get/update, permissions,
+    // revisions, export, watch, …): follows the file's per-file rule like the
+    // REST proxy's Drive guard — see checkDriveFileAccess for the no-rule
+    // policy. Before 2026-09-16 this was scope-only passthrough and a Blocked
+    // spreadsheet could still be trashed via PATCH {trashed:true}.
+    const fid = resolveDriveFileId('file', cls.fileId);
+    if ('denial' in fid) return fid.denial;
+    const access = await checkDriveFileAccess(conn, resolved, fid.id, cls.isMutating);
+    if ('denial' in access) return access.denial;
+    if (access.gate === 'rule') {
+      const result = await withGrantGrace(access.kind, access.perm, () => googleFetch(rawUrl(cleanPath), resolved.token, method, serializeBody(body), resolved.targetEmail));
+      if (!result.ok) return fileGrantErrorResult(access.kind, result, fid.id);
+      return jsonResult(result.data);
+    }
+    const result = await googleFetch(rawUrl(cleanPath), resolved.token, method, serializeBody(body), resolved.targetEmail);
+    if (!result.ok) return passthroughErrorResult(result, cleanPath, resolved);
     return jsonResult(result.data);
   }
 
@@ -2989,7 +3097,10 @@ const handler = createMcpHandler(
       TOOL_DEFS.google_api_modify.name,
       toolConfig(TOOL_DEFS.google_api_modify, {
         path: z.string().describe('API path (e.g. "gmail/v1/users/me/messages/send" or "v4/spreadsheets/1BxiM.../values/Sheet1:append")'),
-        method: z.enum(['POST', 'PUT', 'PATCH']).optional().describe('HTTP method (default: POST)'),
+        // Derived from RAW_MODIFY_METHODS so the schema, the catalog's
+        // freeformMethods, the classifier and the executor cannot drift —
+        // DELETE is refused at every one of them (test-raw-method-guard.ts).
+        method: z.enum(RAW_MODIFY_METHODS).optional().describe('HTTP method (default: POST)'),
         body: z.union([z.string(), z.record(z.string(), z.any())]).optional().describe('Request body (JSON object or string)'),
         account: z.string().optional().describe('Email account to use (see list_accounts; defaults to the primary). Ids are mailbox-specific: an id obtained on one account must be read with that same account passed here.'),
       }),
@@ -3131,8 +3242,8 @@ const handler = createMcpHandler(
             gmailWrite: 'ALLOWED by default via google_api_modify: labels, drafts, messages modify/trash/untrash/batchModify, insert/import — everything the gmail.modify grant covers except sending (whitelisted above), settings writes (Google scopes FGAC does not hold), and permanent deletion (below)',
             sheets: 'DENIED unless a per-spreadsheet rule below exposes the sheet',
             docs: 'DENIED unless a per-document rule below exposes the document',
-            deletion: 'NEVER available through any tool',
-            rawApi: 'google_api_get / google_api_modify expose the Google API surface the grant covers under these same rules; Drive and Slides calls are forwarded subject to the per-file drive.file scope the user granted; POST v4/spreadsheets, POST v1/documents, POST drive/v3/files and POST drive/v3/files/{id}/copy create new files auto-granted Read & Write to this key (a copy requires the source file to be exposed); APIs outside the grant (People/Contacts, Calendar, Tasks, …) are refused with a clear denial',
+            deletion: 'NEVER available through any tool — DELETE is rejected by the tool schema and again server-side, and Gmail messages/batchDelete is refused; trash (reversible) is allowed where the file or message rule permits writes',
+            rawApi: 'google_api_get / google_api_modify expose the Google API surface the grant covers under these same rules; Drive calls addressed to a file by id (drive/v3/files/{id} metadata, rename/trash, permissions, revisions, export) follow that file\'s rule — a Sheet or Doc needs a rule (Read & Write for changes), other file kinds ride the per-file drive.file scope the user granted; Drive listing is never gated; Slides calls are forwarded under drive.file; POST v4/spreadsheets, POST v1/documents, POST drive/v3/files and POST drive/v3/files/{id}/copy create new files auto-granted Read & Write to this key (a copy requires the source file to be exposed); APIs outside the grant (People/Contacts, Calendar, Tasks, …) are refused with a clear denial',
           },
           rules: applicableRules.map(r => ({
             name: r.ruleName,

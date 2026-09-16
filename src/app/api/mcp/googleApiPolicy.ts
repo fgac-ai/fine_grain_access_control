@@ -30,17 +30,54 @@ export type RawCallClass =
   | { kind: 'file_comments'; fileId: string; isMutating: boolean }
   | { kind: 'drive_copy'; fileId: string }
   | { kind: 'drive_create' }
+  | { kind: 'drive_file'; fileId: string; isMutating: boolean }
   | { kind: 'passthrough'; family: string; isMutating: boolean }
   | { kind: 'denied'; reason: string; code: DenialCode; family?: string };
 
 /** Machine-readable denial reasons, stamped onto $mcp_tool_call as `denial_code`. */
 export type DenialCode =
+  | 'raw_api_method_unsupported'
   | 'raw_api_batch_unsupported'
   | 'raw_api_family_unsupported'
   | 'gmail_write_unsupported'
   | 'gmail_settings_unsupported'
   | 'file_id_malformed'
   | 'file_id_wrong_kind';
+
+/**
+ * The HTTP methods the raw tools forward, and nothing else. "Deletion is
+ * NEVER available through any tool" (get_my_permissions.defaults.deletion) is
+ * a product guarantee, and until 2026-09-16 it rested on the `method` zod
+ * enum of google_api_modify alone. Google would not backstop a slip: the
+ * drive.file grant accepts `files.delete` (permanent, no trash) on every file
+ * the app created or the user picked, and `files/trash` (emptyTrash) is
+ * DELETE-only. So the method set is defined once here, the tool schema and
+ * the tool catalog (`freeformMethods`) derive from it, the classifier refuses
+ * anything outside it before any account is resolved, and the executor checks
+ * again — a future enum edit cannot silently open deletion
+ * (`scripts/test-raw-method-guard.ts` pins all four layers).
+ */
+export const RAW_READ_METHODS = ['GET'] as const;
+export const RAW_MODIFY_METHODS = ['POST', 'PUT', 'PATCH'] as const;
+export type RawGoogleMethod = (typeof RAW_READ_METHODS)[number] | (typeof RAW_MODIFY_METHODS)[number];
+const FORWARDABLE_GOOGLE_METHODS: ReadonlySet<string> = new Set<string>([...RAW_READ_METHODS, ...RAW_MODIFY_METHODS]);
+
+/** Exact-case check: the zod enum is case-sensitive, and so is this. */
+export function isForwardableGoogleMethod(method: string): method is RawGoogleMethod {
+  return FORWARDABLE_GOOGLE_METHODS.has(method);
+}
+
+/** The refusal every layer returns for a non-forwardable method. */
+export function methodDenial(method: string): RawCallClass & { kind: 'denied' } {
+  const isDelete = method.toUpperCase() === 'DELETE';
+  return {
+    kind: 'denied',
+    code: 'raw_api_method_unsupported',
+    reason: isDelete
+      ? '🚫 Access Denied: DELETE is never available through FGAC — permanent deletion is a product guarantee (get_my_permissions: deletion NEVER available). Reversible alternatives are allowed: move Gmail messages to trash (POST …/messages/{id}/trash) and trash Drive files (PATCH drive/v3/files/{id} {"trashed":true}); the user can empty trash in Google directly.'
+      : `🚫 Access Denied: HTTP method '${method}' is not forwarded by FGAC. google_api_get forwards GET; google_api_modify forwards ${RAW_MODIFY_METHODS.join(', ')}.`,
+  };
+}
 
 /**
  * Google API families FGAC's OAuth grant can never authorize. The grant is
@@ -102,6 +139,10 @@ export function extractDocsDocumentId(path: string): string | null {
  * (query string allowed); `method` is the HTTP method the tool forwards.
  */
 export function classifyGoogleApiCall(rawPath: string, method: string): RawCallClass {
+  // Method gate first: the tool schema already rejects DELETE, but the
+  // classifier must not depend on it (see RAW_MODIFY_METHODS).
+  if (!isForwardableGoogleMethod(method)) return methodDenial(method);
+
   const path = canonicalizeGoogleApiPath(rawPath).split(/[?#]/)[0];
   let segments = path.split('/').filter(Boolean).map(s => s.toLowerCase());
 
@@ -244,6 +285,25 @@ export function classifyGoogleApiCall(rawPath: string, method: string): RawCallC
     return { kind: 'drive_create' };
   }
 
+  // Every other call addressed to ONE Drive file by id — metadata get/update
+  // (rename, trash/untrash, move), permissions (share), revisions, export,
+  // watch, labels — is an access to that file and follows its per-file rule,
+  // exactly as the REST proxy's Drive guard has always required. Until
+  // 2026-09-16 these were scope-only passthrough: a spreadsheet whose rule was
+  // Blocked could still be trashed via PATCH {trashed:true} through this
+  // route, and in production an agent renamed, shared and trashed files as
+  // passthrough. Files no rule names are resolved by mimeType in the route
+  // (Sheets/Docs → not-exposed denial with an approval link; other kinds
+  // ride the drive.file grant, since FGAC has no rule type for them).
+  // `generateIds` is an id-less discovery verb in the id slot and stays
+  // passthrough, as does listing (`GET drive/v3/files`, no id) — discovery is
+  // never gated. `files/trash` (emptyTrash) is DELETE-only and never gets here.
+  // `upload/drive/v3/files/{id}` (media content update) is the same file.
+  const fileMatch = path.replace(/^upload\//i, '').match(/^drive\/v3\/files\/([^/?#]+)(\/|$)/i);
+  if (fileMatch && fileMatch[1].toLowerCase() !== 'generateids') {
+    return { kind: 'drive_file', fileId: decodeURIComponent(fileMatch[1]), isMutating };
+  }
+
   // Unknown API families pass through (2026-08-19 posture change: classify
   // usage instead of blocking it — enforcement gets built when demand shows
   // up). Google's own OAuth scopes are the backstop: the token can only reach
@@ -325,6 +385,7 @@ export function rawApiFamily(cls: RawCallClass): string | null {
       return 'drive_comments';
     case 'drive_copy':
     case 'drive_create':
+    case 'drive_file':
       return 'drive/v3';
     case 'passthrough':
       return cls.family;

@@ -514,7 +514,7 @@ real large-payload demand per tool.
 classification time, denials included — `raw_api_kind` (the
 `classifyGoogleApiCall` result: `sheets`, `sheets_create`, `docs`,
 `docs_create`, `gmail_read`, `gmail_send`, `gmail_draft_send`, `gmail_write`,
-`file_comments`, `drive_copy`, `drive_create`, `passthrough`, `denied`),
+`file_comments`, `drive_copy`, `drive_create`, `drive_file`, `passthrough`, `denied`),
 `raw_api_family` (Google product: `gmail`, `spreadsheets`, `documents`,
 `slides`, or the classifier's first-two-segments family for passthroughs;
 omitted on denials, which carry `denial_code` — except
@@ -551,6 +551,36 @@ trend queries must not compare across the deploy. New code
 `gmail.settings.*` scopes (family `gmail` kept on both, like the
 family-unsupported denials). `messages/batchModify`, `batchDelete`, `insert`,
 and `import` are new literal template values (previously `messages/{id}`).
+
+Since mcp-drive-perfile-guard (2026-09-16): every raw call addressed to ONE
+Drive file by id — `drive/v3/files/{id}` metadata GET/PATCH/PUT (rename,
+trash/untrash, move), `/permissions`, `/revisions`, `/export`, `/watch`, the
+`upload/` media-update variant — lands as `raw_api_kind: 'drive_file'`
+(family `drive/v3`) instead of `passthrough`, and runs the per-file guard the
+REST proxy has always had. Historical `passthrough` rows with a
+`drive/v3/files/{id}…` endpoint template are this kind's pre-deploy volume;
+listing (`GET drive/v3/files`), `generateIds`, `about`, `changes` and `drives`
+stay `passthrough`. The new prop `drive_file_gate` says which branch decided:
+`rule` (a sheets/docs rule names the file — the standard per-file denial
+codes `sheets_*` / `docs_*` apply, plus `file_id` / `file_service`),
+`mime_gated` (no rule, but Google reports a Sheets/Docs mimeType → the
+not-exposed denial with an approval link — this is the branch that closes the
+"trash an unexposed spreadsheet" hole), `mime_other` (no rule, any other
+mimeType → forwarded under drive.file, `raw_api_passthrough: true` kept so
+the passthrough demand series stays continuous), `invisible` (the metadata
+lookup 404ed → `denial_code: 'file_grant_missing_at_google'`, answered without
+a second Google call). Passthrough-id 404 wording is unchanged. Counting
+`mime_other` over time is the demand signal for per-file rules on other kinds
+(Slides, PDFs).
+
+New denial code `raw_api_method_unsupported` (outcome `denied_by_policy`,
+family null): a raw call with a method outside GET/POST/PUT/PATCH — in
+practice DELETE — refused by the classifier before account resolution, and
+again by the executor. The tool schema already rejects such a call at the MCP
+layer (the SDK returns a validation error the client sees as `isError`, with
+no `$mcp_tool_call` denial row), so this code appearing at all means a client
+reached the handler with a method the schema should have stopped — treat any
+non-zero count as a regression alarm, not demand.
 
 **`client_name`:** populated from the MCP `initialize` handshake's
 clientInfo — the auth layer parses it (the only request that carries it in
