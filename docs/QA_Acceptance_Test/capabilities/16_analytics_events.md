@@ -436,3 +436,56 @@ attributable to it.
   failed post-pick verification emitted nothing — the 8-second retry loop one
   launch-cohort user ran 12 times (PostHog, 2026-08-31) was only visible as
   server-side `approval_link_opened` events with no pageview
+
+### A22: The approval sign-in wall is measurable
+- Sign out of FGAC, open an approval link that CANNOT route — one with an
+  invalid signature (`/dashboard/approve?a=sheets_expose&k=<any uuid>&r=x&s=bad`)
+  — so Clerk redirects to sign-in, then sign in from the plain `/dashboard`
+  URL (not from the redirect) so you land on a profile page. A real,
+  owner-linked link would be intercepted by A23's router and land on the
+  approve page instead (where `sign_in_completed` never fires); the
+  unroutable link isolates the lost-context measurement. Query:
+  `SELECT event, properties.client, properties.navigation, properties.action,
+  properties.target_hash, properties.after_approval_wall,
+  properties.approval_wall_action, properties.landing_path FROM events WHERE
+  event IN ('approval_sign_in_wall','sign_in_completed') AND timestamp >= now()
+  - INTERVAL 20 MINUTE ORDER BY timestamp`
+- **Expected**: an `approval_sign_in_wall` row (distinct id
+  `anonymous-approve-wall`) with `navigation: true`, the link's `action`, a
+  16-char `target_hash` (none for `send_all`), and `client: 'claude_desktop'`
+  from the built-in pane (`browser` from a real Chrome via Path B); then a
+  `sign_in_completed` row with `after_approval_wall: true`,
+  `approval_wall_action` equal to the link's action, `landing_path` under
+  `/dashboard/agents/`, and `client` set. The `fgac_approval_wall` cookie is
+  gone after the sign-in event fires. A signed-in visit to the approve page
+  with the cookie present clears it without firing `sign_in_completed`. A
+  non-browser fetch of the link (agent UA, `Accept: */*`) records
+  `navigation: false, client: 'agent'` and still gets Clerk's 404. On a dev
+  Clerk instance the first cookie-less visit is answered by Clerk's
+  dev-browser handshake before middleware sees it — retry the link once
+- **Why**: the redirect happens before any page code runs, so this hop had no
+  row at all and the whole class (Claude desktop's in-app browser holds no
+  FGAC session, so every link click from it lands here) read as "minted,
+  never opened". 15 of 110 never-opened requests since 2026-09-09 were
+  owners who signed in within the hour and landed on the profile page
+
+### A23: A signed-in owner is routed back to the approval that hit the wall
+- Mint a REAL approval link for the signed-in QA user (capability 15 A8,
+  `request_access` for a sheet, via the MCP endpoint — the ledger row must
+  exist). Sign out, open the link so it bounces to Clerk sign-in (do not sign
+  in there), then sign in from the plain `/dashboard` URL — or, for the
+  cross-browser case, fetch the link signed-out with curl and a browser UA
+  (`Accept: text/html`, `Sec-Fetch-Dest: document`) and then visit
+  `/dashboard` in a pane that is already signed in as that user. Then visit
+  `/dashboard` a second time
+- **Expected**: the first `/dashboard` visit lands on `/dashboard/approve?a=…`
+  — the link itself, rendering the approval — and PostHog carries
+  `approval_wall_recorded {recorded: true, request_id}` followed by
+  `approval_wall_routed {request_id, seconds_since_wall}` for the same
+  request. The second `/dashboard` visit lands on the profile page (routed
+  once). A link with a bad signature records nothing (`recorded` never
+  fires) and routes nowhere. A hit older than 30 minutes does not route
+- **Why**: the lost-context sign-in ends on `/dashboard` (Clerk's Home URL)
+  in whatever browser the person actually uses; only a server-side record
+  keyed on the owner can send them back from there — the wall cookie is
+  same-browser only

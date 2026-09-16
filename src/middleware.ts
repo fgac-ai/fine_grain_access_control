@@ -2,10 +2,21 @@ import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server';
 import { NextResponse } from 'next/server';
 import type { NextFetchEvent, NextRequest } from 'next/server';
 import { MCP_PROFILE_PATH_RE } from '@/lib/profileSlugs';
+import {
+  APPROVAL_WALL_COOKIE,
+  APPROVAL_WALL_COOKIE_MAX_AGE_S,
+  APPROVAL_WALL_DISTINCT_ID,
+  APPROVAL_WALL_EVENT,
+  describeApprovalWallHit,
+  encodeApprovalWallCookie,
+  isApprovalWallCandidate,
+  markerMatchesHit,
+} from '@/lib/approvalWall';
+import { captureEdgeEvent } from '@/lib/posthogEdge';
 
 const isProtectedRoute = createRouteMatcher(['/dashboard(.*)']);
 
-const clerkHandler = clerkMiddleware(async (auth, req) => {
+const clerkHandler = clerkMiddleware(async (auth, req, event) => {
   const url = req.nextUrl.clone();
   const hostname = url.hostname;
 
@@ -44,9 +55,86 @@ const clerkHandler = clerkMiddleware(async (auth, req) => {
   }
 
   if (isProtectedRoute(req)) {
+    // Approval sign-in wall (src/lib/approvalWall.ts). A signed-out visit to
+    // an approval link never reaches the page — this redirect is the only
+    // place it can be observed. The event carries action + target_hash (the
+    // join to approval_link_minted) and the client class (Claude desktop's
+    // in-app browser holds no FGAC session, so it hits this wall every time);
+    // the cookie lets sign_in_completed say "signed in after a wall hit and
+    // landed somewhere other than the approve page" in one row.
+    if (isApprovalWallCandidate(url)) {
+      const { userId } = await auth();
+      if (userId) {
+        // Context reached the page: retire any marker so a later, unrelated
+        // sign-in in this browser is not attributed to this wall hit.
+        if (req.cookies.has(APPROVAL_WALL_COOKIE)) {
+          const res = NextResponse.next();
+          res.cookies.delete(APPROVAL_WALL_COOKIE);
+          return res;
+        }
+        return;
+      }
+      const hit = await describeApprovalWallHit(url, req.headers);
+      // One row per wall hit, not per bounce: a browser stuck in a sign-in
+      // callback loop re-hits this wall every few seconds (QA 2026-09-16 saw
+      // 28 rows from one sign-in on a dev instance). A fresh marker for the
+      // same request means this hit is already counted.
+      const repeat = markerMatchesHit(req.cookies.get(APPROVAL_WALL_COOKIE)?.value, hit);
+      if (!repeat) {
+        event.waitUntil(captureEdgeEvent(APPROVAL_WALL_DISTINCT_ID, APPROVAL_WALL_EVENT, { ...hit }));
+        // Record the hit against the link's owner so /dashboard can route
+        // them back after they sign in — in ANY browser. The edge has no
+        // database; the route verifies the link's signature against the
+        // key's owner before writing, so this needs no secret. People only:
+        // an agent fetching the link is not an owner about to sign in.
+        if (hit.navigation && !hit.agent_driven) {
+          event.waitUntil(recordWallHit(url));
+        }
+      }
+      // The marker rides on Clerk's own sign-in redirect. `auth.protect()`
+      // THROWS a control-flow error that clerkMiddleware turns into the
+      // redirect (a 404 for non-document fetches), so the cookie cannot be
+      // attached here — the outer wrapper below reads it back off `req` and
+      // sets it on whatever redirect Clerk produced.
+      if (hit.navigation && !repeat) pendingWallMarkers.set(req, encodeApprovalWallCookie(hit));
+    }
     await auth.protect();
   }
 });
+
+/** Hand the link's own params to the Node-runtime recorder (fire-and-forget). */
+function recordWallHit(url: URL): Promise<void> {
+  const p = url.searchParams;
+  const body = JSON.stringify({ a: p.get('a'), k: p.get('k'), r: p.get('r'), s: p.get('s') });
+  return fetch(`${url.origin}/api/approval-wall`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body,
+  })
+    .then(() => undefined)
+    .catch(err => {
+      console.warn('[middleware] approval wall record failed:', err instanceof Error ? err.message : err);
+    });
+}
+
+/** Wall hits whose marker cookie still has to be attached to Clerk's redirect
+ *  (keyed by the request object, which Clerk passes through unchanged). */
+const pendingWallMarkers = new WeakMap<NextRequest, string>();
+
+function attachWallMarker(req: NextRequest, res: Response | null | undefined | void): void {
+  const marker = pendingWallMarkers.get(req);
+  if (!marker || !res) return;
+  pendingWallMarkers.delete(req);
+  if (res.status < 300 || res.status > 399 || !(res instanceof NextResponse)) return;
+  res.cookies.set({
+    name: APPROVAL_WALL_COOKIE,
+    value: marker,
+    maxAge: APPROVAL_WALL_COOKIE_MAX_AGE_S,
+    path: '/',
+    sameSite: 'lax',
+    secure: req.nextUrl.protocol === 'https:',
+  });
+}
 
 /**
  * Clerk's decodeJwt (@clerk/backend 3.4.7, chunk-HVNR6UQP) JSON-parses the
@@ -62,7 +150,9 @@ const clerkHandler = clerkMiddleware(async (auth, req) => {
  */
 export default async function middleware(req: NextRequest, event: NextFetchEvent) {
   try {
-    return await clerkHandler(req, event);
+    const res = await clerkHandler(req, event);
+    attachWallMarker(req, res);
+    return res;
   } catch (err) {
     const hasBearer = req.headers.get('authorization')?.toLowerCase().startsWith('bearer ');
     if (!(err instanceof SyntaxError) || !hasBearer) throw err;

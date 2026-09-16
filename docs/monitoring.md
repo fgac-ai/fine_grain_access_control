@@ -1725,3 +1725,130 @@ non-default profiles in a week by three different people; an organization
 2+-connection population moving a connection off the Default Profile. A
 `reason` other than `slug_clash` / `no_delegation` means the dialog refused
 something it cannot explain — read `createProxyKey` before calling it a bug.
+
+**7.25 — Approval sign-in wall (links that never reach the page).** Added
+2026-09-16. `/dashboard/approve` is Clerk-protected, so a SIGNED-OUT visit to an
+approval link is redirected to sign-in before the page renders and
+`approval_link_opened` never fires. That hop is what Claude desktop's in-app
+browser takes on every link click (it holds no FGAC session), and until now it
+was invisible: sized 2026-09-15, 15 of the 110 never-opened requests since
+2026-09-09 had the owner sign in within the hour, every one landing on the
+default profile page — the approval context was lost between the embedded
+browser and the one they actually signed in with. Two new signals:
+`approval_sign_in_wall` (edge middleware, pre-auth, joins to the mint on
+`action` + `target_hash`) and `after_approval_wall` on `sign_in_completed`
+(the marker cookie survived to a dashboard page = signed in somewhere other
+than the approve page). The first query answers "how many people hit the
+wall, and did the request get opened afterwards"; the second answers "how
+many sign-ins were lost-context sign-ins, and from which client".
+
+```sql
+-- wall hits (people, document navigations) → did the same request get opened afterwards?
+WITH walls AS (
+  SELECT toString(properties.action) AS action, toString(properties.target_hash) AS th,
+         min(timestamp) AS first_wall, argMin(toString(properties.client), timestamp) AS client, count() AS hits
+  FROM events
+  WHERE event = 'approval_sign_in_wall'
+    AND properties.environment = 'production'
+    AND toString(properties.navigation) = 'true'
+    AND properties.client != 'agent'
+    AND timestamp >= now() - INTERVAL 30 DAY
+  GROUP BY action, th
+),
+minted AS (
+  SELECT toString(properties.action) AS action, toString(properties.target_hash) AS th,
+         any(toString(properties.request_id)) AS rid
+  FROM events
+  WHERE event = 'approval_link_minted' AND properties.environment = 'production'
+    AND timestamp >= now() - INTERVAL 60 DAY
+  GROUP BY action, th
+),
+opened AS (
+  SELECT toString(properties.request_id) AS rid, min(timestamp) AS first_open
+  FROM events
+  WHERE event = 'approval_link_opened' AND properties.environment = 'production'
+    AND properties.client != 'agent' AND timestamp >= now() - INTERVAL 30 DAY
+  GROUP BY rid
+)
+SELECT w.client AS client, count() AS wall_requests, sum(w.hits) AS wall_hits,
+       countIf(o.first_open > w.first_wall) AS opened_after_wall,
+       round(100.0 * countIf(o.first_open > w.first_wall) / count(), 1) AS pct_recovered
+FROM walls w
+LEFT JOIN minted m ON m.action = w.action AND m.th = w.th
+LEFT JOIN opened o ON o.rid = m.rid
+GROUP BY client
+ORDER BY wall_requests DESC
+```
+
+`send_all` requests carry no target, so their `target_hash` is empty and every
+user's send_all wall collapses onto one join key — read that row as an upper
+bound. The `minted` window is longer than the `walls` window on purpose: a link
+minted last month can hit the wall today.
+
+```sql
+-- lost-context sign-ins: signed in after a wall hit, landed on a dashboard page
+SELECT toString(properties.client) AS client, count() AS sign_ins,
+       countIf(toString(properties.after_approval_wall) = 'true') AS after_wall,
+       round(100.0 * countIf(toString(properties.after_approval_wall) = 'true') / count(), 1) AS pct_after_wall,
+       groupUniqArrayIf(toString(properties.landing_path), toString(properties.after_approval_wall) = 'true') AS landed_on,
+       round(avgIf(toFloat64OrNull(toString(properties.approval_wall_age_s)), toString(properties.after_approval_wall) = 'true')) AS avg_wall_to_sign_in_s
+FROM events
+WHERE event = 'sign_in_completed'
+  AND properties.environment = 'production'
+  AND timestamp >= now() - INTERVAL 30 DAY
+  AND person.properties.email NOT IN (/* internal + QA accounts: the same list every query in §7 uses */)
+GROUP BY client
+ORDER BY sign_ins DESC
+```
+
+The cookie is same-browser only, so `after_wall` counts the case where the
+person signed in with the same browser that hit the wall (the pane, or a real
+browser after copying the accounts.* URL into it while signed out). The
+cross-browser case — wall in the pane, already signed in elsewhere, so no
+sign-in happens at all — shows up only in the first query as a wall request
+with no open. Both together are the size of the lost-context problem; the
+pending-approvals dashboard surface (implementation plan
+`claude_fgac-signin-context-loss-dee31b`) is judged working if
+`pct_recovered` rises and `after_wall` sign-ins start landing on
+`/dashboard/approve` (which would mean the redirect kept its context) or
+stop mattering because the banner picks the request up.
+
+Routing (shipped in the same branch, `approval_wall_recorded` →
+`approval_wall_routed`): how many wall hits by people were filed under their
+owner, and how many of those owners were then sent back to the approval by
+`/dashboard`. A recorded hit with no route within the hour is an owner who
+did not sign in (or signed in somewhere `/dashboard` never loaded).
+
+```sql
+-- wall hits recorded against an owner → routed back → opened
+WITH recorded AS (
+  SELECT toString(properties.request_id) AS rid, min(timestamp) AS first_recorded
+  FROM events
+  WHERE event = 'approval_wall_recorded' AND properties.environment = 'production'
+    AND toString(properties.recorded) = 'true' AND timestamp >= now() - INTERVAL 30 DAY
+  GROUP BY rid
+),
+routed AS (
+  SELECT toString(properties.request_id) AS rid, min(timestamp) AS first_routed,
+         min(toFloat64OrNull(toString(properties.seconds_since_wall))) AS secs
+  FROM events
+  WHERE event = 'approval_wall_routed' AND properties.environment = 'production'
+    AND timestamp >= now() - INTERVAL 30 DAY
+  GROUP BY rid
+),
+opened AS (
+  SELECT toString(properties.request_id) AS rid, min(timestamp) AS first_open
+  FROM events
+  WHERE event = 'approval_link_opened' AND properties.environment = 'production'
+    AND properties.client != 'agent' AND timestamp >= now() - INTERVAL 30 DAY
+  GROUP BY rid
+)
+SELECT count() AS recorded_requests,
+       countIf(ro.first_routed > r.first_recorded) AS routed,
+       countIf(o.first_open > r.first_recorded) AS opened_after,
+       round(100.0 * countIf(ro.first_routed > r.first_recorded) / count(), 1) AS pct_routed,
+       round(median(ro.secs)) AS median_wall_to_route_s
+FROM recorded r
+LEFT JOIN routed ro ON ro.rid = r.rid
+LEFT JOIN opened o ON o.rid = r.rid
+```
