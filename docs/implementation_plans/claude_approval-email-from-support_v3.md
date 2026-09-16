@@ -40,7 +40,15 @@ using a customer's grant.
 ## What Ken must provision for production
 
 1. Sign up support@fgac.ai on fgac.ai with Google, Gmail scope included.
-2. Create a profile ("FGAC reminders"), attach a Send to Anyone rule,
-   create a key.
-3. Vercel Production env, no quotes: `SUPPORT_FGAC_PROXY_KEY=<that key>`,
+2. Dashboard → "+ New profile" named `FGAC reminders`, mailbox access =
+   support@fgac.ai only. A profile IS its key (one bearer per profile;
+   there is no separate key label).
+3. On that profile: "+ Apply a rule" → "+ Create a new rule…" → Gmail
+   send whitelist with pattern `*` (the "Enable sending to anyone" quick-add
+   is Default-Profile-only, and the Default Profile should NOT be the
+   sender). Then "Reveal Key".
+4. Vercel Production env, no quotes: `SUPPORT_FGAC_PROXY_KEY=<that key>`,
    `SUPPORT_SENDER_EMAIL=support@fgac.ai`. Deploy.
+5. Add support@fgac.ai to the internal-account exclusion list used by the
+   analytics queries and the daily review (its `proxy_request` rows are
+   FGAC's own traffic).

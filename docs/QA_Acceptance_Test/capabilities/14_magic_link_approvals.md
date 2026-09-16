@@ -175,8 +175,10 @@
   FGAC proxy key on a profile with a send rule covering the recipients) and
   `SUPPORT_SENDER_EMAIL` (that key's own mailbox). In production that is the
   support mailbox's FGAC account. For QA, stand USER_A in for it: as USER_A
-  create a profile with a "Send to Anyone" rule and a key through the
-  dashboard (a real user flow), write both values to `.secrets/sender.env`,
+  create a NEW profile (`FGAC reminders (QA)`; a profile is its own key) and
+  on it "+ Apply a rule → + Create a new rule" as a Gmail send whitelist with
+  pattern `*` (the quick-add button is Default-Profile-only), reveal the
+  key, write both values to `.secrets/sender.env`,
   and start the dev server with `.claude/launch.json` `fgac-dev-sender`. The
   reminder then lands in USER_A's own inbox, sent by USER_A's key — read it
   through the MCP `gmail_list`/`gmail_read` tools. Without the two variables
