@@ -119,4 +119,22 @@ Capability 14 A17 (sender configured as in A16): three `sheets_read_range`
 calls with an `account` the profile cannot use → the third refusal carries
 the 📧 line and one email; a fourth carries "already emailed" and no second
 message; `$mcp_tool_call` rows carry `account_requested` and
-`notify_status`; capability 16 A23 pins the event. Local + preview.
+`notify_status`; capability 16 A23 pins the event.
+
+Local result (2026-09-16, hosted-MCP runbook scoped to 14 A16/A17 and 16
+A22/A23): all four pass, run as USER_B. The first attempt as USER_A was
+blocked outright — an earlier session's A16 run on the same Neon branch had
+already sent USER_A its three reminders that day, and every due send came
+back `skipped_rate_capped` (the cap working; capability 14 A16 now says to
+check headroom and switch owner rather than clear stamps). A17 observed:
+`not_due`, `not_due`, `sent`, `already_sent`; one email in USER_B's inbox
+from the QA sender; `account_refusals` row `refusal_count` 4 /
+`window_count` 4 / `notified_at` set once; the different value's row at 1
+with `notified_at` NULL; one `account_refusal_notified` event and no
+`approval_link_minted` row.
+
+Preview: the sender variables are not set on Vercel's Preview environment
+(adding them is a `vercel env add`, Ken's call), so the preview pass covers
+the refusal path on the deployed build — 🚫 text, `notify_status:
+'disabled'`, `account_requested` on the event, and the ledger row on the
+preview DB (migration 0014 ran in the build log) — not a send.
