@@ -456,5 +456,5 @@ attributable to it.
   sender's proxy key
 - **Regression guard**: `notify_status` must be present on EVERY mint path —
   policy denials, send denials, and `request_access` — or the delivery split
-  in `monitoring.md` 7.23 silently drops that path into the unlabelled bucket
+  in `monitoring.md` 7.24 silently drops that path into the unlabelled bucket
 

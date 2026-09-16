@@ -10,12 +10,17 @@
  *   - link-carrying denials say the link does not change on retry;
  *   - the account refusal lists the usable accounts, states both fixes (omit
  *     or pass a listed address), and addresses the scheduled-task case —
- *     the one caller that measured as immune to guidance (2026-09-09 → 11).
+ *     the one caller that measured as immune to guidance (2026-09-09 → 11);
+ *   - an upstream 404 names the account it ran against, and the
+ *     cross-mailbox hint appears ONLY when the key reaches other mailboxes,
+ *     names them, and states the fix as `account: '<address>'` (the
+ *     wrong-mailbox retry loop, 2026-09-12 → 13).
  */
 import {
   AGENT_APPROVAL_PROTOCOL, NO_LINK_STOP, LINK_UNAVAILABLE_STOP, SEND_DISABLED_MESSAGE,
   withNoLinkStop, withLinkUnavailableStop, recipientNotWhitelistedMessage,
   accountNotPermittedByCaller, accountNotPermittedByDefault,
+  googleNotFoundMessage, crossMailboxHint,
 } from '../src/lib/denialCopy';
 
 let failures = 0;
@@ -93,8 +98,33 @@ check('says to pass an accessible address', /Pass one of the accessible addresse
 check('says the user can add the owner address in the dashboard', /add 'owner@example.com' to this key's accounts/.test(byDefault));
 check('says retrying unchanged fails', /Retrying unchanged fails/.test(byDefault));
 
+console.log('googleNotFoundMessage (upstream 404 names the account):');
+const nf = googleNotFoundMessage('Requested entity was not found', 'owner@example.com');
+check('classifies as failed (unchanged class)', outcomeOf(nf) === 'failed');
+check('keeps the original sentence first, detail attached', nf.startsWith('❌ Google resource not found (404): Requested entity was not found. '));
+check('names the account the call ran against', nf.includes("not visible to 'owner@example.com' — the account this call ran against"));
+check('says to verify against a fresh listing on that account', /fresh listing on that account/.test(nf));
+check('says the same id unchanged will 404 again', /same id unchanged will 404 again/.test(nf));
+const nfBare = googleNotFoundMessage('', '');
+check('no detail → no dangling colon', nfBare.startsWith('❌ Google resource not found (404). '));
+check('no account known → falls back to "this account"', /not visible to this account/.test(nfBare));
+
+console.log('crossMailboxHint (only when other mailboxes exist):');
+check('single-mailbox key → empty string (message unchanged)', crossMailboxHint([]) === '');
+const one = crossMailboxHint(['shared@example.com']);
+check('carries no outcome prefix (it is appended, never first)', outcomeOf(one) === 'success');
+check('counts and names the other mailbox', one.startsWith("This connection can also reach 1 other mailbox: shared@example.com (see list_accounts). "));
+check('says ids are mailbox-specific', /ids are mailbox-specific/.test(one));
+check('states the exact fix with the address', one.includes("retry ONCE with the same id and pass account: 'shared@example.com'"));
+check('bounds the retry and says when to stop', /retry ONCE/.test(one) && /if it did not, stop/.test(one));
+const two = crossMailboxHint(['a@example.com', 'b@example.com']);
+check('pluralises and lists every other mailbox', two.startsWith('This connection can also reach 2 other mailboxes: a@example.com, b@example.com (see list_accounts). '));
+check('with several candidates the fix is a placeholder, not a guess', two.includes("pass account: '<that address>'") && !two.includes("account: 'a@example.com'"));
+const hinted = `${nf} ${one}`;
+check('404 + hint still classifies as failed', outcomeOf(hinted) === 'failed');
+
 console.log('cross-cutting:');
-const all = [SEND_DISABLED_MESSAGE, rnw, blocked, noLink, byCaller, byDefault];
+const all = [SEND_DISABLED_MESSAGE, rnw, blocked, noLink, byCaller, byDefault, nf, hinted];
 check('no builder emits a second outcome emoji after the first character', all.every(t => !/[🚫❌⏳]/u.test(t.slice(2))));
 check('every refusal carries a retry instruction', all.every(t => /retry/i.test(t)));
 

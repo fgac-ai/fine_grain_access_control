@@ -289,6 +289,11 @@ const SCANNER_CLIENT_NAMES = new Set([
   // 2026-09-12: a daily tokenless initialize on a stock `node` UA; the name
   // says what it is, but `check` alone is too common a word to be vocabulary.
   'rpg-connect-check',
+  // 2026-09-15: a tokenless POST every 8–10 minutes, 24 h/day, on a bare
+  // `node` UA — 359 rows in the 3 days since it appeared (2026-09-12), none
+  // authenticated, no `initialize` ever recorded. The whole unlabelled
+  // `direct` remainder after PR #138; the name carries no vocabulary.
+  'mcpdd',
 ]);
 const SCANNER_UA_PREFIXES = [
   // Not the real httpx UA (`python-httpx/`): the junk-bearer sender that was
@@ -315,7 +320,10 @@ const SCANNER_UA_PREFIXES = [
  * registry listing (`SaSame-MCP-Audit/0.1`, `MCPScoringEngine/1.0`,
  * `schema-study/0.1`, `mcp-inventory/0.1` + `mcp-inventory-canary`,
  * `AgentPulse`); none of those words appeared in any authenticated
- * client_name or user-agent in the 14 days before.
+ * client_name or user-agent in the 14 days before. `validator`, `survey`,
+ * `seeder` likewise on 2026-09-15 (`eyrie-validator/0.1.0`,
+ * `wormhole-survey`, `cadastr-seeder/0.1` — one-off named probes from the
+ * week after PR #138, each 1–4 tokenless rows, none authenticated).
  */
 const SCANNER_KEYWORDS = new Set([
   'bot', 'bots', 'crawler', 'crawl', 'spider',
@@ -327,6 +335,7 @@ const SCANNER_KEYWORDS = new Set([
   'verify', 'checker', 'grader', 'reputation', 'research', 'inspection', 'introspect',
   'discovery', 'explorer', 'enricher', 'lab', 'googleother',
   'audit', 'auditor', 'scoring', 'study', 'inventory', 'canary', 'pulse',
+  'validator', 'survey', 'seeder',
 ]);
 const SCANNER_SUFFIXES = ['bot', 'scan', 'scanner', 'probe', 'crawler', 'index'];
 const SELF_LINK = /\(\+(https?:\/\/|mailto:|[a-z])/i;

@@ -44,7 +44,7 @@ import { connectionsDeepLink } from '@/lib/dashboardAgentLinks';
 import { recordApprovalMint, getApprovalRequestResourceName } from '@/lib/approvalRequests';
 import {
   AGENT_APPROVAL_PROTOCOL, SEND_DISABLED_MESSAGE, recipientNotWhitelistedMessage,
-  accountNotPermittedByCaller, accountNotPermittedByDefault, withNoLinkStop, withLinkUnavailableStop, LINK_UNAVAILABLE_STOP,
+  accountNotPermittedByCaller, accountNotPermittedByDefault, googleNotFoundMessage, crossMailboxHint, withNoLinkStop, withLinkUnavailableStop, LINK_UNAVAILABLE_STOP,
 } from '@/lib/denialCopy';
 import { TOOL_DEFS, toolAnnotations, type FgacToolDef } from './toolDefs';
 import {
@@ -839,7 +839,7 @@ function describe403(detail: string, targetEmail: string, r: GoogleErrorReason):
   // Throttling. Reconnecting the account does nothing here, and the retry the
   // old text suppressed is exactly the right move.
   if ((r.reason && RATE_LIMIT_REASONS.has(r.reason)) || r.domain === 'usageLimits' || r.status === 'RESOURCE_EXHAUSTED') {
-    return `❌ Google is rate limiting this account (403 ${r.reason || 'usageLimits'})${detail ? `: ${detail}` : ''}. ` +
+    return `❌ Google is rate limiting ${targetEmail ? `'${targetEmail}'` : 'this account'} (403 ${r.reason || 'usageLimits'})${detail ? `: ${detail}` : ''}. ` +
       `This is temporary and NOT a permissions problem — do not ask the user to reconnect. ` +
       `Wait a few seconds and retry; if several retries fail, slow down the rate of calls and tell the user Google is throttling.`;
   }
@@ -880,8 +880,10 @@ function describeGoogleError(status: number, data: unknown, targetEmail: string)
     case 403:
       return describe403(detail, targetEmail, r);
     case 404:
-      return `❌ Google resource not found (404)${detail ? `: ${detail}` : ''}. ` +
-        `The id is wrong, stale, or not visible to this account — verify it against a fresh listing before retrying; the same id unchanged will 404 again.`;
+      // Names the account the call resolved to — see googleNotFoundMessage.
+      // The multi-mailbox hint is appended by the RESULT sites (they know
+      // the key's other mailboxes; this layer only knows the token's owner).
+      return googleNotFoundMessage(detail, targetEmail);
     case 429:
       return '❌ Google API rate limit exceeded (429). Wait a moment and retry.';
     default:
@@ -1054,21 +1056,45 @@ function commentsErrorResult(
  * The gmail_404_site prop keeps the two sites separable internally.
  * Non-404 statuses stay errorResult.
  */
+/**
+ * Cross-mailbox 404 guidance (src/lib/denialCopy.ts crossMailboxHint).
+ * Applied where a 404 becomes a tool result on an id-addressed Gmail or
+ * Drive call: the id may simply belong to one of the key's OTHER mailboxes,
+ * and until 2026-09-15 nothing in the response said which mailbox had been
+ * searched or that others existed. Measured before the change (30 d to
+ * 2026-09-15): five people, 52 such 404s, each within 24 h of a success on
+ * a different mailbox with the same tool — docs/monitoring.md 7.23. No-op
+ * for single-mailbox keys and for every non-404 status, so the outcome
+ * class of the wrapped text (❌ / 🚫 / isError) is untouched; the prop lets
+ * 7.23 count how often the hint was actually shown.
+ */
+function withMailboxContext(text: string, status: number | undefined, resolved: Pick<ResolvedAccount, 'otherAccounts'>): string {
+  if (status !== 404 || resolved.otherAccounts.length === 0) return text;
+  addToolCallProps({ cross_mailbox_hint: true });
+  return `${text} ${crossMailboxHint(resolved.otherAccounts)}`;
+}
+
 function gmailNotFoundResult(
   site: 'message' | 'attachment',
   result: { error: string; status?: number },
   messageId: string,
+  resolved: ResolvedAccount,
 ) {
   if (result.status !== 404) return errorResult(result.error);
   addToolCallProps({ gmail_404_site: site });
 
   if (site === 'message') {
-    return textResult(
-      `❌ Gmail has no message with id '${messageId}' for this account (404). ` +
-      `The id is wrong, belongs to a different account, or the message was deleted. ` +
-      `STOP — do not retry this id; it will keep failing. ` +
-      `Re-run gmail_list to get current message ids, or confirm with the user which account the message is in.`,
-    );
+    // Names the mailbox searched: "for this account" was unverifiable for a
+    // key that reaches several, and the wrong-mailbox case is the one the
+    // 2026-09 data shows (26 of one person's 404s on this tool were ids
+    // from another of their mailboxes).
+    return textResult(withMailboxContext(
+      `❌ Gmail has no message with id '${messageId}' in '${resolved.targetEmail}' (404) — the mailbox this call ran against. ` +
+      `The id is wrong, belongs to a different mailbox, or the message was deleted. ` +
+      `STOP — do not retry this id on this account; it will keep failing. ` +
+      `Re-run gmail_list on the right account to get current message ids, or confirm with the user which mailbox the message is in.`,
+      result.status, resolved,
+    ));
   }
 
   return textResult(
@@ -1644,7 +1670,15 @@ function withToolAnalytics<R extends ToolAnalyticsResult>(
   });
 }
 
-type ResolvedAccount = { targetEmail: string; token: string; proxyKeyId: string; hasGmailScope?: boolean; hasDriveFileScope?: boolean };
+type ResolvedAccount = {
+  targetEmail: string;
+  token: string;
+  proxyKeyId: string;
+  hasGmailScope?: boolean;
+  hasDriveFileScope?: boolean;
+  /** Every other mailbox this key reaches — empty for single-mailbox keys. Drives the cross-mailbox 404 hint (withMailboxContext). */
+  otherAccounts: string[];
+};
 type ResolvedError = { error: string };
 
 /**
@@ -1749,6 +1783,9 @@ async function resolveAccountAndToken(
     proxyKeyId: conn.proxyKeyId,
     hasGmailScope: googleToken.hasGmailScope,
     hasDriveFileScope: googleToken.hasDriveFileScope,
+    otherAccounts: emails
+      .map(e => e.targetEmail)
+      .filter(e => e.toLowerCase() !== targetEmail.toLowerCase()),
   };
 }
 
@@ -1874,10 +1911,13 @@ function classifyAndStampRawCall(path: string, method: string): RawCallClass {
  * Google routing miss — and stays a genuine error so real breakage (like the
  * pre-2026-08-29 Slides misrouting) keeps showing up in error rates.
  */
-function passthroughErrorResult(result: { error: string; status?: number }, path: string) {
+function passthroughErrorResult(result: { error: string; status?: number }, path: string, resolved: ResolvedAccount) {
   if (result.status !== 404) return errorResult(result.error);
+  // Drive grants are per Google account too: a file picked under one
+  // mailbox's account is invisible to another mailbox's token, so the
+  // cross-mailbox hint applies here as much as to Gmail ids.
   const explanation =
-    `${result.error} ` +
+    `${withMailboxContext(result.error, result.status, resolved)} ` +
     `NOTE: FGAC's Google grant is per-file (drive.file) — files the user never exposed to FGAC and this agent did not create are INVISIBLE to this token, ` +
     `and Google reports them with this exact 404 even though they exist. A wrong id looks identical, so do NOT retry the same id. ` +
     `If this id is a Google Sheet or Doc, call request_access with the spreadsheetId/documentId to send the user a one-click approval link; ` +
@@ -2036,7 +2076,7 @@ async function executeRawGoogleCall(
     // (family/kind/endpoint were already stamped at classification above).
     addToolCallProps({ raw_api_passthrough: true });
     const result = await googleFetch(rawUrl(cleanPath), resolved.token, method, serializeBody(body), resolved.targetEmail);
-    if (!result.ok) return passthroughErrorResult(result, cleanPath);
+    if (!result.ok) return passthroughErrorResult(result, cleanPath, resolved);
     return jsonResult(result.data);
   }
 
@@ -2111,7 +2151,10 @@ async function executeRawGoogleCall(
 
   const url = `https://www.googleapis.com/${cleanPath}`;
   const result = await googleFetch(url, resolved.token, method, serializeBody(body), resolved.targetEmail);
-  if (!result.ok) return errorResult(result.error);
+  // Stays isError (outcome `error`): a Gmail 404 here is Google's own answer
+  // for the mailbox the call ran against. The cross-mailbox hint rides on
+  // the text only — this is the site the 2026-09-12 thread reads hit.
+  if (!result.ok) return errorResult(withMailboxContext(result.error, result.status, resolved));
 
   if (cls.kind === 'gmail_read') {
     const restriction = checkReadRestrictions(rules, result.data);
@@ -2281,7 +2324,7 @@ const handler = createMcpHandler(
     server.registerTool(
       TOOL_DEFS.gmail_read.name,
       toolConfig(TOOL_DEFS.gmail_read, {
-        account: z.string().optional().describe('Email account to use.'),
+        account: z.string().optional().describe('Email account to use (see list_accounts; defaults to the primary). Ids are mailbox-specific: an id obtained on one account must be read with that same account passed here.'),
         messageId: z.string().describe('Gmail message ID'),
         format: z.enum(['full', 'metadata', 'minimal']).optional().describe('Response format. "full" (default) returns parsed headers, body text, and attachment metadata.'),
         offset: z.number().int().min(0).optional().describe('Start position (chars into the serialized response, body UNtruncated) for a windowed read of a long message. Use the next_offset from the previous response to continue; start at 0.'),
@@ -2308,7 +2351,7 @@ const handler = createMcpHandler(
         // Read-time enforcement: label blacklist/whitelist + content blacklist
         const rules = await loadApplicableRules(conn.user.id, resolved.proxyKeyId, resolved.targetEmail);
         const result = await gmailFetch(resolved.token, resolved.targetEmail, `messages/${messageId}?format=${format || 'full'}`);
-        if (!result.ok) return gmailNotFoundResult('message', result, messageId);
+        if (!result.ok) return gmailNotFoundResult('message', result, messageId, resolved);
 
         const restriction = checkReadRestrictions(rules, result.data);
         if (restriction) {
@@ -2343,7 +2386,7 @@ const handler = createMcpHandler(
         messageId: z.string().describe('Gmail message ID containing the attachment'),
         attachmentId: z.string().optional().describe('Attachment ID, taken from the `attachments` array of a gmail_read on THIS messageId. Ids are message-scoped and are re-issued when the message is re-indexed; a stale id is healed automatically when the message has exactly one attachment. Prefer `filename` when you know it — filenames never go stale.'),
         filename: z.string().optional().describe('Attachment filename as shown in gmail_read `attachments` (case-insensitive), as an alternative to attachmentId. If several attachments share the name, the error lists them so you can pick one by attachmentId.'),
-        account: z.string().optional().describe('Email account to use.'),
+        account: z.string().optional().describe('Email account to use (see list_accounts; defaults to the primary). Ids are mailbox-specific: an id obtained on one account must be read with that same account passed here.'),
         offset: z.number().int().min(0).optional().describe('Start position (chars into the base64url data) for a windowed read of a large attachment. Use the next_offset from the previous response to continue; start at 0.'),
         limit: z.number().int().min(1).optional().describe('Max chars of base64url data to return in this response (server caps at 200000). Size this to YOUR tool-result budget. Passing offset or limit switches to the windowed envelope.'),
       }),
@@ -2368,7 +2411,7 @@ const handler = createMcpHandler(
         // an attachment is only as readable as the email that carries it
         const rules = await loadApplicableRules(conn.user.id, resolved.proxyKeyId, resolved.targetEmail);
         const parentResult = await gmailFetch(resolved.token, resolved.targetEmail, `messages/${messageId}?format=full`);
-        if (!parentResult.ok) return gmailNotFoundResult('message', parentResult, messageId);
+        if (!parentResult.ok) return gmailNotFoundResult('message', parentResult, messageId, resolved);
 
         const restriction = checkReadRestrictions(rules, parentResult.data);
         if (restriction) {
@@ -2488,7 +2531,7 @@ const handler = createMcpHandler(
           // suppliedIdIsCurrent but Google still 404s: not a staleness case —
           // fall through to the generic per-site text.
         }
-        if (!attachmentResult.ok) return gmailNotFoundResult('attachment', attachmentResult, messageId);
+        if (!attachmentResult.ok) return gmailNotFoundResult('attachment', attachmentResult, messageId, resolved);
 
         const attachment = attachmentResult.data as { size?: number; data?: string };
         // Size on EVERY outcome (port of 5aa23bd): the generic response_chars
@@ -2903,7 +2946,7 @@ const handler = createMcpHandler(
       TOOL_DEFS.google_api_get.name,
       toolConfig(TOOL_DEFS.google_api_get, {
         path: z.string().describe('API path (e.g. "gmail/v1/users/me/messages" or "v4/spreadsheets/1BxiM.../values/Sheet1")'),
-        account: z.string().optional().describe('Email account to use.'),
+        account: z.string().optional().describe('Email account to use (see list_accounts; defaults to the primary). Ids are mailbox-specific: an id obtained on one account must be read with that same account passed here.'),
         offset: z.number().int().min(0).optional().describe('Start position (chars into the serialized response) for a windowed read of a large payload. Use the next_offset from the previous response to continue; start at 0.'),
         limit: z.number().int().min(1).optional().describe('Max chars to return in this response (server caps at 200000). Size this to YOUR tool-result budget. Passing offset or limit switches successful responses to the windowed envelope.'),
       }),
@@ -2946,7 +2989,7 @@ const handler = createMcpHandler(
         path: z.string().describe('API path (e.g. "gmail/v1/users/me/messages/send" or "v4/spreadsheets/1BxiM.../values/Sheet1:append")'),
         method: z.enum(['POST', 'PUT', 'PATCH']).optional().describe('HTTP method (default: POST)'),
         body: z.union([z.string(), z.record(z.string(), z.any())]).optional().describe('Request body (JSON object or string)'),
-        account: z.string().optional().describe('Email account to use.'),
+        account: z.string().optional().describe('Email account to use (see list_accounts; defaults to the primary). Ids are mailbox-specific: an id obtained on one account must be read with that same account passed here.'),
       }),
       async ({ path: rawPath, method = 'POST', body, account }, { authInfo }) => {
         const conn = await requireApproval(authInfo);
