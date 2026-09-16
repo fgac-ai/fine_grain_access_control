@@ -37,6 +37,7 @@ import { recordEagerResolve, shouldSkipEagerResolve } from '@/lib/connectionTouc
 import { after } from 'next/server';
 import { notifyOwnerOfAccountRefusal, notifyOwnerOfApprovalLinks, type NotifyLink } from '@/lib/approvalNotify';
 import { accountRefusalDenialLine, notifyDenialLine } from '@/lib/approvalNotifyCopy';
+import { normalizeRequestedEmail } from '@/lib/accountRefusals';
 import { inSuccessSample, AUTH_SUCCESS_SAMPLE } from '@/lib/authSampling';
 import { ensureDefaultProfile } from '@/db/defaultProfile';
 import { mintApprovalLink, describeApproval, type ApprovalAction, type ApprovalPayload } from '@/lib/approvalLinks';
@@ -1747,14 +1748,17 @@ async function resolveAccountAndToken(
       // never reach this owner (plan v4): record the refused value and, on
       // the third refusal of it in 24 h, email the owner once from the
       // support mailbox naming what the task passes and what would work.
+      const toolName = getToolCallProps().$mcp_tool_name;
       const notify = await notifyOwnerOfAccountRefusal({
         owner: conn.user, proxyKeyId: conn.proxyKeyId, agentLabel: agentLabel(conn),
         requestedAccount: targetEmail, usableAccounts: emails.map(e => e.targetEmail),
-        tool: typeof getToolCallProps().$mcp_tool_name === 'string' ? String(getToolCallProps().$mcp_tool_name) : null,
+        tool: typeof toolName === 'string' ? toolName : null,
         dashboardUrl: DASHBOARD_URL,
       });
       addToolCallProps({
-        account_requested: targetEmail, account_refusal_count: notify.refusalCount ?? undefined, notify_status: notify.status,
+        account_requested: normalizeRequestedEmail(targetEmail),
+        account_refusal_count: notify.refusalCount ?? undefined,
+        notify_status: notify.status,
       });
       const emailed = accountRefusalDenialLine(notify.status, notify);
       return { error: accountNotPermittedByCaller(targetEmail, usable) + (emailed ? `\n${emailed}` : '') };
