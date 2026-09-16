@@ -284,6 +284,17 @@ curl -s $BASE_URL/api/mcp -X POST \
 - A12: `PATCH settings/sendAs/<alias>` → `gmail_settings_unsupported` scope
   message (no approval link); `messages/batchDelete` →
   permanent-deletion refusal; `GET settings/sendAs` still succeeds.
+- A13: `POST drive/v3/files/<S>/copy` (succeeds, copy auto-granted), Read Only
+  and unexposed-source variants, `POST drive/v3/files` creates.
+- A14: `PATCH drive/v3/files/<id>` rename/trash and `POST …/permissions` on
+  Read & Write / Read Only / Blocked / no-rule sheets; `GET drive/v3/files`
+  and `generateIds` stay passthrough; raw JSON-RPC `method: "DELETE"` must be
+  rejected by the schema (`isError`, no Google call). Untrash and un-share in
+  Drive afterwards (permission removal is DELETE-only, unavailable via FGAC).
+- A15: one file per creation path (`v4/spreadsheets`, `v1/documents`,
+  `drive/v3/files` Sheets mimeType, `files/<id>/copy`, `drive/v3/files`
+  text/plain) → write, trash, GET `?fields=trashed`, untrash, rename must all
+  succeed with no approval; pure `tools/call` via curl, no browser needed.
 
 ## Capability: Docs Management (→ capabilities/19_docs_management.md)
 

@@ -153,12 +153,49 @@ expect('drive files POST with query → drive_create',
 expect('drive files GET (list) stays passthrough — discovery is never gated',
   classifyGoogleApiCall('drive/v3/files?q=name+contains+%27x%27', 'GET'),
   (c: { kind: string; family?: string }) => c.kind === 'passthrough' && c.family === 'drive/v3');
-expect('drive file PATCH (rename/trash) stays passthrough — scope backstop, not a create',
+// ── Id-addressed Drive file calls (mcp-drive-perfile-guard, 2026-09-16): a
+// Blocked spreadsheet could be trashed via PATCH {trashed:true} while these
+// were passthrough. Every call naming ONE file by id is drive_file so the
+// route can run the per-file guard the REST proxy has always had. ──
+expect('drive file PATCH (rename/trash) → drive_file mutating with id',
   classifyGoogleApiCall('drive/v3/files/1BxiM2doc-ID_x', 'PATCH'),
-  (c: { kind: string; family?: string }) => c.kind === 'passthrough' && c.family === 'drive/v3');
-expect('drive permissions POST stays passthrough',
+  (c: { kind: string; fileId?: string; isMutating?: boolean }) => c.kind === 'drive_file' && c.fileId === '1BxiM2doc-ID_x' && c.isMutating === true);
+expect('drive permissions POST (share) → drive_file mutating',
   classifyGoogleApiCall('drive/v3/files/1BxiM2doc-ID_x/permissions', 'POST'),
+  (c: { kind: string; fileId?: string; isMutating?: boolean }) => c.kind === 'drive_file' && c.fileId === '1BxiM2doc-ID_x' && c.isMutating === true);
+expect('drive permissions/{permId} GET → drive_file read',
+  classifyGoogleApiCall('drive/v3/files/1BxiM2doc-ID_x/permissions/anyoneWithLink', 'GET'),
+  (c: { kind: string; isMutating?: boolean }) => c.kind === 'drive_file' && c.isMutating === false);
+expect('drive revisions GET → drive_file read',
+  classifyGoogleApiCall('drive/v3/files/1BxiM2doc-ID_x/revisions', 'GET'),
+  (c: { kind: string; fileId?: string }) => c.kind === 'drive_file' && c.fileId === '1BxiM2doc-ID_x');
+expect('drive export GET with query → drive_file read',
+  classifyGoogleApiCall('drive/v3/files/1BxiM2doc-ID_x/export?mimeType=text/csv', 'GET'),
+  (c: { kind: string; isMutating?: boolean }) => c.kind === 'drive_file' && c.isMutating === false);
+expect('drive watch POST → drive_file mutating',
+  classifyGoogleApiCall('drive/v3/files/1BxiM2doc-ID_x/watch', 'POST'),
+  (c: { kind: string; isMutating?: boolean }) => c.kind === 'drive_file' && c.isMutating === true);
+expect('drive media content update (upload/…/files/{id} PATCH) → drive_file',
+  classifyGoogleApiCall('upload/drive/v3/files/1BxiM2doc-ID_x?uploadType=media', 'PATCH'),
+  (c: { kind: string; fileId?: string }) => c.kind === 'drive_file' && c.fileId === '1BxiM2doc-ID_x');
+expect('url-encoded file id is decoded',
+  classifyGoogleApiCall('drive/v3/files/1BxiM2doc%2DID_x', 'GET'),
+  (c: { kind: string; fileId?: string }) => c.kind === 'drive_file' && c.fileId === '1BxiM2doc-ID_x');
+expect('drive files/generateIds GET stays passthrough — discovery is never gated',
+  classifyGoogleApiCall('drive/v3/files/generateIds?count=5', 'GET'),
   (c: { kind: string; family?: string }) => c.kind === 'passthrough' && c.family === 'drive/v3');
+expect('drive files list with query stays passthrough',
+  classifyGoogleApiCall('drive/v3/files?q=name%20contains%20%27x%27&pageSize=10', 'GET'),
+  (c: { kind: string; family?: string }) => c.kind === 'passthrough' && c.family === 'drive/v3');
+expect('drive about/changes/drives stay passthrough (not file-addressed)',
+  [classifyGoogleApiCall('drive/v3/about?fields=user', 'GET'), classifyGoogleApiCall('drive/v3/changes/startPageToken', 'GET'), classifyGoogleApiCall('drive/v3/drives', 'GET')],
+  (cs: Array<{ kind: string }>) => cs.every(c => c.kind === 'passthrough'));
+expect('copy still wins over drive_file (more specific)',
+  classifyGoogleApiCall('drive/v3/files/1BxiM2doc-ID_x/copy', 'POST'),
+  (c: { kind: string }) => c.kind === 'drive_copy');
+expect('comments still win over drive_file',
+  classifyGoogleApiCall('drive/v3/files/1BxiM2doc-ID_x/comments', 'GET'),
+  (c: { kind: string }) => c.kind === 'file_comments');
 expect('drive copy template keeps the verb: {id}/copy',
   templateGoogleApiPath('drive/v3/files/1BxiM2doc-ID_x/copy'),
   (t: string) => t === 'drive/v3/files/{id}/copy');
@@ -173,18 +210,36 @@ expect('drive comment replies POST → file_comments mutating',
   classifyGoogleApiCall('drive/v3/files/1BxiM2doc-ID_x/comments/AAAAc1/replies', 'POST'),
   (c: { kind: string; fileId?: string; isMutating?: boolean }) =>
     c.kind === 'file_comments' && c.fileId === '1BxiM2doc-ID_x' && c.isMutating === true);
-expect('drive file metadata GET stays passthrough (no comments segment)',
-  classifyGoogleApiCall('drive/v3/files/1BxiM2doc-ID_x', 'GET'),
-  (c: { kind: string }) => c.kind === 'passthrough');
+expect('drive file metadata GET → drive_file read (no comments segment)',
+  classifyGoogleApiCall('drive/v3/files/1BxiM2doc-ID_x?fields=name', 'GET'),
+  (c: { kind: string; fileId?: string; isMutating?: boolean }) => c.kind === 'drive_file' && c.fileId === '1BxiM2doc-ID_x' && c.isMutating === false);
 // ── Bare Drive spelling (`v3/files/…`, observed 2026-08-31): canonicalized so
 // classification, comments enforcement, and routing all see `drive/v3/…` ──
 expect('bare-spelling comments POST (v3/files/…/comments) → file_comments, not passthrough',
   classifyGoogleApiCall('v3/files/1BxiM2doc-ID_x/comments', 'POST'),
   (c: { kind: string; fileId?: string; isMutating?: boolean }) =>
     c.kind === 'file_comments' && c.fileId === '1BxiM2doc-ID_x' && c.isMutating === true);
-expect('bare-spelling file PATCH (v3/files/{id}) → passthrough with drive family',
+expect('bare-spelling file PATCH (v3/files/{id}) → drive_file (canonicalized)',
   classifyGoogleApiCall('v3/files/1BxiM2doc-ID_x', 'PATCH'),
-  (c: { kind: string; family?: string }) => c.kind === 'passthrough' && c.family === 'drive/v3');
+  (c: { kind: string; fileId?: string }) => c.kind === 'drive_file' && c.fileId === '1BxiM2doc-ID_x');
+
+// ── Method gate: deletion is a product guarantee, enforced here independently
+// of the tool schema (scripts/test-raw-method-guard.ts pins every layer). ──
+expect('DELETE on a Drive file → denied raw_api_method_unsupported (permanent deletion)',
+  classifyGoogleApiCall('drive/v3/files/1BxiM2doc-ID_x', 'DELETE'),
+  (c: { kind: string; code?: string; reason?: string }) => c.kind === 'denied' && c.code === 'raw_api_method_unsupported' && /DELETE is never available/.test(c.reason ?? ''));
+expect('DELETE files/trash (emptyTrash) → denied before any path logic',
+  classifyGoogleApiCall('drive/v3/files/trash', 'DELETE'),
+  (c: { kind: string; code?: string }) => c.kind === 'denied' && c.code === 'raw_api_method_unsupported');
+expect('lowercase delete → denied (exact-case set, like the zod enum)',
+  classifyGoogleApiCall('gmail/v1/users/me/messages/abc', 'delete'),
+  (c: { kind: string; code?: string }) => c.kind === 'denied' && c.code === 'raw_api_method_unsupported');
+expect('HEAD/OPTIONS → denied (not forwarded)',
+  [classifyGoogleApiCall('drive/v3/files', 'HEAD'), classifyGoogleApiCall('drive/v3/files', 'OPTIONS')],
+  (cs: Array<{ kind: string; code?: string }>) => cs.every(c => c.kind === 'denied' && c.code === 'raw_api_method_unsupported'));
+expect('method-denied has null family (denial_code identifies it)',
+  rawApiFamily(classifyGoogleApiCall('drive/v3/files/1BxiM2doc-ID_x', 'DELETE')),
+  (f: string | null) => f === null);
 expect('un-granted API (calendar) → denied unsupported (no calendar scope in the grant)',
   classifyGoogleApiCall('calendar/v3/calendars/primary/events', 'GET'),
   (c: { kind: string; code?: string; family?: string }) =>
@@ -430,6 +485,9 @@ expect('drive_copy → drive/v3',
   (f: string | null) => f === 'drive/v3');
 expect('drive_create → drive/v3',
   rawApiFamily(classifyGoogleApiCall('drive/v3/files', 'POST')),
+  (f: string | null) => f === 'drive/v3');
+expect('drive_file → drive/v3',
+  rawApiFamily(classifyGoogleApiCall('drive/v3/files/1BxiM2doc-ID_x', 'PATCH')),
   (f: string | null) => f === 'drive/v3');
 expect('gmail read → gmail',
   rawApiFamily(classifyGoogleApiCall('gmail/v1/users/me/messages', 'GET')),

@@ -19,7 +19,8 @@ Captured in `verifyMcpAuth` (`src/app/api/mcp/route.ts`):
 | `strategy_used` | `clerk` \| `direct` \| `none` |
 | `memo_hit` | whether the per-client strategy memo routed this request |
 | `optimizations_enabled` | kill-switch state at capture time |
-| `error_class` | Clerk auth() error name, when it threw |
+| `error_class` | Clerk auth() error name, when it threw; `audience_mismatch` (since 2026-09-16) when the token verified but its `aud` claim did not name this server (`src/lib/mcpAudience.ts`) |
+| `aud_present` | whether the verified token carried an `aud` claim. Clerk issues none today, so this is `false` on every `ok` row; the first `true` in production means Clerk started honouring RFC 8707 `resource` and audience binding is enforced end-to-end from that moment. Added 2026-09-16 |
 | `kid` | signing-key id from the (unverified) token header, on `invalid_token` only |
 | `method` | HTTP verb (`POST`; a `GET` is a client opening the optional SSE stream and taking the stateless 405 — rare in production, one per process start for a locally run CLI) |
 | `connection_resolve` | what the auth layer's eager `resolveConnection` did on this request: `ran` (four Neon round trips), `skipped` (touched within the last 5 minutes by the same user+client — `src/lib/connectionTouchMemo.ts`), `error`. Added 2026-09-08 |

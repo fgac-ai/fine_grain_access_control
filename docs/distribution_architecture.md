@@ -40,6 +40,19 @@ Local Scripts (#2, #4):
     → Scripts mirror the standard Gmail API but route through gmail.fgac.ai
 ```
 
+Hosted-MCP bearer verification (`verifyMcpAuth`): signature + issuer (only
+FGAC's own Clerk instance verifies — production instance → fgac.ai;
+development instance → localhost and previews), then audience. Clerk issues
+no `aud` on its access tokens today and ignores the RFC 8707 `resource`
+parameter, so a token minted for one FGAC host of an instance verifies on
+every other host of that instance (observed across two previews,
+2026-09-16); no third-party resource server shares either instance, so this
+is a spec-compliance gap rather than a confused-deputy path. Since
+2026-09-16 the server enforces `aud` whenever a token carries one
+(`src/lib/mcpAudience.ts`: it must name this origin's `/api/mcp`, or its
+profile-slug URL) and stamps `aud_present` on `mcp_auth_attempt`, so the day
+Clerk honours `resource` the binding becomes end-to-end with no code change.
+
 ## Permission Chain
 
 All packages ultimately resolve to the same permission chain:
@@ -111,8 +124,25 @@ in `src/app/api/mcp/googleApiPolicy.ts`:
   `file_comments` and inherit the file's per-file rule — comment writes on a
   read-only or blocked doc/sheet are denied, never scope-only passthrough.
   The `comments_read` / `comments_add` typed tools ride the same check.
+- Every other Drive call addressed to a file by id (`drive/v3/files/{id}`
+  metadata get/update — rename, trash — `/permissions`, `/revisions`,
+  `/export`, `/watch`) is classified `drive_file` and runs the same per-file
+  guard as the REST proxy: Blocked denies, mutations need Read & Write, reads
+  pass with any rule. A file NO rule names is resolved by one metadata GET
+  with the account's token — a Sheets/Docs mimeType gets the not-exposed
+  denial with an approval link (so an unexposed spreadsheet cannot be
+  trashed or shared through the MCP route, closed 2026-09-16), any other kind
+  rides the `drive.file` grant as before (FGAC has no rule type for it), and
+  a 404 is the invisible-file refusal. Listing (`GET drive/v3/files`) and
+  `generateIds` are never gated — discovery stays Google-native.
+- DELETE is never forwarded: the method set (`RAW_MODIFY_METHODS` in
+  `googleApiPolicy.ts`) drives the tool schema, the catalog's
+  `freeformMethods`, the classifier (`raw_api_method_unsupported`) and a
+  defensive executor check; `scripts/test-raw-method-guard.ts` pins all four.
+  Google would not backstop a slip — `drive.file` accepts `files.delete`
+  (permanent) on app-created and user-picked files.
 - Other unknown Google API families that could work under the grant (Drive
-  listing/export, Slides, Forms) **pass through** with the account's token —
+  listing, Slides, Forms) **pass through** with the account's token —
   classify-don't-block, with Google's OAuth scopes as the backstop
   (`drive.file` limits Drive to picked/app-created files) — and are stamped
   `raw_api_passthrough` for demand monitoring. Slides and Forms paths route to

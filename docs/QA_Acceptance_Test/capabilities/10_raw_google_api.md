@@ -63,8 +63,9 @@
   `/replies`) classify as `file_comments` and inherit the file's per-file
   rule — a comment write on a read-only or blocked doc/sheet is denied, and
   the event carries `raw_api_family: 'drive_comments'`, never
-  `raw_api_passthrough`. Bare `drive/v3/files` (no comments segment) remains
-  passthrough as asserted above.
+  `raw_api_passthrough`. Bare `drive/v3/files` (listing, no id) remains
+  passthrough as asserted above; since 2026-09-16 any `drive/v3/files/<id>…`
+  call classifies `drive_file` and follows the file's rule — see A14.
 - **Bare Drive spelling (2026-08-31)**: `v3/files/…` without the `drive/`
   prefix canonicalizes to `drive/v3/…` before classification and routing
   (mirroring the accepted `v4/spreadsheets` / `v1/documents` / mis-routed
@@ -204,4 +205,86 @@
   is auto-granted the same way (`raw_api_kind: 'drive_create'`,
   `origin: 'drive_create'`); the `text/plain` create succeeds, is stamped
   `file_created_kind: 'other'`, and writes no rule. `PATCH drive/v3/files/<id>`
-  and `POST …/permissions` remain scope-backstop passthrough (unchanged).
+  and `POST …/permissions` are gated per file since 2026-09-16 — see A14.
+
+### A14: Id-addressed Drive metadata writes follow the file's rule; DELETE is refused at every layer
+- Setup: an exposed sheet S with a Read & Write rule for the key (the A9 or
+  A13 created sheet works), a sheet R whose rule is Read Only, a sheet B whose
+  rule is Blocked, and a sheet U the user owns that has NO FGAC rule (never
+  picked, never agent-created — one Google has never granted to FGAC).
+- Calls, all via `google_api_modify` unless noted:
+  1. `PATCH drive/v3/files/<S>` body `{"name":"QA renamed"}`, then
+     `PATCH drive/v3/files/<S>` body `{"trashed":true}`, then `{"trashed":false}`.
+  2. `POST drive/v3/files/<S>/permissions` body
+     `{"role":"reader","type":"user","emailAddress":"<USER_B>"}`.
+  3. `google_api_get` `drive/v3/files/<R>?fields=name,mimeType` and
+     `drive/v3/files/<R>/export?mimeType=text/csv`; then `PATCH drive/v3/files/<R>`
+     body `{"trashed":true}`.
+  4. `PATCH drive/v3/files/<B>` body `{"trashed":true}`; `google_api_get`
+     `drive/v3/files/<B>`.
+  5. `PATCH drive/v3/files/<U>` body `{"trashed":true}`; `google_api_get`
+     `drive/v3/files/<U>`.
+  6. `google_api_get` `drive/v3/files?pageSize=5` and
+     `drive/v3/files/generateIds?count=2`.
+  7. `tools/call google_api_modify` with `method: "DELETE"` and path
+     `drive/v3/files/<S>` (raw JSON-RPC via curl — the schema must reject it);
+     and `method: "DELETE"` path `drive/v3/files/trash`.
+- **Expected** (2026-09-16 — before this every call in 1–5 was
+  `raw_api_passthrough` and a Blocked spreadsheet could be trashed through
+  the MCP route, verified locally the same day):
+  - 1 and 2 SUCCEED (Read & Write rule); events carry
+    `raw_api_kind: 'drive_file'`, `raw_api_family: 'drive/v3'`,
+    `drive_file_gate: 'rule'`, `file_service: 'sheets'`, and NO
+    `raw_api_passthrough`.
+  - 3: both reads SUCCEED (any rule allows reads — metadata and export return
+    real data); the trash PATCH is DENIED `sheets_read_only` with a
+    `sheets_write` approval link, and Google is NOT called.
+  - 4: both DENIED `sheets_blocked`, no approval link, Google not called.
+  - 5: the PATCH is DENIED as not exposed with a `sheets_write` approval link
+    and the GET is DENIED as not exposed with a `sheets_expose` link —
+    `drive_file_gate: 'mime_gated'`, `denial_code: 'sheets_not_exposed'`.
+    (If Google has never granted U to FGAC the metadata lookup 404s instead:
+    then the answer is the 🚫 `file_grant_missing_at_google` invisible-file
+    text with `drive_file_gate: 'invisible'` — also a denial, never a
+    passthrough success. Record which of the two the run produced.)
+  - 6: both SUCCEED as `passthrough` (`raw_api_passthrough: true`) — discovery
+    is never gated.
+  - 7: both calls fail at the MCP layer with an input-validation error
+    (`isError: true`, text naming `method`), no `$mcp_tool_call` denial row,
+    and nothing reaches Google; `tools/list` still shows the `method` enum as
+    exactly POST/PUT/PATCH; `get_my_permissions.defaults.deletion` says DELETE
+    is rejected by the schema and again server-side.
+- **Also expected**: `npx tsx scripts/test-raw-method-guard.ts` passes (part of
+  `npm run mcp:lint`) — it drives the registered schema through the real MCP
+  SDK, and pins the classifier + executor refusal for DELETE.
+- **Cleanup**: untrash S if the run left it trashed. Remove the USER_B
+  permission on S in Google Drive's share dialog as the user — permission
+  removal is DELETE-only and therefore unavailable through FGAC by design.
+
+### A15: Agent-created files stay fully under the agent's control, trash included
+- Create one file through EACH creation path, all via `google_api_modify` as
+  the same connection: (S1) POST `v4/spreadsheets`; (D1) POST `v1/documents`;
+  (S2) POST `drive/v3/files` with the Sheets mimeType; (C1) POST
+  `drive/v3/files/<S1>/copy`; (T1) POST `drive/v3/files` with
+  `{"name":"QA note","mimeType":"text/plain"}`. For each, run the cycle:
+  write content (`sheets_update_range` / `docs_edit`; skip for T1), `PATCH
+  drive/v3/files/<id>` `{"trashed":true}`, `google_api_get`
+  `drive/v3/files/<id>?fields=trashed`, `PATCH` `{"trashed":false}`, `PATCH`
+  `{"name":"<label> renamed"}`, and (S1) write content again.
+- **Expected** (2026-09-16, run on the PR #147 preview, 30/30): every step
+  SUCCEEDS with no approval link and no dashboard action. S1, D1, S2 and C1
+  carry an "Agent-created: …" Read & Write rule in `get_my_permissions`
+  (`sheet_read_write` / `doc_read_write`) — that rule is what the A14 guard
+  consults, so trash and rename are allowed exactly like a cell or text edit
+  (`drive_file_gate: 'rule'`). T1 has NO rule (FGAC has no rule type for
+  non-Sheets/Docs files): the guard finds no rule, resolves the mimeType, and
+  forwards under the drive.file grant, which treats an app-created file as
+  writable (`drive_file_gate: 'mime_other'`, `raw_api_passthrough: true`).
+  The metadata GET after each trash returns `{"trashed": true}`. Permanent
+  deletion remains unavailable on all five (A14 step 7).
+- **Why this matters**: A14 proves the guard DENIES what it should; this
+  proves it does not over-block the agent's own output — the failure mode
+  PR #143 was written for (copies the agent could manage through Drive but
+  not write through Sheets) must not reappear in the opposite direction.
+- **Cleanup**: trash all five (reversible; leave them trashed).
+

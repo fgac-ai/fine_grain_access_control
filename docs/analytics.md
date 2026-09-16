@@ -78,7 +78,7 @@ agent and are not "never-called" churn. Queries: `monitoring.md` 7.20a–d.
 | `google_scope_missing` | server (MCP `gmailScopeDenial` / `driveFileScopeDenial`, proxy Gmail handler) | `via` (`mcp`/`proxy`), `scope` (`gmail` / `drive_file`; absent on pre-2026-08-29 events, all of which are gmail), `account_delegated`. Fires when a call is pre-flight denied because Clerk's granted scopes for the account lack what the surface rides on: Gmail calls need `gmail.modify` / `mail.google.com`; non-Gmail calls (typed sheets_*/docs_*/comments_* tools and raw Sheets/Docs/Slides/Drive paths) need `drive.file` — the "checkbox left unchecked at consent" (or pre-drive.file connection) states, which would 403 on every such call until reconnect. Unsampled and independent of `$mcp_tool_call`, so `uniq(person)` is the size of the locked-out population; the same call carries `google_scope_missing: true` on `$mcp_tool_call` and pre-flight-denies with `denial_code` = `failure_reason` = `'gmail_scope_missing'` / `'drive_file_scope_missing'` (outcome `denied_by_policy` since 2026-09-03; `failed` from 2026-08-28 to then) instead of surfacing Google's 403 (outcome `error`). Added 2026-08-28 after repeated per-user gmail_list 403s; drive_file variant 2026-08-29. Since 2026-09-04 a metadata-based denial is confirmed against Google's tokeninfo before it fires — Clerk's scope record is a cache of the last completed OAuth request, and a plain Google sign-in rewrites it without `drive.file` — and when tokeninfo disagrees the call proceeds with `clerk_scope_cache_stale: true` on `$mcp_tool_call`. Since 2026-09-05 tokeninfo decides in BOTH directions (cached ~once per account per token lifetime): a record that claims a scope the token lacks — a no-consent sign-in over a narrow refresh token — is denied as usual and stamps `clerk_scope_record_overstates: true`; monitoring.md §7.12a |
 | `mcp_transport_rejected` | server (`/api/mcp` `withTransportObservability`, every transport-level 4xx) | `reason` (`discover_probe` = MCP 2026-07-28 `server/discover` probe answered with the legacy 400, benign and expected; `unsupported_protocol_version` = the same rejection on any other method, a truly refused client; `sdk`; `parse_error` = our own 400 for a non-JSON body), `status`, `message`, `rpc_method` (first method, scalar), `rpc_methods` (array), `tool`, `protocol_version_header`, `client_id`, `user_agent`. Runbook: `monitoring.md` 7.9 |
 | `mcp_input_validation_failed` | server (`/api/mcp`, tee of a 2xx `tools/call` response) | `tool`, `kind` (`invalid_arguments`/`unknown_tool`), `message`. The SDK's own `isError` -32602 results, which never reach `withToolAnalytics`. Runbook: `monitoring.md` 7.10 |
-| `mcp_auth_attempt` | server (`/api/mcp` `verifyMcpAuth`) | `outcome` (`ok`/`invalid_token`/`no_token`), `client_id`, `strategy_used` (`clerk`/`direct`/`none`), `memo_hit`, `optimizations_enabled`, `success_sample_rate`, `error_class`, `kid` (on `invalid_token` only), `method`; since 2026-09-10 also `user_agent`, `client_name` (from an unauthenticated `initialize`, when the request was one) and `client_class` / `client_class_signal` (`claude` / `internal` / `scanner` / `direct`, see `classifyMcpClient` in `src/lib/mcpClientSignals.ts`; since 2026-09-12 a `direct` row from a bare runtime UA with no `clientInfo` carries `client_class_signal = 'ua:stock-runtime-no-name'` — unnamed automation, read separately from the unlabelled `direct` rows per monitoring.md 7.21e) — so a 401 spike is attributable from this event alone; the day after the MCP Registry listing (2026-09-10) registry crawlers and health probes produced ~6× the usual `no_token` volume and every non-probe `invalid_token`, and `client_class = 'scanner'` is what keeps them out of the alert and the funnel (monitoring.md 2–3, 7.5, 7.21). Auth-health substrate for the JWKS/strategy optimizations. **Failures are unsampled; successes are a 1-in-20 per-request sample** — multiply `ok` by 20 for volume, valid only from the 2026-08-25 fix onward (two earlier versions sampled per-token and were biased; see docs/monitoring.md 1). `kid = 'probe'` marks our own synthetic probes, not users |
+| `mcp_auth_attempt` | server (`/api/mcp` `verifyMcpAuth`) | `outcome` (`ok`/`invalid_token`/`no_token`), `client_id`, `strategy_used` (`clerk`/`direct`/`none`), `memo_hit`, `optimizations_enabled`, `success_sample_rate`, `error_class` (Clerk error name, or `audience_mismatch` since 2026-09-16 when a verified token's `aud` claim names another server), `aud_present` (since 2026-09-16: whether the verified token carried `aud` at all — Clerk issues none today, so `false` everywhere until Clerk honours RFC 8707 `resource`; the first `true` is the signal that binding is live), `kid` (on `invalid_token` only), `method`; since 2026-09-10 also `user_agent`, `client_name` (from an unauthenticated `initialize`, when the request was one) and `client_class` / `client_class_signal` (`claude` / `internal` / `scanner` / `direct`, see `classifyMcpClient` in `src/lib/mcpClientSignals.ts`; since 2026-09-12 a `direct` row from a bare runtime UA with no `clientInfo` carries `client_class_signal = 'ua:stock-runtime-no-name'` — unnamed automation, read separately from the unlabelled `direct` rows per monitoring.md 7.21e) — so a 401 spike is attributable from this event alone; the day after the MCP Registry listing (2026-09-10) registry crawlers and health probes produced ~6× the usual `no_token` volume and every non-probe `invalid_token`, and `client_class = 'scanner'` is what keeps them out of the alert and the funnel (monitoring.md 2–3, 7.5, 7.21). Auth-health substrate for the JWKS/strategy optimizations. **Failures are unsampled; successes are a 1-in-20 per-request sample** — multiply `ok` by 20 for volume, valid only from the 2026-08-25 fix onward (two earlier versions sampled per-token and were biased; see docs/monitoring.md 1). `kid = 'probe'` marks our own synthetic probes, not users |
 | `agent_doc_created` | server (`/api/mcp`, raw `POST v1/documents`, and Drive-side creates of a document) | `document_id`, `auto_granted`, `origin` (`create` / `copy` / `drive_create`) (docs twin of `agent_sheet_created`) |
 | `connector_install_started` | server (`.well-known` OAuth discovery routes, `/api/mcp` auth layer) | `touchpoint` (`oauth_discovery`/`mcp_401`), `endpoint`, `reason` (`no_token`/`invalid_token`), `method`, `user_agent`, `install_fingerprint` (salted sha256 of ip+user-agent — the uniqueness key; see funnel note below), `client_name`/`client_version` (mcp_401 only, when the unauthenticated request was an MCP `initialize`); since 2026-09-10 `client_class` / `client_class_signal` on both touchpoints — `scanner` marks MCP registry crawlers, directory health probes, security scanners and SEO bots (classified from user_agent AND client_name: about a third of the crawlers run on a stock HTTP client and only identify themselves in `clientInfo.name`), `internal` our own probes, `claude` the Anthropic products, `direct` everything else (with `client_class_signal = 'ua:stock-runtime-no-name'` marking the tokenless bare-runtime rows that carry no `clientInfo`, since 2026-09-12). Filter `coalesce(properties.client_class, '') NOT IN ('scanner', 'internal')` before reading any of this as demand; rows before the deploy carry no class |
 
@@ -521,7 +521,7 @@ real large-payload demand per tool.
 classification time, denials included — `raw_api_kind` (the
 `classifyGoogleApiCall` result: `sheets`, `sheets_create`, `docs`,
 `docs_create`, `gmail_read`, `gmail_send`, `gmail_draft_send`, `gmail_write`,
-`file_comments`, `drive_copy`, `drive_create`, `passthrough`, `denied`),
+`file_comments`, `drive_copy`, `drive_create`, `drive_file`, `passthrough`, `denied`),
 `raw_api_family` (Google product: `gmail`, `spreadsheets`, `documents`,
 `slides`, or the classifier's first-two-segments family for passthroughs;
 omitted on denials, which carry `denial_code` — except
@@ -558,6 +558,36 @@ trend queries must not compare across the deploy. New code
 `gmail.settings.*` scopes (family `gmail` kept on both, like the
 family-unsupported denials). `messages/batchModify`, `batchDelete`, `insert`,
 and `import` are new literal template values (previously `messages/{id}`).
+
+Since mcp-drive-perfile-guard (2026-09-16): every raw call addressed to ONE
+Drive file by id — `drive/v3/files/{id}` metadata GET/PATCH/PUT (rename,
+trash/untrash, move), `/permissions`, `/revisions`, `/export`, `/watch`, the
+`upload/` media-update variant — lands as `raw_api_kind: 'drive_file'`
+(family `drive/v3`) instead of `passthrough`, and runs the per-file guard the
+REST proxy has always had. Historical `passthrough` rows with a
+`drive/v3/files/{id}…` endpoint template are this kind's pre-deploy volume;
+listing (`GET drive/v3/files`), `generateIds`, `about`, `changes` and `drives`
+stay `passthrough`. The new prop `drive_file_gate` says which branch decided:
+`rule` (a sheets/docs rule names the file — the standard per-file denial
+codes `sheets_*` / `docs_*` apply, plus `file_id` / `file_service`),
+`mime_gated` (no rule, but Google reports a Sheets/Docs mimeType → the
+not-exposed denial with an approval link — this is the branch that closes the
+"trash an unexposed spreadsheet" hole), `mime_other` (no rule, any other
+mimeType → forwarded under drive.file, `raw_api_passthrough: true` kept so
+the passthrough demand series stays continuous), `invisible` (the metadata
+lookup 404ed → `denial_code: 'file_grant_missing_at_google'`, answered without
+a second Google call). Passthrough-id 404 wording is unchanged. Counting
+`mime_other` over time is the demand signal for per-file rules on other kinds
+(Slides, PDFs).
+
+New denial code `raw_api_method_unsupported` (outcome `denied_by_policy`,
+family null): a raw call with a method outside GET/POST/PUT/PATCH — in
+practice DELETE — refused by the classifier before account resolution, and
+again by the executor. The tool schema already rejects such a call at the MCP
+layer (the SDK returns a validation error the client sees as `isError`, with
+no `$mcp_tool_call` denial row), so this code appearing at all means a client
+reached the handler with a method the schema should have stopped — treat any
+non-zero count as a regression alarm, not demand.
 
 **`client_name`:** populated from the MCP `initialize` handshake's
 clientInfo — the auth layer parses it (the only request that carries it in
