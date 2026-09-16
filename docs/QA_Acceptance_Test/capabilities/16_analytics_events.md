@@ -451,7 +451,9 @@ attributable to it.
   second notified row exists. The open from the emailed link carries
   `link_source: 'email'`; an open from the chat's URL carries `'agent'`. A
   capped repeat carries `'skipped_rate_capped'` and no notified row; with
-  no SMTP credentials every mint carries `'disabled'`
+  no sender key every mint carries `'disabled'`. Each sent reminder is also
+  one `proxy_request {service: 'gmail', outcome: 'success'}` row under the
+  sender's proxy key
 - **Regression guard**: `notify_status` must be present on EVERY mint path —
   policy denials, send denials, and `request_access` — or the delivery split
   in `monitoring.md` 7.23 silently drops that path into the unlabelled bucket

@@ -119,12 +119,13 @@ if (dbIsProd && mode === 'test') {
 //   * scripts/qa-posthog-events.ts reads .env.local via dotenv.
 console.log('\nPOSTHOG (query access)');
 // Approval-link reminder email (src/lib/approvalNotify.ts): off unless the
-// support mailbox's SMTP credentials are present. Informational — local and
-// preview normally run with it off; production needs both set (Vercel env).
-if (process.env.SUPPORT_SMTP_USER && process.env.SUPPORT_SMTP_APP_PASSWORD) {
-  console.log(`Approval reminder email: ON, from ${process.env.SUPPORT_SMTP_USER} via ${process.env.SUPPORT_SMTP_HOST || 'smtp.gmail.com'}`);
+// support mailbox's FGAC proxy key and address are present. Informational —
+// local and preview normally run with it off; production needs both set
+// (Vercel env). The key must belong to a profile that allows sending.
+if (process.env.SUPPORT_FGAC_PROXY_KEY && process.env.SUPPORT_SENDER_EMAIL) {
+  console.log(`Approval reminder email: ON, from ${process.env.SUPPORT_SENDER_EMAIL} through FGAC's proxy API (key ${process.env.SUPPORT_FGAC_PROXY_KEY.slice(0, 12)}…)`);
 } else {
-  console.log('Approval reminder email: off (SUPPORT_SMTP_USER / SUPPORT_SMTP_APP_PASSWORD not set)');
+  console.log('Approval reminder email: off (SUPPORT_FGAC_PROXY_KEY / SUPPORT_SENDER_EMAIL not set)');
 }
 
 const phKey = process.env.POSTHOG_PERSONAL_API_KEY;

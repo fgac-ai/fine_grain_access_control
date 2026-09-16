@@ -5,16 +5,18 @@
  *   - agent-controlled strings cannot inject mail headers or run past the cap
  *   - the emailed URL carries `src=email` after the signed params, untouched
  *   - the denial line exists only for `sent` / `already_sent`
- *   - the sender is FGAC's own mailbox from the environment; no sender = off
- * The repeat/cap/claim logic needs the ledger table and is exercised
- * end-to-end by capability 14 A16.
+ *   - the raw message names FGAC's support mailbox as From and Reply-To,
+ *     with an RFC 2047 subject and MIME headers
+ * Sender configuration (SUPPORT_FGAC_PROXY_KEY / SUPPORT_SENDER_EMAIL) and
+ * the repeat/cap/claim logic live in src/lib/approvalNotify.ts, which
+ * imports the proxy route (database-backed) — exercised end-to-end by
+ * capability 14 A16, not here.
  * Run: npx tsx scripts/test-approval-notify-copy.ts (part of `npm run mcp:lint`).
  */
 import {
-  approvalEmailBody, approvalEmailSubject, emailLinkUrl, notifyDenialLine, sanitizeLine, shortGrant,
+  approvalEmailBody, approvalEmailRaw, approvalEmailSubject, emailLinkUrl, encodeHeaderWord, notifyDenialLine, sanitizeLine, shortGrant,
   NOTIFY_MAX_PER_DAY, NOTIFY_MIN_GAP_MS, type NotifyLink,
 } from '../src/lib/approvalNotifyCopy';
-import { senderConfig } from '../src/lib/approvalNotify';
 
 let failures = 0;
 function check(name: string, cond: boolean) {
@@ -70,14 +72,15 @@ console.log('policy constants');
 check('cap is three per day', NOTIFY_MAX_PER_DAY === 3);
 check('repeat gap is minutes, not seconds', NOTIFY_MIN_GAP_MS >= 60_000 && NOTIFY_MIN_GAP_MS <= 30 * 60_000);
 
-console.log('sender config');
-check('no credentials → off', senderConfig({}) === null);
-check('kill switch wins', senderConfig({ APPROVAL_LINK_EMAIL: 'off', SUPPORT_SMTP_USER: 'support@fgac.ai', SUPPORT_SMTP_APP_PASSWORD: 'x' }) === null);
-check('address without @ → off', senderConfig({ SUPPORT_SMTP_USER: 'support', SUPPORT_SMTP_APP_PASSWORD: 'x' }) === null);
-const cfg = senderConfig({ SUPPORT_SMTP_USER: ' support@fgac.ai ', SUPPORT_SMTP_APP_PASSWORD: ' abcd efgh ' });
-check('both present → sender, trimmed, Gmail relay by default', cfg?.address === 'support@fgac.ai' && cfg?.appPassword === 'abcd efgh' && cfg?.host === 'smtp.gmail.com' && cfg?.port === 465);
-const qa = senderConfig({ SUPPORT_SMTP_USER: 'qa@example.test', SUPPORT_SMTP_APP_PASSWORD: 'x', SUPPORT_SMTP_HOST: 'smtp.ethereal.email', SUPPORT_SMTP_PORT: '587' });
-check('relay host/port are overridable for QA capture', qa?.host === 'smtp.ethereal.email' && qa?.port === 587);
+console.log('raw message');
+const raw = approvalEmailRaw({ from: 'support@fgac.ai', to: 'owner@example.com', subject, body });
+check('From is FGAC at the support mailbox, Reply-To the same', raw.startsWith('From: FGAC <support@fgac.ai>\r\nReply-To: support@fgac.ai\r\nTo: owner@example.com\r\n'));
+check('Subject then MIME headers then a blank line', /\r\nSubject: [^\r\n]+\r\nMIME-Version: 1\.0\r\nContent-Type: text\/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n/.test(raw));
+check('non-ASCII subject is an RFC 2047 encoded word', /\r\nSubject: =\?UTF-8\?B\?[A-Za-z0-9+/=]+\?=\r\n/.test(raw));
+check('the encoded word decodes back to the subject', Buffer.from(raw.match(/Subject: =\?UTF-8\?B\?([A-Za-z0-9+/=]+)\?=/)![1], 'base64').toString('utf8') === subject);
+check('pure-ASCII headers are left readable', encodeHeaderWord('FGAC: plain') === 'FGAC: plain');
+check('a CRLF in the recipient cannot add a header', !approvalEmailRaw({ from: 'support@fgac.ai', to: 'a@b.c\r\nBcc: x@y.z', subject: 's', body: '' }).includes('\r\nBcc'));
+check('a CRLF in the sender cannot add a header', !approvalEmailRaw({ from: 's@example.com\r\nBcc: x@y.z', to: 'a@b.c', subject: 's', body: '' }).includes('\r\nBcc'));
 
 if (failures) { console.error(`\n${failures} approval-notify copy check(s) failed`); process.exit(1); }
 console.log('\nAll approval-notify copy checks passed');

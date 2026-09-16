@@ -4,11 +4,11 @@
  * only builds strings, so `scripts/test-approval-notify-copy.ts` can pin
  * them without a database or a mail server.
  *
- * Sender: FGAC's own support mailbox (never the user's Google grant — that
- * grant exists for the user's agent acting at the user's direction, and an
- * FGAC-initiated send through it is a use the user never consented to;
- * decided 2026-09-15). Reply-To is the same mailbox, so "let us know" is a
- * reply.
+ * Sender: FGAC's own support mailbox, sending through FGAC's own proxy API
+ * with its own key (never the user's Google grant — that grant exists for
+ * the user's agent acting at the user's direction, and an FGAC-initiated
+ * send through it is a use the user never consented to; decided
+ * 2026-09-15). Reply-To is the same mailbox, so "let us know" is a reply.
  *
  * When (Ken, 2026-09-15): only after the agent has asked for the SAME link
  * more than once and the person has still not opened it — the first denial
@@ -116,6 +116,28 @@ export function approvalEmailBody(opts: {
     `— FGAC (${opts.supportAddress})`,
   );
   return lines.join('\n');
+}
+
+/** RFC 2047 encoded-word for a header that may carry non-ASCII (the subject's em dash). */
+export function encodeHeaderWord(value: string): string {
+  if (/^[\x20-\x7e]*$/.test(value)) return value;
+  return `=?UTF-8?B?${Buffer.from(value, 'utf8').toString('base64')}?=`;
+}
+
+/**
+ * The RFC 2822 message FGAC's proxy API sends (base64url-encoded by the
+ * caller). From and Reply-To are the support mailbox; the proxy sends as
+ * the key's own account, so Gmail keeps the From consistent.
+ */
+export function approvalEmailRaw(opts: { from: string; to: string; subject: string; body: string }): string {
+  const from = sanitizeLine(opts.from, 254);
+  return `From: FGAC <${from}>\r\n` +
+    `Reply-To: ${from}\r\n` +
+    `To: ${sanitizeLine(opts.to, 254)}\r\n` +
+    `Subject: ${encodeHeaderWord(sanitizeLine(opts.subject, 200))}\r\n` +
+    `MIME-Version: 1.0\r\n` +
+    `Content-Type: text/plain; charset=utf-8\r\n` +
+    `Content-Transfer-Encoding: 8bit\r\n\r\n${opts.body}`;
 }
 
 /**

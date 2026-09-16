@@ -171,12 +171,17 @@
   2026-09-04); reproduced locally as 6 clicks → 6 POSTs → 6 duplicate rules
 
 ### A16: A repeat request emails the link from FGAC's support mailbox; a first request does not
-- Environment needs the sender configured: `SUPPORT_SMTP_USER` /
-  `SUPPORT_SMTP_APP_PASSWORD` (QA points `SUPPORT_SMTP_HOST=smtp.ethereal.email`,
-  `SUPPORT_SMTP_PORT=587` at a throwaway Ethereal capture account —
-  `.claude/launch.json` `fgac-dev-smtp` sources `.secrets/ethereal.env`).
-  Without them every mint carries `notify_status: 'disabled'` and this
-  assertion is `blocked`, not `skip`
+- Environment needs the sender configured: `SUPPORT_FGAC_PROXY_KEY` (an
+  FGAC proxy key on a profile with a send rule covering the recipients) and
+  `SUPPORT_SENDER_EMAIL` (that key's own mailbox). In production that is the
+  support mailbox's FGAC account. For QA, stand USER_A in for it: as USER_A
+  create a profile with a "Send to Anyone" rule and a key through the
+  dashboard (a real user flow), write both values to `.secrets/sender.env`,
+  and start the dev server with `.claude/launch.json` `fgac-dev-sender`. The
+  reminder then lands in USER_A's own inbox, sent by USER_A's key — read it
+  through the MCP `gmail_list`/`gmail_read` tools. Without the two variables
+  every mint carries `notify_status: 'disabled'` and this assertion is
+  `blocked`, not `skip`
 - Signed in as USER_A, trigger a send denial to a recipient never denied
   before on this profile (a fresh `+tag` on `USER_B_EMAIL`), then trigger the
   identical denial again within a minute, then a third time at least 5
@@ -184,7 +189,7 @@
 - **Expected**: The FIRST and SECOND denials carry NO 📧 line (first ask;
   repeat inside the same-turn window) and nothing is emailed. The THIRD
   denial carries a 📧 line saying that because this is a repeat request FGAC
-  has also emailed the link to the user just now; the capture mailbox holds
+  has also emailed the link to the user just now; the sender's inbox holds
   exactly ONE message to USER_A's address, From `FGAC <support address>`,
   Reply-To the support address, subject `Your agent has asked 3 times to
   send email to … — approve it?`, plain text, body opening "FGAC has detected

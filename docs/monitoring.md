@@ -1638,9 +1638,14 @@ GROUP BY d, who ORDER BY reminders DESC, d DESC LIMIT 20
 
 ```sql
 -- 7.23c — delivery health (7 d): mint outcomes by notify_status. `disabled`
--- everywhere = the SMTP credentials are missing in that environment;
--- `failed` = the relay refused or the send was unconfirmed (server logs:
--- "[approvalNotify]"); `skipped_rate_capped` = the daily cap engaged.
+-- everywhere = SUPPORT_FGAC_PROXY_KEY / SUPPORT_SENDER_EMAIL are missing in
+-- that environment; `failed` = FGAC's proxy API or Google refused the send
+-- (a 403 means the support profile lost its send rule; a 401 means the key
+-- was revoked) or it was unconfirmed (server logs: "[approvalNotify]");
+-- `skipped_rate_capped` = the daily cap engaged. The sends themselves are
+-- `proxy_request` rows under the support key — exclude that key's
+-- proxy_key_id (or the support address's account_email) from customer
+-- usage counts.
 SELECT toString(properties.notify_status) AS status, count() AS mints,
        uniq(properties.request_id) AS requests, uniq(person_id) AS people
 FROM events

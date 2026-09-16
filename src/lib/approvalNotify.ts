@@ -1,16 +1,20 @@
 /**
  * Out-of-band approval-link delivery: when an agent asks for the SAME
  * approval link again and the person has still not opened it, email the
- * link from FGAC's own support mailbox. The denial text still carries the
- * link; this is the channel that survives an agent surface that hides or
- * paraphrases the tool result.
+ * link from FGAC's own support mailbox — through FGAC itself. The denial
+ * text still carries the link; this is the channel that survives an agent
+ * surface that hides or paraphrases the tool result.
  *
  * Invariants:
- *   - FGAC's own credentials only. The message is sent through the support
- *     mailbox's SMTP app password (`SUPPORT_SMTP_USER` /
- *     `SUPPORT_SMTP_APP_PASSWORD`). Nothing here touches a user's Google
- *     grant — that grant is for their agent acting at their direction, and
- *     an FGAC-initiated send through it was rejected on 2026-09-15.
+ *   - FGAC's own account, through FGAC's own product. The support mailbox
+ *     is a normal FGAC user with a proxy key on a profile that allows
+ *     sending; the reminder is a `gmail/v1/users/me/messages/send` call to
+ *     FGAC's proxy API with that key (`SUPPORT_FGAC_PROXY_KEY`), invoked
+ *     in-process — same auth, same send-whitelist enforcement, same
+ *     `proxy_request` analytics as any customer call. Nothing here touches
+ *     a USER's Google grant: that grant is for their agent acting at their
+ *     direction, and an FGAC-initiated send through it was rejected on
+ *     2026-09-15.
  *   - Due only on a repeat: the request must have been minted before, the
  *     current mint must be at least NOTIFY_MIN_GAP_MS after the first, and
  *     the approve page must never have been opened for it.
@@ -20,17 +24,18 @@
  *     statement — before anything is sent, so a concurrent mint or a job
  *     re-minting hourly cannot produce a second email and parallel claims
  *     cannot each pass a separate count. The claim is released only on a
- *     DEFINITE non-send (the server refused the message); an ambiguous
- *     outcome — timeout, dropped connection — keeps it, because a lost
- *     email costs a channel the chat link still covers while a duplicate
- *     costs trust.
+ *     DEFINITE non-send (FGAC or Google refused the message with a 4xx); an
+ *     ambiguous outcome — timeout, 5xx — keeps it, because a lost email
+ *     costs a channel the chat link still covers while a duplicate costs
+ *     trust.
  *   - Best-effort. Every failure degrades to "link only", exactly the
  *     response the agent got before this existed. Nothing here throws, and
  *     a non-due mint costs one SELECT.
  */
-import nodemailer from 'nodemailer';
+import { NextRequest } from 'next/server';
+import { POST as proxyPost } from '@/app/api/proxy/[...path]/route';
 import {
-  approvalEmailBody, approvalEmailSubject, NOTIFY_MAX_PER_DAY, NOTIFY_MIN_GAP_MS,
+  approvalEmailBody, approvalEmailRaw, approvalEmailSubject, NOTIFY_MAX_PER_DAY, NOTIFY_MIN_GAP_MS,
   type NotifyLink, type NotifyStatus,
 } from './approvalNotifyCopy';
 import {
@@ -41,35 +46,32 @@ import { withTimeout } from './upstreamTimeouts';
 
 export type { NotifyLink, NotifyStatus } from './approvalNotifyCopy';
 
-const SMTP_TIMEOUT_MS = 8_000;
+const SEND_TIMEOUT_MS = 10_000;
+const GMAIL_SEND_PATH = ['gmail', 'v1', 'users', 'me', 'messages', 'send'];
 
 export interface SenderConfig {
-  /** The mailbox the message is sent from and replies go to. */
+  /** The FGAC proxy key (`sk_proxy_…`) of the support mailbox's profile. */
+  proxyKey: string;
+  /** The mailbox that key sends from; also the Reply-To. */
   address: string;
-  appPassword: string;
-  /** SMTP relay; Gmail's by default. QA points this at a capture server. */
-  host: string;
-  port: number;
 }
 
 /**
- * Sender credentials from the environment; null = the feature is off (no
- * claim, no email, denial text unchanged). `APPROVAL_LINK_EMAIL=off` is the
- * explicit kill switch.
+ * Sender from the environment; null = the feature is off (no claim, no
+ * email, denial text unchanged). `APPROVAL_LINK_EMAIL=off` is the explicit
+ * kill switch.
  */
 export function senderConfig(env: Record<string, string | undefined> = process.env): SenderConfig | null {
   if (env.APPROVAL_LINK_EMAIL === 'off') return null;
-  const address = env.SUPPORT_SMTP_USER?.trim();
-  const appPassword = env.SUPPORT_SMTP_APP_PASSWORD?.trim();
-  if (!address || !appPassword || !address.includes('@')) return null;
-  const host = env.SUPPORT_SMTP_HOST?.trim() || 'smtp.gmail.com';
-  const port = Number(env.SUPPORT_SMTP_PORT) || 465;
-  return { address, appPassword, host, port };
+  const proxyKey = env.SUPPORT_FGAC_PROXY_KEY?.trim();
+  const address = env.SUPPORT_SENDER_EMAIL?.trim();
+  if (!proxyKey || !address || !address.includes('@')) return null;
+  return { proxyKey, address };
 }
 
 export type SendResult =
   | { ok: true }
-  /** `definite`: the server answered and refused — nothing went out, safe to release the claim. */
+  /** `definite`: FGAC or Google refused with a 4xx — nothing went out, safe to release the claim. */
   | { ok: false; definite: boolean; error: string };
 
 export interface NotifyOwnerOpts {
@@ -81,7 +83,7 @@ export interface NotifyOwnerOpts {
   dashboardUrl: string;
   /** Test seams. */
   sender?: SenderConfig | null;
-  send?: (cfg: SenderConfig, msg: { to: string; subject: string; text: string }) => Promise<SendResult>;
+  send?: (cfg: SenderConfig, raw: string) => Promise<SendResult>;
   now?: () => Date;
 }
 
@@ -91,27 +93,25 @@ export interface NotifyOwnerResult {
   notifiedAt: Date | null;
 }
 
-async function smtpSend(cfg: SenderConfig, msg: { to: string; subject: string; text: string }): Promise<SendResult> {
+/**
+ * The send, as a customer would make it: a proxy-API request with the
+ * support profile's key, handled by the proxy route in-process (it reads
+ * only the request and its path params, so no network hop and no dependence
+ * on the deployment's public URL — which on previews points at production).
+ */
+async function proxySend(cfg: SenderConfig, raw: string): Promise<SendResult> {
   try {
-    const transport = nodemailer.createTransport({
-      host: cfg.host, port: cfg.port, secure: cfg.port === 465,
-      auth: { user: cfg.address, pass: cfg.appPassword },
-      connectionTimeout: SMTP_TIMEOUT_MS, greetingTimeout: SMTP_TIMEOUT_MS, socketTimeout: SMTP_TIMEOUT_MS,
+    const req = new NextRequest(`http://fgac.internal/api/proxy/${GMAIL_SEND_PATH.join('/')}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${cfg.proxyKey}`, 'Content-Type': 'application/json', 'User-Agent': 'fgac-approval-reminder' },
+      body: JSON.stringify({ raw }),
     });
-    await withTimeout(transport.sendMail({
-      from: { name: 'FGAC', address: cfg.address },
-      replyTo: cfg.address,
-      to: msg.to,
-      subject: msg.subject,
-      text: msg.text,
-    }), SMTP_TIMEOUT_MS + 2_000);
-    return { ok: true };
+    const res = await withTimeout(proxyPost(req, { params: Promise.resolve({ path: GMAIL_SEND_PATH }) }), SEND_TIMEOUT_MS);
+    if (res.ok) return { ok: true };
+    const text = await res.text().catch(() => '');
+    return { ok: false, definite: res.status >= 400 && res.status < 500, error: `HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ''}` };
   } catch (err) {
-    // nodemailer surfaces an SMTP refusal with a responseCode; anything else
-    // (timeout, socket drop, DNS) may or may not have gone out.
-    const code = (err as { responseCode?: number })?.responseCode;
-    const definite = typeof code === 'number' && code >= 400;
-    return { ok: false, definite, error: err instanceof Error ? `${err.name}: ${err.message}` : String(err) };
+    return { ok: false, definite: false, error: err instanceof Error ? `${err.name}: ${err.message}` : String(err) };
   }
 }
 
@@ -152,11 +152,12 @@ async function attempt(opts: NotifyOwnerOpts, primary: NotifyLink, sender: Sende
   }
 
   const subject = approvalEmailSubject(primary, state.mintCount);
-  const text = approvalEmailBody({
+  const body = approvalEmailBody({
     agentLabel: opts.agentLabel, links: opts.links, times: state.mintCount, firstAskedAt: state.firstMintedAt,
     dashboardUrl: opts.dashboardUrl, supportAddress: sender.address,
   });
-  const sent = await (opts.send ?? smtpSend)(sender, { to: opts.owner.email, subject, text });
+  const raw = Buffer.from(approvalEmailRaw({ from: sender.address, to: opts.owner.email, subject, body })).toString('base64url');
+  const sent = await (opts.send ?? proxySend)(sender, raw);
   if (!sent.ok) {
     console.error(`[approvalNotify] send ${sent.definite ? 'refused' : 'unconfirmed'}:`, sent.error);
     if (sent.definite) await releaseApprovalNotification(primary.requestId);
