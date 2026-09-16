@@ -39,16 +39,30 @@ using a customer's grant.
 
 ## What Ken must provision for production
 
-1. Sign up support@fgac.ai on fgac.ai with Google, Gmail scope included.
-2. Dashboard → "+ New profile" named `FGAC reminders`, mailbox access =
-   support@fgac.ai only. A profile IS its key (one bearer per profile;
-   there is no separate key label).
-3. On that profile: "+ Apply a rule" → "+ Create a new rule…" → Gmail
-   send whitelist with pattern `*` (the "Enable sending to anyone" quick-add
-   is Default-Profile-only, and the Default Profile should NOT be the
-   sender). Then "Reveal Key".
-4. Vercel Production env, no quotes: `SUPPORT_FGAC_PROXY_KEY=<that key>`,
+The support address (support@fgac.ai) is a send-as ALIAS on the operator's
+own Google Workspace mailbox (Ken, 2026-09-16), not a separate account, so the sender is the
+operator's existing FGAC account and no sign-up is needed:
+
+1. Signed in to fgac.ai as the operator account that owns the alias:
+   "+ New profile" named `FGAC reminders`, mailbox access = that mailbox
+   only (no delegated mailboxes). A profile IS its key.
+2. On that profile: "+ Apply a rule" → "+ Create a new rule…" → Gmail send
+   whitelist with pattern `*` (the quick-add is Default-Profile-only, and
+   the Default Profile should not be the sender). "Reveal Key".
+3. Vercel Production env, no quotes: `SUPPORT_FGAC_PROXY_KEY=<that key>`,
    `SUPPORT_SENDER_EMAIL=support@fgac.ai`. Deploy.
-5. Add support@fgac.ai to the internal-account exclusion list used by the
-   analytics queries and the daily review (its `proxy_request` rows are
-   FGAC's own traffic).
+4. The message is sent by the operator mailbox's grant with `From: FGAC
+   <support@fgac.ai>` and `Reply-To: support@fgac.ai`. Gmail honours a From
+   that matches a configured send-as alias; if the alias were ever removed
+   Gmail would silently rewrite From to the mailbox's primary address (no
+   error). Check the first production reminder's headers once (7.23c shows
+   the send). Replies land in the operator's inbox via the alias, as
+   support mail does today.
+5. The operator address is already on the internal-account exclusion list,
+   so the reminders' `proxy_request` rows stay out of customer counts as
+   long as the exclusion is by owner address; queries keyed on
+   `proxy_key_id` should exclude the reminders profile's key too.
+
+Key hygiene: the key can send as the operator to anyone, so it lives only
+in the Vercel Production env; revoking the `FGAC reminders` profile kills
+it without touching anything else.
