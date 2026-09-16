@@ -464,3 +464,24 @@ attributable to it.
   FGAC session, so every link click from it lands here) read as "minted,
   never opened". 15 of 110 never-opened requests since 2026-09-09 were
   owners who signed in within the hour and landed on the profile page
+
+### A23: A signed-in owner is routed back to the approval that hit the wall
+- Mint a REAL approval link for the signed-in QA user (capability 15 A8,
+  `request_access` for a sheet, via the MCP endpoint — the ledger row must
+  exist). Sign out, open the link so it bounces to Clerk sign-in (do not sign
+  in there), then sign in from the plain `/dashboard` URL — or, for the
+  cross-browser case, fetch the link signed-out with curl and a browser UA
+  (`Accept: text/html`, `Sec-Fetch-Dest: document`) and then visit
+  `/dashboard` in a pane that is already signed in as that user. Then visit
+  `/dashboard` a second time
+- **Expected**: the first `/dashboard` visit lands on `/dashboard/approve?a=…`
+  — the link itself, rendering the approval — and PostHog carries
+  `approval_wall_recorded {recorded: true, request_id}` followed by
+  `approval_wall_routed {request_id, seconds_since_wall}` for the same
+  request. The second `/dashboard` visit lands on the profile page (routed
+  once). A link with a bad signature records nothing (`recorded` never
+  fires) and routes nowhere. A hit older than 30 minutes does not route
+- **Why**: the lost-context sign-in ends on `/dashboard` (Clerk's Home URL)
+  in whatever browser the person actually uses; only a server-side record
+  keyed on the owner can send them back from there — the wall cookie is
+  same-browser only

@@ -1737,3 +1737,43 @@ pending-approvals dashboard surface (implementation plan
 `pct_recovered` rises and `after_wall` sign-ins start landing on
 `/dashboard/approve` (which would mean the redirect kept its context) or
 stop mattering because the banner picks the request up.
+
+Routing (shipped in the same branch, `approval_wall_recorded` →
+`approval_wall_routed`): how many wall hits by people were filed under their
+owner, and how many of those owners were then sent back to the approval by
+`/dashboard`. A recorded hit with no route within the hour is an owner who
+did not sign in (or signed in somewhere `/dashboard` never loaded).
+
+```sql
+-- wall hits recorded against an owner → routed back → opened
+WITH recorded AS (
+  SELECT toString(properties.request_id) AS rid, min(timestamp) AS first_recorded
+  FROM events
+  WHERE event = 'approval_wall_recorded' AND properties.environment = 'production'
+    AND toString(properties.recorded) = 'true' AND timestamp >= now() - INTERVAL 30 DAY
+  GROUP BY rid
+),
+routed AS (
+  SELECT toString(properties.request_id) AS rid, min(timestamp) AS first_routed,
+         min(toFloat64OrNull(toString(properties.seconds_since_wall))) AS secs
+  FROM events
+  WHERE event = 'approval_wall_routed' AND properties.environment = 'production'
+    AND timestamp >= now() - INTERVAL 30 DAY
+  GROUP BY rid
+),
+opened AS (
+  SELECT toString(properties.request_id) AS rid, min(timestamp) AS first_open
+  FROM events
+  WHERE event = 'approval_link_opened' AND properties.environment = 'production'
+    AND properties.client != 'agent' AND timestamp >= now() - INTERVAL 30 DAY
+  GROUP BY rid
+)
+SELECT count() AS recorded_requests,
+       countIf(ro.first_routed > r.first_recorded) AS routed,
+       countIf(o.first_open > r.first_recorded) AS opened_after,
+       round(100.0 * countIf(ro.first_routed > r.first_recorded) / count(), 1) AS pct_routed,
+       round(median(ro.secs)) AS median_wall_to_route_s
+FROM recorded r
+LEFT JOIN routed ro ON ro.rid = r.rid
+LEFT JOIN opened o ON o.rid = r.rid
+```

@@ -82,6 +82,14 @@ const clerkHandler = clerkMiddleware(async (auth, req, event) => {
       const repeat = markerMatchesHit(req.cookies.get(APPROVAL_WALL_COOKIE)?.value, hit);
       if (!repeat) {
         event.waitUntil(captureEdgeEvent(APPROVAL_WALL_DISTINCT_ID, APPROVAL_WALL_EVENT, { ...hit }));
+        // Record the hit against the link's owner so /dashboard can route
+        // them back after they sign in — in ANY browser. The edge has no
+        // database; the route verifies the link's signature against the
+        // key's owner before writing, so this needs no secret. People only:
+        // an agent fetching the link is not an owner about to sign in.
+        if (hit.navigation && !hit.agent_driven) {
+          event.waitUntil(recordWallHit(url));
+        }
       }
       // The marker rides on Clerk's own sign-in redirect. `auth.protect()`
       // THROWS a control-flow error that clerkMiddleware turns into the
@@ -93,6 +101,21 @@ const clerkHandler = clerkMiddleware(async (auth, req, event) => {
     await auth.protect();
   }
 });
+
+/** Hand the link's own params to the Node-runtime recorder (fire-and-forget). */
+function recordWallHit(url: URL): Promise<void> {
+  const p = url.searchParams;
+  const body = JSON.stringify({ a: p.get('a'), k: p.get('k'), r: p.get('r'), s: p.get('s') });
+  return fetch(`${url.origin}/api/approval-wall`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body,
+  })
+    .then(() => undefined)
+    .catch(err => {
+      console.warn('[middleware] approval wall record failed:', err instanceof Error ? err.message : err);
+    });
+}
 
 /** Wall hits whose marker cookie still has to be attached to Clerk's redirect
  *  (keyed by the request object, which Clerk passes through unchanged). */

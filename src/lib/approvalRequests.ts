@@ -14,7 +14,7 @@
  */
 import { db } from '@/db';
 import { approvalRequests } from '@/db/schema';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull, sql } from 'drizzle-orm';
 
 /**
  * Record one mint ATTEMPT. First attempt inserts; retries increment
@@ -97,4 +97,92 @@ export async function markApprovalRequestApproved(requestId: string): Promise<vo
   } catch (err) {
     console.error('[approvalRequests] approve record failed:', err);
   }
+}
+
+// ─── Approval sign-in wall → post-sign-in routing ───────────────────────────
+// A signed-out visit to an approval link (the Claude desktop in-app browser
+// on every click) is recorded against the link's OWNER — the key in the link
+// resolves to a user and the signature verifies against that user, so no
+// session is needed and nothing unsigned can plant a hit. When that owner
+// then signs in and lands on /dashboard, `findRoutableWallHit` sends them
+// straight back to the approval. Cross-browser by construction: the hit is
+// keyed on the owner, not on a cookie.
+
+/** Stamp a verified wall hit. `wallQuery` is the link's own a/k/r/s query
+ *  string, stored verbatim so the redirect needs no re-signing. */
+export async function recordApprovalWallHit(requestId: string, wallQuery: string): Promise<boolean> {
+  try {
+    const rows = await db.update(approvalRequests)
+      .set({ wallHitAt: new Date(), wallQuery, routedAt: null })
+      .where(eq(approvalRequests.requestId, requestId))
+      .returning({ requestId: approvalRequests.requestId });
+    return rows.length > 0;
+  } catch (err) {
+    console.error('[approvalRequests] wall hit record failed:', err);
+    return false;
+  }
+}
+
+export interface RoutableWallHit {
+  requestId: string;
+  action: string;
+  wallQuery: string;
+  wallHitAt: Date;
+}
+
+/** Candidate rows for routing: this owner's requests with a wall hit and no
+ *  approval. The pure decision (recency, opened-since, routed-once) lives in
+ *  `src/lib/approvalRouting.ts` so it can be unit-tested. */
+export async function listWallHitsForRouting(userId: string): Promise<Array<RoutableWallHit & { openedAt: Date | null; routedAt: Date | null }>> {
+  try {
+    const rows = await db.select({
+      requestId: approvalRequests.requestId,
+      action: approvalRequests.action,
+      wallQuery: approvalRequests.wallQuery,
+      wallHitAt: approvalRequests.wallHitAt,
+      openedAt: approvalRequests.openedAt,
+      routedAt: approvalRequests.routedAt,
+    })
+      .from(approvalRequests)
+      .where(and(
+        eq(approvalRequests.userId, userId),
+        isNull(approvalRequests.approvedAt),
+        isNotNull(approvalRequests.wallHitAt),
+        isNotNull(approvalRequests.wallQuery),
+      ));
+    return rows.flatMap(r => r.wallHitAt && r.wallQuery
+      ? [{ requestId: r.requestId, action: r.action, wallQuery: r.wallQuery, wallHitAt: r.wallHitAt, openedAt: r.openedAt, routedAt: r.routedAt }]
+      : []);
+  } catch (err) {
+    console.error('[approvalRequests] wall hit lookup failed:', err);
+    return [];
+  }
+}
+
+/** Stamp that /dashboard routed the owner to this request — once per hit. */
+export async function markApprovalRequestRouted(requestId: string): Promise<void> {
+  try {
+    await db.update(approvalRequests)
+      .set({ routedAt: new Date() })
+      .where(eq(approvalRequests.requestId, requestId));
+  } catch (err) {
+    console.error('[approvalRequests] route record failed:', err);
+  }
+}
+
+/** The /dashboard decision in one call (keeps the clock out of render):
+ *  the route to send a freshly signed-in owner to, stamped as routed, or
+ *  null. Rules in src/lib/approvalRouting.ts. */
+export async function resolveWallRoute(userId: string): Promise<{ path: string; requestId: string; action: string; secondsSinceWall: number } | null> {
+  const { pickRoutableWallHit, approvalRoutePath } = await import('./approvalRouting');
+  const now = Date.now();
+  const hit = pickRoutableWallHit(await listWallHitsForRouting(userId), now);
+  if (!hit) return null;
+  await markApprovalRequestRouted(hit.requestId);
+  return {
+    path: approvalRoutePath(hit),
+    requestId: hit.requestId,
+    action: hit.action,
+    secondsSinceWall: Math.max(0, Math.round((now - hit.wallHitAt.getTime()) / 1000)),
+  };
 }

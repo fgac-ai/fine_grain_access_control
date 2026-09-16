@@ -3,6 +3,9 @@ import { ConnectGoogleWarning } from './ConnectGoogleWarning';
 import { SignInTelemetry } from './SignInTelemetry';
 import { AgentProfilesView } from './AgentProfilesView';
 import { loadDashboardData, defaultProfileSlug } from './loadDashboard';
+import { resolveWallRoute } from '@/lib/approvalRequests';
+import { captureServerEvent } from '@/lib/posthogServer';
+import { auth } from '@clerk/nextjs/server';
 
 /**
  * /dashboard is the entry point, but every agent profile lives at its own
@@ -10,6 +13,14 @@ import { loadDashboardData, defaultProfileSlug } from './loadDashboard';
  * (else first) active profile. It renders inline only when there is nothing
  * to redirect to: no active profiles yet (the empty state creates the first
  * one), or only legacy labels that produce no usable slug.
+ *
+ * It is also where every sign-in lands (Clerk's Home URL and the hosted
+ * sign-in fallback both point here), so it is the one place that can repair
+ * a lost approval: when this owner's approval link bounced off the sign-in
+ * wall minutes ago — Claude desktop's in-app browser holds no session, so
+ * every click from it does — and they have not reached the approve page
+ * since, send them there instead of the profile page. Once per wall hit;
+ * rules in src/lib/approvalRouting.ts.
  */
 export default async function DashboardPage({
   searchParams,
@@ -18,6 +29,17 @@ export default async function DashboardPage({
 }) {
   const data = await loadDashboardData();
   if (!data) redirect('/');
+
+  const wallRoute = await resolveWallRoute(data.userId);
+  if (wallRoute) {
+    const { userId: clerkUserId } = await auth();
+    captureServerEvent(clerkUserId ?? 'anonymous-approve-wall', 'approval_wall_routed', {
+      action: wallRoute.action,
+      request_id: wallRoute.requestId,
+      seconds_since_wall: wallRoute.secondsSinceWall,
+    });
+    redirect(wallRoute.path);
+  }
 
   const slug = defaultProfileSlug(data.profiles);
   if (slug) {
