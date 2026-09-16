@@ -1657,10 +1657,15 @@ showed the answer was "almost nobody": of 256 external users with a live key,
 250 had only the Default Profile, 6 had a non-default profile (3 created since
 the 2026-08-16 launch — two by one power user, one of them never connected,
 and one created and abandoned with no connection, rules or accounts; the
-other 3 pre-launch, one revoked), and 3 of 240 agent connections were bound
-to a non-default profile. The population separate profiles are designed for —
-users with two or more agent connections — was 19 people, 17 of whom left
-every connection on the Default Profile. On that baseline profile UX is not a
+other 3 predate the directory launch, one revoked — and one of those belongs
+to a real, still-active user whose struggle setting up multiple emails is
+what prompted the Default Profile work: his second profile is bound to a
+connection used the day of the count, the reference case for multi-mailbox
+profile use, not pre-launch noise), and 3 of 240 agent connections were
+bound to a non-default profile. The population separate profiles are designed
+for — users with two or more agent connections — was 19 people, 17 of whom
+left every connection on the Default Profile (the two exceptions are that
+multi-email user and the power user above). On that baseline profile UX is not a
 priority; this section exists so the daily review notices when that changes,
 in either direction: people MAKING profiles, or people TRYING and failing.
 
