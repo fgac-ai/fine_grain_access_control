@@ -22,6 +22,7 @@
     "db:tombstone-orphans": "tsx scripts/tombstone-orphaned-users.ts",
     "google:scope-sweep": "tsx scripts/google-scope-sweep.ts",
     "funnel:scopes": "tsx scripts/funnel-scopes.ts",
+    "profiles:usage": "tsx scripts/profile-usage.ts",
     "links": "tsx scripts/short-links.ts"
   },
   "dependencies": {
