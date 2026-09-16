@@ -96,7 +96,17 @@ the denial text.
   stay passthrough, method gate) and `test-raw-method-guard.ts` all pass;
   `tsc --noEmit` and eslint clean.
 - Local MCP run of capability 10 A14 via a `qa-setup-driver` runner (bearer
-  minted with the manual DCR recipe), then `/deploy-pr-preview`.
+  minted with the manual DCR recipe, dev server on an autoPort): 23/23 rows
+  PASS on 2026-09-16 — Read & Write rename/trash/untrash/share/export/
+  revisions succeed; Read Only trash denied with a `sheets_write` link;
+  Blocked denied with no link; a no-rule sheet denied not-exposed with
+  `sheets_write` / `sheets_expose` links via the `mime_gated` branch and NOT
+  trashed at Google; a nonexistent id gets the invisible-file 🚫; listing and
+  `generateIds` pass; raw JSON-RPC DELETE is rejected by the schema
+  (`-32602 … expected POST|PUT|PATCH`); copy and comments regressions hold.
+  Observation, pre-existing and cosmetic: denial approval links use the
+  configured dashboard URL (`localhost:3000`) rather than the autoPort.
+- Preview run of the same matrix via `/deploy-pr-preview` (PR #147).
 
 ## Out of scope
 
