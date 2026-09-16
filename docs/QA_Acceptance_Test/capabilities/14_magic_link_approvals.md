@@ -183,7 +183,14 @@
   reminder then lands in USER_A's own inbox, sent by USER_A's key — read it
   through the MCP `gmail_list`/`gmail_read` tools. Without the two variables
   every mint carries `notify_status: 'disabled'` and this assertion is
-  `blocked`, not `skip`
+  `blocked`, not `skip`. The 3-a-day cap is per OWNER of the connection and
+  lives in the branch DB, so an earlier session's run on the same Neon
+  branch can exhaust it (2026-09-16: three link reminders sent to USER_A at
+  ~05:00 UTC blocked a later run outright). Check headroom first
+  (read-only: `notified_at > now() - interval '24 hours'` on
+  `approval_requests` and `account_refusals`, grouped by owner) and, when
+  it is spent, run A16/A17 with the OTHER QA account as the connection
+  owner and recipient — never clear the stamps
 - Signed in as USER_A, trigger a send denial to a recipient never denied
   before on this profile (a fresh `+tag` on `USER_B_EMAIL`), then trigger the
   identical denial again within a minute, then a third time at least 5
