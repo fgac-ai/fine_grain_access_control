@@ -435,3 +435,31 @@ attributable to it.
   failed post-pick verification emitted nothing — the 8-second retry loop one
   launch-cohort user ran 12 times (PostHog, 2026-08-31) was only visible as
   server-side `approval_link_opened` events with no pageview
+
+### A22: The approval sign-in wall is measurable
+- Sign out of FGAC, open any approval link (`/dashboard/approve?a=…&s=…`) so
+  Clerk redirects to sign-in, then sign in from the plain `/dashboard` URL
+  (not from the redirect) so you land on a profile page. Query:
+  `SELECT event, properties.client, properties.navigation, properties.action,
+  properties.target_hash, properties.after_approval_wall,
+  properties.approval_wall_action, properties.landing_path FROM events WHERE
+  event IN ('approval_sign_in_wall','sign_in_completed') AND timestamp >= now()
+  - INTERVAL 20 MINUTE ORDER BY timestamp`
+- **Expected**: an `approval_sign_in_wall` row (distinct id
+  `anonymous-approve-wall`) with `navigation: true`, the link's `action`, a
+  16-char `target_hash` (none for `send_all`), and `client: 'claude_desktop'`
+  from the built-in pane (`browser` from a real Chrome via Path B); then a
+  `sign_in_completed` row with `after_approval_wall: true`,
+  `approval_wall_action` equal to the link's action, `landing_path` under
+  `/dashboard/agents/`, and `client` set. The `fgac_approval_wall` cookie is
+  gone after the sign-in event fires. A signed-in visit to the approve page
+  with the cookie present clears it without firing `sign_in_completed`. A
+  non-browser fetch of the link (agent UA, `Accept: */*`) records
+  `navigation: false, client: 'agent'` and still gets Clerk's 404. On a dev
+  Clerk instance the first cookie-less visit is answered by Clerk's
+  dev-browser handshake before middleware sees it — retry the link once
+- **Why**: the redirect happens before any page code runs, so this hop had no
+  row at all and the whole class (Claude desktop's in-app browser holds no
+  FGAC session, so every link click from it lands here) read as "minted,
+  never opened". 15 of 110 never-opened requests since 2026-09-09 were
+  owners who signed in within the hour and landed on the profile page

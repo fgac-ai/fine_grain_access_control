@@ -1,11 +1,21 @@
-import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server';
+import { clerkMiddleware, createRouteMatcher, type ClerkMiddlewareSessionAuthObject } from '@clerk/nextjs/server';
 import { NextResponse } from 'next/server';
 import type { NextFetchEvent, NextRequest } from 'next/server';
 import { MCP_PROFILE_PATH_RE } from '@/lib/profileSlugs';
+import {
+  APPROVAL_WALL_COOKIE,
+  APPROVAL_WALL_COOKIE_MAX_AGE_S,
+  APPROVAL_WALL_DISTINCT_ID,
+  APPROVAL_WALL_EVENT,
+  describeApprovalWallHit,
+  encodeApprovalWallCookie,
+  isApprovalWallCandidate,
+} from '@/lib/approvalWall';
+import { captureEdgeEvent } from '@/lib/posthogEdge';
 
 const isProtectedRoute = createRouteMatcher(['/dashboard(.*)']);
 
-const clerkHandler = clerkMiddleware(async (auth, req) => {
+const clerkHandler = clerkMiddleware(async (auth, req, event) => {
   const url = req.nextUrl.clone();
   const hostname = url.hostname;
 
@@ -44,6 +54,47 @@ const clerkHandler = clerkMiddleware(async (auth, req) => {
   }
 
   if (isProtectedRoute(req)) {
+    // Approval sign-in wall (src/lib/approvalWall.ts). A signed-out visit to
+    // an approval link never reaches the page — this redirect is the only
+    // place it can be observed. The event carries action + target_hash (the
+    // join to approval_link_minted) and the client class (Claude desktop's
+    // in-app browser holds no FGAC session, so it hits this wall every time);
+    // the cookie lets sign_in_completed say "signed in after a wall hit and
+    // landed somewhere other than the approve page" in one row.
+    if (isApprovalWallCandidate(url)) {
+      // In middleware `auth()` resolves to the session object whose
+      // redirectToSignIn RETURNS a Response (the app-router typing says
+      // `never` because there it throws) — cast to the middleware shape.
+      const { userId, redirectToSignIn } = (await auth()) as ClerkMiddlewareSessionAuthObject;
+      if (userId) {
+        // Context reached the page: retire any marker so a later, unrelated
+        // sign-in in this browser is not attributed to this wall hit.
+        if (req.cookies.has(APPROVAL_WALL_COOKIE)) {
+          const res = NextResponse.next();
+          res.cookies.delete(APPROVAL_WALL_COOKIE);
+          return res;
+        }
+        return;
+      }
+      const hit = await describeApprovalWallHit(url, req.headers);
+      event.waitUntil(captureEdgeEvent(APPROVAL_WALL_DISTINCT_ID, APPROVAL_WALL_EVENT, { ...hit }));
+      if (!hit.navigation) {
+        // Non-document fetches (agents, scripts) keep Clerk's own 404.
+        await auth.protect();
+        return;
+      }
+      const redirect = redirectToSignIn({ returnBackUrl: req.url });
+      const res = new NextResponse(null, { status: redirect.status, headers: redirect.headers });
+      res.cookies.set({
+        name: APPROVAL_WALL_COOKIE,
+        value: encodeApprovalWallCookie(hit),
+        maxAge: APPROVAL_WALL_COOKIE_MAX_AGE_S,
+        path: '/',
+        sameSite: 'lax',
+        secure: url.protocol === 'https:',
+      });
+      return res;
+    }
     await auth.protect();
   }
 });
