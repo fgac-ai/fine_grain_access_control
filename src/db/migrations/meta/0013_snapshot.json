@@ -1,5 +1,5 @@
 {
-  "id": "83a6b809-8fa7-4dc5-a927-b4427b9d9b12",
+  "id": "2205f14c-7bab-4bd8-aa49-9159fbdf0ddd",
   "prevId": "e6492699-5815-4a1f-89b6-05c9bd335282",
   "version": "7",
   "dialect": "postgresql",
@@ -363,15 +363,27 @@
           "primaryKey": false,
           "notNull": false
         },
-        "notified_at": {
-          "name": "notified_at",
+        "resource_name": {
+          "name": "resource_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "wall_hit_at": {
+          "name": "wall_hit_at",
           "type": "timestamp",
           "primaryKey": false,
           "notNull": false
         },
-        "resource_name": {
-          "name": "resource_name",
+        "wall_query": {
+          "name": "wall_query",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "routed_at": {
+          "name": "routed_at",
+          "type": "timestamp",
           "primaryKey": false,
           "notNull": false
         }

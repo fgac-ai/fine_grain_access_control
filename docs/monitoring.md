@@ -1651,7 +1651,209 @@ repeated 404s on the SAME id (7.11's `resource_id_hash` / `message_id_hash`)
 stop at one, and the next call on that hash succeeds with a different
 `account_email`.
 
-**7.24 — Approval-link reminder email: does the emailed link get more
+**7.24 — Agent-profile adoption (is anyone using a profile besides the
+Default Profile?).** Added 2026-09-16 at Ken's request, after a read-only count
+showed the answer was "almost nobody": of 256 external users with a live key,
+250 had only the Default Profile, 6 had a non-default profile (3 created since
+the 2026-08-16 launch — two by one power user, one of them never connected,
+and one created and abandoned with no connection, rules or accounts; the
+other 3 predate the directory launch, one revoked — and one of those belongs
+to a real, still-active user whose struggle setting up multiple emails is
+what prompted the Default Profile work: his second profile is bound to a
+connection used the day of the count, the reference case for multi-mailbox
+profile use, not pre-launch noise), and 3 of 240 agent connections were
+bound to a non-default profile. The population separate profiles are designed
+for — users with two or more agent connections — was 19 people, 17 of whom
+left every connection on the Default Profile (the two exceptions are that
+multi-email user and the power user above). On that baseline profile UX is not a
+priority; this section exists so the daily review notices when that changes,
+in either direction: people MAKING profiles, or people TRYING and failing.
+
+No PostHog event carries a proxy-key id, so the MADE half is a database read:
+
+```bash
+npx vercel env pull .secrets/prod.env --environment=production
+REVIEW_EXCLUDED_EMAILS=<internal,qa,addresses> npm run profiles:usage -- --prod   # SELECTs only
+rm .secrets/prod.env
+```
+
+`REVIEW_EXCLUDED_EMAILS` carries the internal/QA exclusion list every §7 query
+uses (never inlined in the repo); `.qa_test_emails.json` is read too when present.
+It prints the live-key distribution per user, every non-default profile
+(label slug, owner domain, bound connections, last use, rules, accounts —
+never an address or key), connections by profile type with 14-day use, and
+the 2+-connection population split by whether anything left the Default
+Profile.
+
+The TRIED half is PostHog, from the two server events `createProxyKey` emits
+(`docs/analytics.md`): `agent_profile_created` (props `accounts`,
+`delegated_accounts`, `existing_profiles`) and `agent_profile_create_failed`
+(`reason` = `missing_label` / `unslugifiable_label` / `slug_clash` /
+`no_delegation` — each a refusal the action returns by design, with a message
+the dialog shows). Before their deploy, and as a cross-check after it, the
+web side carries the same signal: `$autocapture` clicks with `$el_text`
+`+ New profile` (the dialog trigger in `AgentProfilesView.tsx`) and `Cancel`
+on `/dashboard` pages, and `$pageview` on `/dashboard/agents/<slug>` for a
+slug other than `default-profile`.
+
+```sql
+-- attempts vs outcomes, per person, 7 d (external)
+SELECT person.properties.email AS who,
+       countIf(event = '$autocapture' AND properties.$el_text = '+ New profile') AS dialog_opens,
+       countIf(event = 'agent_profile_created')       AS created,
+       countIf(event = 'agent_profile_create_failed') AS failed,
+       groupUniqArrayIf(properties.reason, event = 'agent_profile_create_failed') AS reasons,
+       countIf(event = '$pageview' AND properties.$current_url LIKE '%/dashboard/agents/%'
+                                   AND properties.$current_url NOT LIKE '%/default-profile%') AS nondefault_page_views
+FROM events
+WHERE timestamp > now() - INTERVAL 7 DAY
+  AND (event IN ('agent_profile_created', 'agent_profile_create_failed')
+       OR (event = '$autocapture' AND properties.$host = 'fgac.ai')
+       OR (event = '$pageview'    AND properties.$host = 'fgac.ai'))
+  AND person.properties.email NOT IN (/* internal + QA accounts: the same list every query in §7 uses */)
+GROUP BY who
+HAVING dialog_opens > 0 OR created > 0 OR failed > 0 OR nondefault_page_views > 0
+ORDER BY failed DESC, dialog_opens DESC
+```
+
+Reading it: a person with `dialog_opens > 0` or `failed > 0` and `created = 0`
+is an abandoned attempt — list each one in the review with what they clicked
+next. Two or more of those in a week is the "trying and failing" signal and a
+UX task, not a nudge. On the MADE side the flags are: three or more
+non-default profiles in a week by three different people; an organization
+(7.20) whose operators run two or more profiles; or anyone in the
+2+-connection population moving a connection off the Default Profile. A
+`reason` other than `slug_clash` / `no_delegation` means the dialog refused
+something it cannot explain — read `createProxyKey` before calling it a bug.
+
+**7.25 — Approval sign-in wall (links that never reach the page).** Added
+2026-09-16. `/dashboard/approve` is Clerk-protected, so a SIGNED-OUT visit to an
+approval link is redirected to sign-in before the page renders and
+`approval_link_opened` never fires. That hop is what Claude desktop's in-app
+browser takes on every link click (it holds no FGAC session), and until now it
+was invisible: sized 2026-09-15, 15 of the 110 never-opened requests since
+2026-09-09 had the owner sign in within the hour, every one landing on the
+default profile page — the approval context was lost between the embedded
+browser and the one they actually signed in with. Two new signals:
+`approval_sign_in_wall` (edge middleware, pre-auth, joins to the mint on
+`action` + `target_hash`) and `after_approval_wall` on `sign_in_completed`
+(the marker cookie survived to a dashboard page = signed in somewhere other
+than the approve page). The first query answers "how many people hit the
+wall, and did the request get opened afterwards"; the second answers "how
+many sign-ins were lost-context sign-ins, and from which client".
+
+```sql
+-- wall hits (people, document navigations) → did the same request get opened afterwards?
+WITH walls AS (
+  SELECT toString(properties.action) AS action, toString(properties.target_hash) AS th,
+         min(timestamp) AS first_wall, argMin(toString(properties.client), timestamp) AS client, count() AS hits
+  FROM events
+  WHERE event = 'approval_sign_in_wall'
+    AND properties.environment = 'production'
+    AND toString(properties.navigation) = 'true'
+    AND properties.client != 'agent'
+    AND timestamp >= now() - INTERVAL 30 DAY
+  GROUP BY action, th
+),
+minted AS (
+  SELECT toString(properties.action) AS action, toString(properties.target_hash) AS th,
+         any(toString(properties.request_id)) AS rid
+  FROM events
+  WHERE event = 'approval_link_minted' AND properties.environment = 'production'
+    AND timestamp >= now() - INTERVAL 60 DAY
+  GROUP BY action, th
+),
+opened AS (
+  SELECT toString(properties.request_id) AS rid, min(timestamp) AS first_open
+  FROM events
+  WHERE event = 'approval_link_opened' AND properties.environment = 'production'
+    AND properties.client != 'agent' AND timestamp >= now() - INTERVAL 30 DAY
+  GROUP BY rid
+)
+SELECT w.client AS client, count() AS wall_requests, sum(w.hits) AS wall_hits,
+       countIf(o.first_open > w.first_wall) AS opened_after_wall,
+       round(100.0 * countIf(o.first_open > w.first_wall) / count(), 1) AS pct_recovered
+FROM walls w
+LEFT JOIN minted m ON m.action = w.action AND m.th = w.th
+LEFT JOIN opened o ON o.rid = m.rid
+GROUP BY client
+ORDER BY wall_requests DESC
+```
+
+`send_all` requests carry no target, so their `target_hash` is empty and every
+user's send_all wall collapses onto one join key — read that row as an upper
+bound. The `minted` window is longer than the `walls` window on purpose: a link
+minted last month can hit the wall today.
+
+```sql
+-- lost-context sign-ins: signed in after a wall hit, landed on a dashboard page
+SELECT toString(properties.client) AS client, count() AS sign_ins,
+       countIf(toString(properties.after_approval_wall) = 'true') AS after_wall,
+       round(100.0 * countIf(toString(properties.after_approval_wall) = 'true') / count(), 1) AS pct_after_wall,
+       groupUniqArrayIf(toString(properties.landing_path), toString(properties.after_approval_wall) = 'true') AS landed_on,
+       round(avgIf(toFloat64OrNull(toString(properties.approval_wall_age_s)), toString(properties.after_approval_wall) = 'true')) AS avg_wall_to_sign_in_s
+FROM events
+WHERE event = 'sign_in_completed'
+  AND properties.environment = 'production'
+  AND timestamp >= now() - INTERVAL 30 DAY
+  AND person.properties.email NOT IN (/* internal + QA accounts: the same list every query in §7 uses */)
+GROUP BY client
+ORDER BY sign_ins DESC
+```
+
+The cookie is same-browser only, so `after_wall` counts the case where the
+person signed in with the same browser that hit the wall (the pane, or a real
+browser after copying the accounts.* URL into it while signed out). The
+cross-browser case — wall in the pane, already signed in elsewhere, so no
+sign-in happens at all — shows up only in the first query as a wall request
+with no open. Both together are the size of the lost-context problem; the
+pending-approvals dashboard surface (implementation plan
+`claude_fgac-signin-context-loss-dee31b`) is judged working if
+`pct_recovered` rises and `after_wall` sign-ins start landing on
+`/dashboard/approve` (which would mean the redirect kept its context) or
+stop mattering because the banner picks the request up.
+
+Routing (shipped in the same branch, `approval_wall_recorded` →
+`approval_wall_routed`): how many wall hits by people were filed under their
+owner, and how many of those owners were then sent back to the approval by
+`/dashboard`. A recorded hit with no route within the hour is an owner who
+did not sign in (or signed in somewhere `/dashboard` never loaded).
+
+```sql
+-- wall hits recorded against an owner → routed back → opened
+WITH recorded AS (
+  SELECT toString(properties.request_id) AS rid, min(timestamp) AS first_recorded
+  FROM events
+  WHERE event = 'approval_wall_recorded' AND properties.environment = 'production'
+    AND toString(properties.recorded) = 'true' AND timestamp >= now() - INTERVAL 30 DAY
+  GROUP BY rid
+),
+routed AS (
+  SELECT toString(properties.request_id) AS rid, min(timestamp) AS first_routed,
+         min(toFloat64OrNull(toString(properties.seconds_since_wall))) AS secs
+  FROM events
+  WHERE event = 'approval_wall_routed' AND properties.environment = 'production'
+    AND timestamp >= now() - INTERVAL 30 DAY
+  GROUP BY rid
+),
+opened AS (
+  SELECT toString(properties.request_id) AS rid, min(timestamp) AS first_open
+  FROM events
+  WHERE event = 'approval_link_opened' AND properties.environment = 'production'
+    AND properties.client != 'agent' AND timestamp >= now() - INTERVAL 30 DAY
+  GROUP BY rid
+)
+SELECT count() AS recorded_requests,
+       countIf(ro.first_routed > r.first_recorded) AS routed,
+       countIf(o.first_open > r.first_recorded) AS opened_after,
+       round(100.0 * countIf(ro.first_routed > r.first_recorded) / count(), 1) AS pct_routed,
+       round(median(ro.secs)) AS median_wall_to_route_s
+FROM recorded r
+LEFT JOIN routed ro ON ro.rid = r.rid
+LEFT JOIN opened o ON o.rid = r.rid
+```
+
+**7.26 — Approval-link reminder email: does the emailed link get more
 interaction than the one the agent was handed?** Added 2026-09-15 with the
 repeat-request reminder (`src/lib/approvalNotify.ts`; sender = FGAC's
 support mailbox, never a user's grant). Per request (`uniq(request_id)`,
@@ -1662,7 +1864,7 @@ surfaces that collapse the tool result. Read per request, never per event
 (`approval_link_opened` fires per render, ~2 rows per request).
 
 ```sql
--- 7.24a — emailed vs agent-only requests: open and approve rates (30 d).
+-- 7.26a — emailed vs agent-only requests: open and approve rates (30 d).
 -- A request is "emailed" if approval_link_notified fired for it; every
 -- other minted request relied on the agent alone. Emailed requests are BY
 -- CONSTRUCTION the ones the agent already failed to deliver (a repeat ask
@@ -1702,7 +1904,7 @@ GROUP BY delivery
 ```
 
 ```sql
--- 7.24b — volume and the cap (7 d): reminders per person per day. Anything
+-- 7.26b — volume and the cap (7 d): reminders per person per day. Anything
 -- at 3 is the cap doing its job; a person at 3 on several days is an agent
 -- asking for many files repeatedly — look at 7.22 for who.
 SELECT toDate(timestamp) AS d, cityHash64(toString(person_id)) % 100000 AS who,
@@ -1716,7 +1918,7 @@ GROUP BY d, who ORDER BY reminders DESC, d DESC LIMIT 20
 ```
 
 ```sql
--- 7.24c — delivery health (7 d): mint outcomes by notify_status. `disabled`
+-- 7.26c — delivery health (7 d): mint outcomes by notify_status. `disabled`
 -- everywhere = SUPPORT_FGAC_PROXY_KEY / SUPPORT_SENDER_EMAIL are missing in
 -- that environment; `failed` = FGAC's proxy API or Google refused the send
 -- (a 403 means the support profile lost its send rule; a 401 means the key
@@ -1735,7 +1937,7 @@ GROUP BY status ORDER BY mints DESC
 ```
 
 ```sql
--- 7.24d — the refusal that mints no link (7 d): caller-chosen
+-- 7.26d — the refusal that mints no link (7 d): caller-chosen
 -- account_not_permitted refusals per person, the value the task passes vs.
 -- what the key can use, and whether the owner was emailed. Before 2026-09-16
 -- `account_requested` did not exist and the refused value was recorded
@@ -1762,7 +1964,7 @@ GROUP BY who, tool, requested ORDER BY refusals DESC LIMIT 20
 ```
 
 ```sql
--- 7.24e — did the account-refusal email change anything (30 d)? For each
+-- 7.26e — did the account-refusal email change anything (30 d)? For each
 -- emailed person: refusals of that value before vs. after the email, and
 -- whether any call on the key resolved afterwards (account_email set). A
 -- person whose refusals continue unchanged for days after `sent` did not
@@ -1789,7 +1991,7 @@ rate of *repeat-minted, unopened-at-repeat* requests — which is 0% by
 definition at the moment of the repeat, and ends near 19% of never-opened
 requests ever being re-asked at all (30 d to 2026-09-15: 161 never-opened
 requests, 30 re-minted). The reminder cannot reach the other 131; if
-`opened_via_email` stays near zero after a month while 7.24c shows `sent`
+`opened_via_email` stays near zero after a month while 7.26c shows `sent`
 rows, the email is not being read either and the next lever is the
 dashboard, not more mail.
 

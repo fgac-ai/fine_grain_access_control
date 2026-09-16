@@ -104,7 +104,7 @@ not on the key — is a different misconfiguration with no repeat evidence).
   `skipped_rate_capped` / `failed` / `disabled`); one
   `account_refusal_notified` event per email (`trigger:
   'account_not_permitted'`, `refusal_count`, `hours_since_first_refusal`,
-  `tool`). Runbook `monitoring.md` 7.24d.
+  `tool`). Runbook `monitoring.md` 7.26d.
 
 ## Simulation (30 d of production refusals, threshold 3 in 24 h)
 
@@ -119,7 +119,7 @@ Capability 14 A17 (sender configured as in A16): three `sheets_read_range`
 calls with an `account` the profile cannot use → the third refusal carries
 the 📧 line and one email; a fourth carries "already emailed" and no second
 message; `$mcp_tool_call` rows carry `account_requested` and
-`notify_status`; capability 16 A23 pins the event.
+`notify_status`; capability 16 A25 pins the event.
 
 Local result (2026-09-16, hosted-MCP runbook scoped to 14 A16/A17 and 16
 A22/A23): all four pass, run as USER_B. The first attempt as USER_A was

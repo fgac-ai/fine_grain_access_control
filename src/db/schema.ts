@@ -83,6 +83,17 @@ export const approvalRequests = pgTable('approval_requests', {
   // opaque id onto a sheet title themselves (the 2026-09 Picker-cancel leak).
   // First non-empty value wins; never carried in the URL.
   resourceName: text('resource_name'),
+  // Approval sign-in wall (2026-09-16). A SIGNED-OUT visit to this request's
+  // link — Claude desktop's in-app browser holds no FGAC session, so every
+  // click from it lands there. The link itself identifies the owner (the key
+  // in it resolves to a user, and the signature verifies against that user),
+  // so the hit is recorded without a session. wallQuery is the link's own
+  // query string (a/k/r/s), stored verbatim so /dashboard can send a freshly
+  // signed-in owner straight back to the approval without re-deriving the
+  // signature. routedAt makes that redirect fire once per request.
+  wallHitAt: timestamp('wall_hit_at'),
+  wallQuery: text('wall_query'),
+  routedAt: timestamp('routed_at'),
 }, (table) => [
   // The per-owner hourly email cap counts this owner's recent notified_at
   // stamps on every first mint; keep that a range scan as the ledger grows.

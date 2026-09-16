@@ -32,6 +32,8 @@ export interface DashboardData {
   needsDriveFile: boolean;
   /** Clerk's last sign-in (ms) — keys the once-per-sign-in telemetry and auto-repair. */
   lastSignInAt: number | null;
+  /** FGAC users.id — the owner key the approval ledger is filed under. */
+  userId: string;
 }
 
 /**
@@ -124,6 +126,6 @@ export async function loadDashboardData(): Promise<DashboardData | null> {
 
   return {
     profiles, rules, accessibleEmails, mcpEndpoint, hasCompleteGoogleAccess,
-    googleAccess, needsDriveFile, lastSignInAt: user.lastSignInAt,
+    googleAccess, needsDriveFile, lastSignInAt: user.lastSignInAt, userId: dbUser.id,
   };
 }

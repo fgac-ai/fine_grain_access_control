@@ -210,7 +210,7 @@
   further email is sent; the mailbox still holds one message. Opening the
   emailed link resolves and approves exactly like the chat link (A2), and
   its `approval_link_opened` row carries `link_source: 'email'` (capability
-  16 A22). A request whose approve page was opened BEFORE the repeat ask
+  16 A24). A request whose approve page was opened BEFORE the repeat ask
   never emails (`notify_status: 'skipped_opened'`)
 - **Cap**: with three distinct requests already emailed to USER_A in the
   last 24 h, a fourth due repeat carries no 📧 line and

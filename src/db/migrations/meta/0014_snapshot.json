@@ -1,6 +1,6 @@
 {
-  "id": "1850e462-4fe9-44cc-93d2-924983a88d0f",
-  "prevId": "83a6b809-8fa7-4dc5-a927-b4427b9d9b12",
+  "id": "f9203976-884a-4084-841e-668ad29dcefc",
+  "prevId": "2205f14c-7bab-4bd8-aa49-9159fbdf0ddd",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -527,6 +527,24 @@
         "resource_name": {
           "name": "resource_name",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "wall_hit_at": {
+          "name": "wall_hit_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "wall_query": {
+          "name": "wall_query",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "routed_at": {
+          "name": "routed_at",
+          "type": "timestamp",
           "primaryKey": false,
           "notNull": false
         }

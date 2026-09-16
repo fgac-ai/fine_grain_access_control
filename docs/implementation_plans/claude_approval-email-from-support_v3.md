@@ -27,7 +27,7 @@ product working as designed.
 
 Analytics note: each reminder is one `proxy_request` row under the support
 key; exclude that key (or the support address as `account_email`) from
-customer usage counts. `monitoring.md` 7.24c says so.
+customer usage counts. `monitoring.md` 7.26c says so.
 
 ## QA
 
@@ -55,7 +55,7 @@ operator's existing FGAC account and no sign-up is needed:
    <support@fgac.ai>` and `Reply-To: support@fgac.ai`. Gmail honours a From
    that matches a configured send-as alias; if the alias were ever removed
    Gmail would silently rewrite From to the mailbox's primary address (no
-   error). Check the first production reminder's headers once (7.24c shows
+   error). Check the first production reminder's headers once (7.26c shows
    the send). Replies land in the operator's inbox via the alias, as
    support mail does today.
 5. The operator address is already on the internal-account exclusion list,

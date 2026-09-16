@@ -54,7 +54,7 @@ import {
   templateGoogleApiPath, rawApiFamily, extractGoogleErrorReason,
   type RawCallClass, type GoogleErrorReason,
 } from './googleApiPolicy';
-import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, type DriveFileKind } from '@/lib/driveFileKinds';
+import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, kindForMimeType, type DriveFileKind } from '@/lib/driveFileKinds';
 import { clerkPrimaryEmail } from '@/lib/clerkPrimaryEmail';
 import { ownClerkEmailMatch } from '@/lib/identityDrift';
 import { slugifyProfileLabel } from '@/lib/profileSlugs';
@@ -1379,13 +1379,14 @@ function docsDenialAction(perm: FilePermission, documentId: string, isMutating: 
 }
 
 /**
- * Comments address files by bare Drive file id, which doesn't say whether the
- * file is a doc or a sheet — resolve the kind from whichever service's rules
- * mention the id, then run the standard per-file check for that kind. A file
- * no rule mentions denies as not-exposed WITHOUT an approval action: the
- * service is unknown, so no expose action could be minted for it.
+ * Per-file check for calls that address a file by bare Drive file id (Drive
+ * comments, files/{id}/copy), which doesn't say whether the file is a doc or
+ * a sheet — resolve the kind from whichever service's rules mention the id,
+ * then run the standard per-file check for that kind. A file no rule
+ * mentions denies as not-exposed WITHOUT an approval action: the service is
+ * unknown, so no expose action could be minted for it.
  */
-async function checkCommentsPermission(
+async function checkDriveFilePermission(
   conn: ConnectionApproved,
   proxyKeyId: string,
   fileId: string,
@@ -1878,6 +1879,87 @@ function driveFileScopeDenial(conn: ConnectionApproved, resolved: ResolvedAccoun
   );
 }
 
+// ─── Agent-created file auto-grant ──────────────────────────────────────────
+
+type CreatedFileOrigin = 'create' | 'copy' | 'drive_create';
+
+/**
+ * Register a file the agent just created as its own output: a Read & Write
+ * rule for the id, scoped to the calling key. Shared by POST v4/spreadsheets,
+ * POST v1/documents, and the Drive-side creates (files/{id}/copy, POST
+ * drive/v3/files). Google's drive.file grant treats all of them alike — the
+ * app created the file, so every Drive write on it (rename, share, trash,
+ * even permanent delete) is authorized — and FGAC's rule table has to agree,
+ * or the agent can manage a file through Drive that every Sheets/Docs
+ * content call denies as not-exposed (2026-09-16: two files/{id}/copy calls,
+ * sheets_not_exposed on the copy, then both copies renamed, shared and
+ * trashed as passthrough). The file exists either way; a failed grant just
+ * means the next access denies and mints an approval link — degraded, not
+ * broken.
+ */
+async function autoGrantAgentCreatedFile(
+  conn: ConnectionApproved,
+  proxyKeyId: string,
+  kind: DriveFileKind,
+  fileId: string,
+  title: string | null,
+  origin: CreatedFileOrigin,
+): Promise<void> {
+  const d = DRIVE_FILE_KINDS[kind];
+  const eventProps = { [d.createdAnalytics.idProp]: fileId, origin };
+  try {
+    const [rule] = await db.insert(accessRules).values({
+      userId: conn.user.id,
+      ruleName: `Agent-created: ${title || fileId}`,
+      service: d.service,
+      actionType: d.actionTypes.readWrite,
+      targetResourceId: fileId,
+      resourceName: title,
+    }).returning();
+    await db.insert(keyRuleAssignments).values({ proxyKeyId, accessRuleId: rule.id });
+    captureServerEvent(conn.user.clerkUserId, d.createdAnalytics.event, { ...eventProps, auto_granted: true });
+    addToolCallProps({ [d.createdAnalytics.toolCallProp]: true, file_created_origin: origin });
+  } catch (err) {
+    console.error(`[MCP] Failed to auto-grant agent-created ${d.noun}:`, err);
+    captureServerEvent(conn.user.clerkUserId, d.createdAnalytics.event, { ...eventProps, auto_granted: false });
+  }
+}
+
+/**
+ * Auto-grant the result of a Drive-side create (files/{id}/copy, POST
+ * drive/v3/files). The Drive File resource names the product only by
+ * mimeType; a caller's `fields` mask can strip it, so fetch the metadata when
+ * it is missing rather than skip the grant. Files FGAC has no per-file rule
+ * model for (folders, PDFs, presentations while Slides is stubbed) are
+ * stamped `file_created_kind: 'other'` and left ungated — the same
+ * scope-backstop posture every other Drive call has.
+ */
+async function grantDriveCreatedFile(
+  conn: ConnectionApproved,
+  resolved: ResolvedAccount,
+  data: unknown,
+  origin: 'copy' | 'drive_create',
+): Promise<void> {
+  const file = data as { id?: unknown; name?: unknown; mimeType?: unknown } | null;
+  const id = typeof file?.id === 'string' && file.id ? file.id : null;
+  if (!id) return;
+  let name = typeof file?.name === 'string' ? file.name : null;
+  let mimeType = typeof file?.mimeType === 'string' ? file.mimeType : null;
+  if (!mimeType) {
+    const meta = await googleFetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?fields=id,name,mimeType`,
+      resolved.token, 'GET', undefined, resolved.targetEmail,
+    );
+    const m = meta.ok ? (meta.data as { name?: unknown; mimeType?: unknown }) : null;
+    if (typeof m?.mimeType === 'string') mimeType = m.mimeType;
+    if (!name && typeof m?.name === 'string') name = m.name;
+  }
+  const kind = kindForMimeType(mimeType);
+  addToolCallProps({ file_created_kind: kind ?? 'other' });
+  if (!kind) return;
+  await autoGrantAgentCreatedFile(conn, resolved.proxyKeyId, kind, id, name, origin);
+}
+
 // ─── Raw Google API Execution ───────────────────────────────────────────────
 
 function serializeBody(body?: string | Record<string, unknown>): string | undefined {
@@ -2008,28 +2090,7 @@ async function executeRawGoogleCall(
     const newId = typeof created?.spreadsheetId === 'string' ? created.spreadsheetId : null;
     if (newId) {
       const title = typeof created?.properties?.title === 'string' ? created.properties.title : null;
-      try {
-        const [rule] = await db.insert(accessRules).values({
-          userId: conn.user.id,
-          ruleName: `Agent-created: ${title || newId}`,
-          service: 'sheets',
-          actionType: 'sheet_read_write',
-          targetResourceId: newId,
-          resourceName: title,
-        }).returning();
-        await db.insert(keyRuleAssignments).values({ proxyKeyId: resolved.proxyKeyId, accessRuleId: rule.id });
-        captureServerEvent(conn.user.clerkUserId, 'agent_sheet_created', {
-          spreadsheet_id: newId, auto_granted: true,
-        });
-        addToolCallProps({ sheet_created: true });
-      } catch (err) {
-        // The sheet exists either way; a failed auto-grant just means the next
-        // access denies and mints an approval link — degraded, not broken.
-        console.error('[MCP] Failed to auto-grant agent-created sheet:', err);
-        captureServerEvent(conn.user.clerkUserId, 'agent_sheet_created', {
-          spreadsheet_id: newId, auto_granted: false,
-        });
-      }
+      await autoGrantAgentCreatedFile(conn, resolved.proxyKeyId, 'sheet', newId, title, 'create');
     }
     return jsonResult(result.data);
   }
@@ -2045,29 +2106,36 @@ async function executeRawGoogleCall(
     const newId = typeof created?.documentId === 'string' ? created.documentId : null;
     if (newId) {
       const title = typeof created?.title === 'string' ? created.title : null;
-      try {
-        const [rule] = await db.insert(accessRules).values({
-          userId: conn.user.id,
-          ruleName: `Agent-created: ${title || newId}`,
-          service: 'docs',
-          actionType: 'doc_read_write',
-          targetResourceId: newId,
-          resourceName: title,
-        }).returning();
-        await db.insert(keyRuleAssignments).values({ proxyKeyId: resolved.proxyKeyId, accessRuleId: rule.id });
-        captureServerEvent(conn.user.clerkUserId, 'agent_doc_created', {
-          document_id: newId, auto_granted: true,
-        });
-        addToolCallProps({ doc_created: true });
-      } catch (err) {
-        // The doc exists either way; a failed auto-grant just means the next
-        // access denies and mints an approval link — degraded, not broken.
-        console.error('[MCP] Failed to auto-grant agent-created doc:', err);
-        captureServerEvent(conn.user.clerkUserId, 'agent_doc_created', {
-          document_id: newId, auto_granted: false,
-        });
-      }
+      await autoGrantAgentCreatedFile(conn, resolved.proxyKeyId, 'doc', newId, title, 'create');
     }
+    return jsonResult(result.data);
+  }
+
+  if (cls.kind === 'drive_copy') {
+    // Copying reads the source and creates a new app-owned file. The source
+    // must be exposed to this key (a Read Only rule suffices — a copy is a
+    // read; an explicit block denies); the copy is then auto-granted Read &
+    // Write as the agent's own output, exactly like sheets_create. Before
+    // this branch the copy was scope-only passthrough: Google allowed it, no
+    // rule was written, and the agent could rename/share/trash the copy
+    // through Drive while every Sheets write on it denied (2026-09-16).
+    const fid = resolveDriveFileId('file', cls.fileId);
+    if ('denial' in fid) return fid.denial;
+    const check = await checkDriveFilePermission(conn, resolved.proxyKeyId, fid.id, false);
+    if ('denial' in check) return check.denial;
+    const result = await withGrantGrace(check.kind, check.perm, () => googleFetch(rawUrl(cleanPath), resolved.token, method, serializeBody(body), resolved.targetEmail));
+    if (!result.ok) return fileGrantErrorResult(check.kind, result, fid.id);
+    await grantDriveCreatedFile(conn, resolved, result.data, 'copy');
+    return jsonResult(result.data);
+  }
+
+  if (cls.kind === 'drive_create') {
+    // POST drive/v3/files (metadata create, or the upload/ media variant)
+    // makes an app-owned file with no source to gate on; forward it and
+    // auto-grant the result when it is a kind FGAC gates per file.
+    const result = await googleFetch(rawUrl(cleanPath), resolved.token, method, serializeBody(body), resolved.targetEmail);
+    if (!result.ok) return passthroughErrorResult(result, cleanPath, resolved);
+    await grantDriveCreatedFile(conn, resolved, result.data, 'drive_create');
     return jsonResult(result.data);
   }
 
@@ -2078,7 +2146,7 @@ async function executeRawGoogleCall(
     // typed tools.
     const fid = resolveDriveFileId('file', cls.fileId);
     if ('denial' in fid) return fid.denial;
-    const check = await checkCommentsPermission(conn, resolved.proxyKeyId, cls.fileId, cls.isMutating);
+    const check = await checkDriveFilePermission(conn, resolved.proxyKeyId, cls.fileId, cls.isMutating);
     if ('denial' in check) return check.denial;
     const result = await withGrantGrace(check.kind, check.perm, () => googleFetch(rawUrl(cleanPath), resolved.token, method, serializeBody(body), resolved.targetEmail));
     if (!result.ok) {
@@ -2913,7 +2981,7 @@ const handler = createMcpHandler(
         const fid = resolveDriveFileId('file', fileId);
         if ('denial' in fid) return fid.denial;
         fileId = fid.id;
-        const check = await checkCommentsPermission(conn, resolved.proxyKeyId, fileId, false);
+        const check = await checkDriveFilePermission(conn, resolved.proxyKeyId, fileId, false);
         if ('denial' in check) return check.denial;
 
         const url = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}/comments?fields=${encodeURIComponent(COMMENT_LIST_FIELDS)}&pageSize=50${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`;
@@ -2948,7 +3016,7 @@ const handler = createMcpHandler(
         const fid = resolveDriveFileId('file', fileId);
         if ('denial' in fid) return fid.denial;
         fileId = fid.id;
-        const check = await checkCommentsPermission(conn, resolved.proxyKeyId, fileId, true);
+        const check = await checkDriveFilePermission(conn, resolved.proxyKeyId, fileId, true);
         if ('denial' in check) return check.denial;
 
         const base = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`;
@@ -3160,7 +3228,7 @@ const handler = createMcpHandler(
             sheets: 'DENIED unless a per-spreadsheet rule below exposes the sheet',
             docs: 'DENIED unless a per-document rule below exposes the document',
             deletion: 'NEVER available through any tool',
-            rawApi: 'google_api_get / google_api_modify expose the Google API surface the grant covers under these same rules; Drive and Slides calls are forwarded subject to the per-file drive.file scope the user granted; POST v4/spreadsheets and POST v1/documents create new files auto-granted to this key; APIs outside the grant (People/Contacts, Calendar, Tasks, …) are refused with a clear denial',
+            rawApi: 'google_api_get / google_api_modify expose the Google API surface the grant covers under these same rules; Drive and Slides calls are forwarded subject to the per-file drive.file scope the user granted; POST v4/spreadsheets, POST v1/documents, POST drive/v3/files and POST drive/v3/files/{id}/copy create new files auto-granted Read & Write to this key (a copy requires the source file to be exposed); APIs outside the grant (People/Contacts, Calendar, Tasks, …) are refused with a clear denial',
           },
           rules: applicableRules.map(r => ({
             name: r.ruleName,

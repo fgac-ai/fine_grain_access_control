@@ -73,7 +73,8 @@ attributable to it.
   Gmail read, a raw Sheets call, and an unknown-family passthrough).
 - **Expected**: every such event carries `raw_api_kind` (one of `sheets`,
   `sheets_create`, `docs`, `docs_create`, `gmail_read`, `gmail_send`,
-  `gmail_draft_send`, `gmail_write`, `passthrough`, `denied`),
+  `gmail_draft_send`, `gmail_write`, `file_comments`, `drive_copy`,
+  `drive_create`, `passthrough`, `denied`),
   `raw_api_mutating`, and `raw_api_endpoint` whose
   value is the HTTP method plus an **id-stripped** path template — it must
   contain `{id}`/`{range}` placeholders where the call used real identifiers
@@ -436,7 +437,60 @@ attributable to it.
   launch-cohort user ran 12 times (PostHog, 2026-08-31) was only visible as
   server-side `approval_link_opened` events with no pageview
 
-### A22: Link delivery is measurable per request (emailed vs agent-furnished)
+### A22: The approval sign-in wall is measurable
+- Sign out of FGAC, open an approval link that CANNOT route — one with an
+  invalid signature (`/dashboard/approve?a=sheets_expose&k=<any uuid>&r=x&s=bad`)
+  — so Clerk redirects to sign-in, then sign in from the plain `/dashboard`
+  URL (not from the redirect) so you land on a profile page. A real,
+  owner-linked link would be intercepted by A23's router and land on the
+  approve page instead (where `sign_in_completed` never fires); the
+  unroutable link isolates the lost-context measurement. Query:
+  `SELECT event, properties.client, properties.navigation, properties.action,
+  properties.target_hash, properties.after_approval_wall,
+  properties.approval_wall_action, properties.landing_path FROM events WHERE
+  event IN ('approval_sign_in_wall','sign_in_completed') AND timestamp >= now()
+  - INTERVAL 20 MINUTE ORDER BY timestamp`
+- **Expected**: an `approval_sign_in_wall` row (distinct id
+  `anonymous-approve-wall`) with `navigation: true`, the link's `action`, a
+  16-char `target_hash` (none for `send_all`), and `client: 'claude_desktop'`
+  from the built-in pane (`browser` from a real Chrome via Path B); then a
+  `sign_in_completed` row with `after_approval_wall: true`,
+  `approval_wall_action` equal to the link's action, `landing_path` under
+  `/dashboard/agents/`, and `client` set. The `fgac_approval_wall` cookie is
+  gone after the sign-in event fires. A signed-in visit to the approve page
+  with the cookie present clears it without firing `sign_in_completed`. A
+  non-browser fetch of the link (agent UA, `Accept: */*`) records
+  `navigation: false, client: 'agent'` and still gets Clerk's 404. On a dev
+  Clerk instance the first cookie-less visit is answered by Clerk's
+  dev-browser handshake before middleware sees it — retry the link once
+- **Why**: the redirect happens before any page code runs, so this hop had no
+  row at all and the whole class (Claude desktop's in-app browser holds no
+  FGAC session, so every link click from it lands here) read as "minted,
+  never opened". 15 of 110 never-opened requests since 2026-09-09 were
+  owners who signed in within the hour and landed on the profile page
+
+### A23: A signed-in owner is routed back to the approval that hit the wall
+- Mint a REAL approval link for the signed-in QA user (capability 15 A8,
+  `request_access` for a sheet, via the MCP endpoint — the ledger row must
+  exist). Sign out, open the link so it bounces to Clerk sign-in (do not sign
+  in there), then sign in from the plain `/dashboard` URL — or, for the
+  cross-browser case, fetch the link signed-out with curl and a browser UA
+  (`Accept: text/html`, `Sec-Fetch-Dest: document`) and then visit
+  `/dashboard` in a pane that is already signed in as that user. Then visit
+  `/dashboard` a second time
+- **Expected**: the first `/dashboard` visit lands on `/dashboard/approve?a=…`
+  — the link itself, rendering the approval — and PostHog carries
+  `approval_wall_recorded {recorded: true, request_id}` followed by
+  `approval_wall_routed {request_id, seconds_since_wall}` for the same
+  request. The second `/dashboard` visit lands on the profile page (routed
+  once). A link with a bad signature records nothing (`recorded` never
+  fires) and routes nowhere. A hit older than 30 minutes does not route
+- **Why**: the lost-context sign-in ends on `/dashboard` (Clerk's Home URL)
+  in whatever browser the person actually uses; only a server-side record
+  keyed on the owner can send them back from there — the wall cookie is
+  same-browser only
+
+### A24: Link delivery is measurable per request (emailed vs agent-furnished)
 - Run capability 14 A16, then query the user's events for the last hour:
   `SELECT event, properties.request_id, properties.action,
   properties.notify_status, properties.link_source, properties.link_count,
@@ -456,10 +510,10 @@ attributable to it.
   sender's proxy key
 - **Regression guard**: `notify_status` must be present on EVERY mint path —
   policy denials, send denials, and `request_access` — or the delivery split
-  in `monitoring.md` 7.24 silently drops that path into the unlabelled bucket
+  in `monitoring.md` 7.26 silently drops that path into the unlabelled bucket
 
 
-### A23: The refusal that mints no link is measurable, with the refused value
+### A25: The refusal that mints no link is measurable, with the refused value
 - Run capability 14 A17, then query the user's events for the last hour:
   `SELECT event, properties.$mcp_tool_name, properties.denial_code,
   properties.account_requested, properties.account_refusal_count,
@@ -481,5 +535,5 @@ attributable to it.
   `notify_status: 'disabled'` and `account_requested` is still present
 - **Regression guard**: `account_requested` must be present on every
   caller-chosen `account_not_permitted` refusal — it is the only record of
-  what the task passes (`monitoring.md` 7.24d); before 2026-09-16 that value
+  what the task passes (`monitoring.md` 7.26d); before 2026-09-16 that value
   had to be inferred from `response_chars`

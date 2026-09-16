@@ -12,7 +12,9 @@ CREATE TABLE "account_refusals" (
 	"notified_at" timestamp
 );
 --> statement-breakpoint
+ALTER TABLE "approval_requests" ADD COLUMN "notified_at" timestamp;--> statement-breakpoint
 ALTER TABLE "account_refusals" ADD CONSTRAINT "account_refusals_proxy_key_id_proxy_keys_id_fk" FOREIGN KEY ("proxy_key_id") REFERENCES "public"."proxy_keys"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "account_refusals" ADD CONSTRAINT "account_refusals_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE UNIQUE INDEX "account_refusals_key_email_unique" ON "account_refusals" USING btree ("proxy_key_id","requested_email");--> statement-breakpoint
-CREATE INDEX "account_refusals_user_notified_idx" ON "account_refusals" USING btree ("user_id","notified_at");
+CREATE INDEX "account_refusals_user_notified_idx" ON "account_refusals" USING btree ("user_id","notified_at");--> statement-breakpoint
+CREATE INDEX "approval_requests_user_notified_idx" ON "approval_requests" USING btree ("user_id","notified_at");
