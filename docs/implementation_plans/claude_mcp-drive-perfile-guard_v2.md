@@ -95,4 +95,16 @@ the server already checks it.
 - `npm run mcp:lint` (incl. the new test), `tsc --noEmit`, eslint: clean.
 - Preview: the bearer minted during the A14 preview run (no `aud`) must still
   authenticate on the redeployed preview (`tools/list` 200), proving the
-  absent-aud path is a no-op for Clerk's current tokens.
+  absent-aud path is a no-op for Clerk's current tokens. Verified on the
+  post-merge preview (commit 5ffb68b): tools/list 200, DELETE rejected by the
+  schema, unknown id gets the invisible-file refusal.
+- Agent-created files keep full control (Ken's question, 2026-09-16, run
+  against the post-merge preview, 30/30 PASS): a sheet from `POST
+  v4/spreadsheets`, a doc from `POST v1/documents`, a sheet from `POST
+  drive/v3/files`, a copy from `files/{id}/copy`, and a `text/plain` file
+  from `POST drive/v3/files` were each written to (Sheets/Docs tools),
+  trashed, shown `trashed: true` by a metadata GET, untrashed, renamed, and
+  written to again — all without any approval step. The four Sheets/Docs
+  files carry their auto-granted Read & Write rule; the text file has no
+  rule and rides the drive.file grant (`drive_file_gate: 'mime_other'`).
+  Fixtures were left trashed (reversible) as cleanup.
