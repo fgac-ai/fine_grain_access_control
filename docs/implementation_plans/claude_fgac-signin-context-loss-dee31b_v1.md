@@ -54,7 +54,7 @@ whole class.
   and the wall's action / hash / age. The component mounts on dashboard pages
   only, never on `/dashboard/approve`, so `after_approval_wall: true` **is**
   the lost-context sign-in, one row each. The cookie is retired after one read.
-- Docs: `analytics.md` rows, `monitoring.md` §7.24 (the two queries), QA
+- Docs: `analytics.md` rows, `monitoring.md` §7.25 (the two queries), QA
   capability 16 A22. Unit test `scripts/test-approval-wall.ts` in `mcp:lint`.
 
 What the two signals cover: same-browser loss (wall → sign-in → dashboard) is
@@ -153,7 +153,7 @@ the ones that carry it.
 
 `approval_request_resolved {resolution, request_id, age_s}` on every exit
 except TTL; `approval_banner_shown {pending_count}`; `approval_auto_routed
-{request_id}`. Success = §7.24's `pct_recovered` rises and lost-context
+{request_id}`. Success = §7.25's `pct_recovered` rises and lost-context
 sign-ins stop mattering (banner picks the request up), and
 `approval_link_approved` per minted request rises from the 09-09 → 09-15
 baseline.
@@ -207,7 +207,7 @@ outcome than steering it.
 1. This branch: telemetry (done) → PR → preview.
 2. Proposal A: migration + ledger writes (`target`, `resolution`) first, so
    data accrues; then the banner; then auto-route.
-3. Proposal B: after A, measured against §7.24.
+3. Proposal B: after A, measured against §7.25.
 
 ## Open items
 

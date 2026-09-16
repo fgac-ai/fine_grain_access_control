@@ -107,7 +107,7 @@ No Clerk configuration change is needed: the Home URL already lands on
   approval_link_opened` on one `request_id`.
 - Preview: capability 16 A22 + A23.
 
-## Success measure (monitoring §7.24)
+## Success measure (monitoring §7.25)
 
 `approval_wall_routed` per wall request rises from 0; the lost-context share
 of `sign_in_completed` (`after_approval_wall: true` landing on a profile
