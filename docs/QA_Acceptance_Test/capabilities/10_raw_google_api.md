@@ -260,3 +260,31 @@
 - **Cleanup**: untrash S if the run left it trashed. Remove the USER_B
   permission on S in Google Drive's share dialog as the user — permission
   removal is DELETE-only and therefore unavailable through FGAC by design.
+
+### A15: Agent-created files stay fully under the agent's control, trash included
+- Create one file through EACH creation path, all via `google_api_modify` as
+  the same connection: (S1) POST `v4/spreadsheets`; (D1) POST `v1/documents`;
+  (S2) POST `drive/v3/files` with the Sheets mimeType; (C1) POST
+  `drive/v3/files/<S1>/copy`; (T1) POST `drive/v3/files` with
+  `{"name":"QA note","mimeType":"text/plain"}`. For each, run the cycle:
+  write content (`sheets_update_range` / `docs_edit`; skip for T1), `PATCH
+  drive/v3/files/<id>` `{"trashed":true}`, `google_api_get`
+  `drive/v3/files/<id>?fields=trashed`, `PATCH` `{"trashed":false}`, `PATCH`
+  `{"name":"<label> renamed"}`, and (S1) write content again.
+- **Expected** (2026-09-16, run on the PR #147 preview, 30/30): every step
+  SUCCEEDS with no approval link and no dashboard action. S1, D1, S2 and C1
+  carry an "Agent-created: …" Read & Write rule in `get_my_permissions`
+  (`sheet_read_write` / `doc_read_write`) — that rule is what the A14 guard
+  consults, so trash and rename are allowed exactly like a cell or text edit
+  (`drive_file_gate: 'rule'`). T1 has NO rule (FGAC has no rule type for
+  non-Sheets/Docs files): the guard finds no rule, resolves the mimeType, and
+  forwards under the drive.file grant, which treats an app-created file as
+  writable (`drive_file_gate: 'mime_other'`, `raw_api_passthrough: true`).
+  The metadata GET after each trash returns `{"trashed": true}`. Permanent
+  deletion remains unavailable on all five (A14 step 7).
+- **Why this matters**: A14 proves the guard DENIES what it should; this
+  proves it does not over-block the agent's own output — the failure mode
+  PR #143 was written for (copies the agent could manage through Drive but
+  not write through Sheets) must not reappear in the opposite direction.
+- **Cleanup**: trash all five (reversible; leave them trashed).
+

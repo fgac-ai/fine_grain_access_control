@@ -291,6 +291,10 @@ curl -s $BASE_URL/api/mcp -X POST \
   and `generateIds` stay passthrough; raw JSON-RPC `method: "DELETE"` must be
   rejected by the schema (`isError`, no Google call). Untrash and un-share in
   Drive afterwards (permission removal is DELETE-only, unavailable via FGAC).
+- A15: one file per creation path (`v4/spreadsheets`, `v1/documents`,
+  `drive/v3/files` Sheets mimeType, `files/<id>/copy`, `drive/v3/files`
+  text/plain) → write, trash, GET `?fields=trashed`, untrash, rename must all
+  succeed with no approval; pure `tools/call` via curl, no browser needed.
 
 ## Capability: Docs Management (→ capabilities/19_docs_management.md)
 
