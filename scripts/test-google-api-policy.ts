@@ -132,9 +132,36 @@ expect('no id → null', extractDocsDocumentId('v1/documents'), (id: string | nu
 expect('unknown API (drive) → passthrough with family (classify, not block)',
   classifyGoogleApiCall('drive/v3/files', 'GET'),
   (c: { kind: string; family?: string }) => c.kind === 'passthrough' && c.family === 'drive/v3');
-expect('drive media upload → passthrough (upload/ prefix normalized, drive family kept)',
+expect('drive media upload POST → drive_create (upload/ prefix normalized; app-owned file, auto-granted)',
   classifyGoogleApiCall('upload/drive/v3/files?uploadType=media', 'POST'),
+  (c: { kind: string }) => c.kind === 'drive_create');
+// ── Drive-side creates (2026-09-16): copies and Drive creates are app-owned
+// under drive.file exactly like POST v4/spreadsheets, so they classify as
+// their own kinds for source gating + auto-grant instead of passthrough ──
+expect('drive files/{id}/copy POST → drive_copy with source id',
+  classifyGoogleApiCall('drive/v3/files/1BxiM2doc-ID_x/copy', 'POST'),
+  (c: { kind: string; fileId?: string }) => c.kind === 'drive_copy' && c.fileId === '1BxiM2doc-ID_x');
+expect('bare-spelling copy (v3/files/{id}/copy) → drive_copy',
+  classifyGoogleApiCall('v3/files/1BxiM2doc-ID_x/copy?fields=id,name,mimeType', 'POST'),
+  (c: { kind: string; fileId?: string }) => c.kind === 'drive_copy' && c.fileId === '1BxiM2doc-ID_x');
+expect('drive files POST (metadata create) → drive_create',
+  classifyGoogleApiCall('drive/v3/files', 'POST'),
+  (c: { kind: string }) => c.kind === 'drive_create');
+expect('drive files POST with query → drive_create',
+  classifyGoogleApiCall('drive/v3/files?supportsAllDrives=true', 'POST'),
+  (c: { kind: string }) => c.kind === 'drive_create');
+expect('drive files GET (list) stays passthrough — discovery is never gated',
+  classifyGoogleApiCall('drive/v3/files?q=name+contains+%27x%27', 'GET'),
   (c: { kind: string; family?: string }) => c.kind === 'passthrough' && c.family === 'drive/v3');
+expect('drive file PATCH (rename/trash) stays passthrough — scope backstop, not a create',
+  classifyGoogleApiCall('drive/v3/files/1BxiM2doc-ID_x', 'PATCH'),
+  (c: { kind: string; family?: string }) => c.kind === 'passthrough' && c.family === 'drive/v3');
+expect('drive permissions POST stays passthrough',
+  classifyGoogleApiCall('drive/v3/files/1BxiM2doc-ID_x/permissions', 'POST'),
+  (c: { kind: string; family?: string }) => c.kind === 'passthrough' && c.family === 'drive/v3');
+expect('drive copy template keeps the verb: {id}/copy',
+  templateGoogleApiPath('drive/v3/files/1BxiM2doc-ID_x/copy'),
+  (t: string) => t === 'drive/v3/files/{id}/copy');
 expect('drive comments GET → file_comments (per-file rule, not passthrough)',
   classifyGoogleApiCall('drive/v3/files/1BxiM2doc-ID_x/comments?fields=comments', 'GET'),
   (c: { kind: string; fileId?: string; isMutating?: boolean }) =>
@@ -398,6 +425,12 @@ expect('sheets_create → spreadsheets',
 expect('docs kind → documents',
   rawApiFamily(classifyGoogleApiCall('v1/documents/d1', 'GET')),
   (f: string | null) => f === 'documents');
+expect('drive_copy → drive/v3',
+  rawApiFamily(classifyGoogleApiCall('drive/v3/files/1BxiM2doc-ID_x/copy', 'POST')),
+  (f: string | null) => f === 'drive/v3');
+expect('drive_create → drive/v3',
+  rawApiFamily(classifyGoogleApiCall('drive/v3/files', 'POST')),
+  (f: string | null) => f === 'drive/v3');
 expect('gmail read → gmail',
   rawApiFamily(classifyGoogleApiCall('gmail/v1/users/me/messages', 'GET')),
   (f: string | null) => f === 'gmail');

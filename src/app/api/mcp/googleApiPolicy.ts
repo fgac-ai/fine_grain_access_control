@@ -28,6 +28,8 @@ export type RawCallClass =
   | { kind: 'gmail_draft_send' }
   | { kind: 'gmail_write' }
   | { kind: 'file_comments'; fileId: string; isMutating: boolean }
+  | { kind: 'drive_copy'; fileId: string }
+  | { kind: 'drive_create' }
   | { kind: 'passthrough'; family: string; isMutating: boolean }
   | { kind: 'denied'; reason: string; code: DenialCode; family?: string };
 
@@ -224,6 +226,24 @@ export function classifyGoogleApiCall(rawPath: string, method: string): RawCallC
     return { kind: 'file_comments', fileId: decodeURIComponent(commentsMatch[1]), isMutating };
   }
 
+  // Drive-side file creation. Google's drive.file grant treats a file the
+  // app copies or creates through the Drive API exactly like one created via
+  // POST v4/spreadsheets — the app owns it, and every Drive write on it
+  // (rename, share, trash, even permanent delete) is authorized. Until
+  // 2026-09-16 FGAC registered no rule for these files, so the agent could
+  // manage them through Drive while every Sheets/Docs content call denied as
+  // not-exposed (observed: two files/{id}/copy calls, then sheets_not_exposed
+  // on the copy, then the copies renamed, shared and trashed — all
+  // passthrough). Classifying them lets the route gate the copy on the
+  // SOURCE file's rule and auto-grant the result like sheets_create does.
+  const copyMatch = path.match(/^drive\/v3\/files\/([^/?#]+)\/copy$/i);
+  if (copyMatch && isMutating) {
+    return { kind: 'drive_copy', fileId: decodeURIComponent(copyMatch[1]) };
+  }
+  if (/^drive\/v3\/files$/i.test(path.replace(/^upload\//i, '')) && isMutating) {
+    return { kind: 'drive_create' };
+  }
+
   // Unknown API families pass through (2026-08-19 posture change: classify
   // usage instead of blocking it — enforcement gets built when demand shows
   // up). Google's own OAuth scopes are the backstop: the token can only reach
@@ -303,6 +323,9 @@ export function rawApiFamily(cls: RawCallClass): string | null {
       return 'gmail';
     case 'file_comments':
       return 'drive_comments';
+    case 'drive_copy':
+    case 'drive_create':
+      return 'drive/v3';
     case 'passthrough':
       return cls.family;
     case 'denied':

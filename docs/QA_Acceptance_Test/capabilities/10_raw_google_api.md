@@ -177,3 +177,31 @@
   as permanent deletion with trash named as the reversible alternative,
   stamped `denial_code: 'gmail_write_unsupported'` (that code now means ONLY
   permanent deletion). Settings READS (GET `settings/sendAs`) still succeed.
+
+### A13: Drive-side creates are auto-granted; copies are gated on the source
+- With an exposed, Read & Write sheet S (e.g. the A9 created sheet):
+  `google_api_modify` POST `drive/v3/files/<S>/copy` with body
+  `{"name":"QA copy"}`; then `sheets_update_range` on the returned `id`.
+  Then set S to Read Only in the dashboard and copy it again. Then
+  `google_api_modify` POST `drive/v3/files/<unexposed-or-blocked-id>/copy`.
+  Then `google_api_modify` POST `drive/v3/files` with body
+  `{"name":"QA drive-created","mimeType":"application/vnd.google-apps.spreadsheet"}`
+  and, separately, with `{"name":"QA note","mimeType":"text/plain"}`.
+- **Expected** (2026-09-16 — before this, copies were scope-only passthrough:
+  Google allowed them because `drive.file` treats an app-made copy as
+  app-created, no FGAC rule was written, and the agent could rename/share/
+  trash the copy through Drive while every Sheets write on it denied
+  `sheets_not_exposed`): the first copy SUCCEEDS, returns the Drive File JSON,
+  and the copy is IMMEDIATELY writable — `sheets_update_range` on the new id
+  succeeds with no approval link, a rule "Agent-created: QA copy" (Read &
+  Write, scoped to the key) appears in the dashboard, and an
+  `agent_sheet_created` event fires with `auto_granted: true, origin: 'copy'`
+  (the `$mcp_tool_call` carries `raw_api_kind: 'drive_copy'`,
+  `file_created_origin: 'copy'`, `file_created_kind: 'sheet'`). The Read Only
+  copy also succeeds (a copy is a read of the source) and its copy is
+  Read & Write. The unexposed/blocked source is DENIED with the not-exposed /
+  blocked message and NO passthrough to Google. The Drive-created spreadsheet
+  is auto-granted the same way (`raw_api_kind: 'drive_create'`,
+  `origin: 'drive_create'`); the `text/plain` create succeeds, is stamped
+  `file_created_kind: 'other'`, and writes no rule. `PATCH drive/v3/files/<id>`
+  and `POST …/permissions` remain scope-backstop passthrough (unchanged).
