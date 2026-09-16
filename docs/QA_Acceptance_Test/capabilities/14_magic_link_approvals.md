@@ -169,31 +169,3 @@
   users produced one production link with 14 approve events and another
   writing 11 duplicate rules for one sheet in 12 s (PostHog, 2026-08-30 →
   2026-09-04); reproduced locally as 6 clicks → 6 POSTs → 6 duplicate rules
-
-### A16: The first mint emails the link to the owner; repeats do not
-- Signed in as USER_A (whose Google grant carries the Gmail scope), trigger a
-  send denial to a recipient never denied before on this profile (a fresh
-  `+tag` address on `USER_B_EMAIL` is a new request), then trigger the
-  identical denial again. Then trigger a sheets denial on an unexposed
-  spreadsheet once
-- **Expected**: The FIRST send denial's text carries a 📧 line saying FGAC
-  also emailed the link "just now" and quoting the subject; USER_A's own
-  inbox (read through the MCP `gmail_search`/`gmail_read` tools, or Gmail)
-  holds exactly ONE new message from USER_A to USER_A with that subject
-  (`FGAC: approve your agent's request — Allow this agent to send email to
-  …`), plain text, containing BOTH approval URLs from the denial, each with
-  `&src=email` appended and the signed `a`/`k`/`r`/`s` params byte-identical
-  to the denial's. The SECOND denial's text says the link was emailed "at
-  <date HH:MM UTC>" and that no new email is sent for repeats — and the inbox
-  still holds one message for that request. The sheets denial produces its
-  own single email. Opening the emailed link (with `src=email`) resolves and
-  approves exactly like the chat link (A2/A3), and its `approval_link_opened`
-  row carries `link_source: 'email'` (capability 16 A22)
-- **Also**: `approval_requests.notified_at` is set for the emailed request
-  (read-only query); a denial whose email could not be sent (e.g. the owner's
-  grant lacks the Gmail scope — capability 18 setup) carries NO 📧 line and is
-  otherwise unchanged from A1
-- **Harness**: this sends real mail from USER_A to USER_A, which is within the
-  standing permission for mail between the QA accounts. Never assert on a
-  production account's inbox
-

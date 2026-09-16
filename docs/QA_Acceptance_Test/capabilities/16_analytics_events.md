@@ -435,23 +435,3 @@ attributable to it.
   failed post-pick verification emitted nothing — the 8-second retry loop one
   launch-cohort user ran 12 times (PostHog, 2026-08-31) was only visible as
   server-side `approval_link_opened` events with no pageview
-
-### A22: Link delivery is measurable per request
-- Run capability 14 A16, then query the user's events for the last hour:
-  `SELECT event, properties.request_id, properties.action,
-  properties.notify_status, properties.link_source, properties.link_count
-  FROM events WHERE event IN ('approval_link_minted','approval_link_notified',
-  'approval_link_opened') AND timestamp >= now() - INTERVAL 1 HOUR ORDER BY
-  timestamp`
-- **Expected**: The first send denial's two `approval_link_minted` rows
-  (`send_whitelist` and `send_all`) both carry `notify_status: 'sent'`; ONE
-  `approval_link_notified {channel: 'email', link_count: 2}` row carries the
-  `send_whitelist` request id; the repeat denial's mint rows carry
-  `notify_status: 'already_sent'` and no second notified row exists. The open
-  from the emailed link carries `link_source: 'email'`; an open from the
-  chat's URL carries `link_source: 'agent'`. A denial whose email was skipped
-  carries a `skipped_*` status naming why and no notified row
-- **Regression guard**: `notify_status` must be present on EVERY mint path —
-  policy denials, send denials, and `request_access` — or the delivery split
-  in `monitoring.md` 7.23 silently drops that path into the unlabelled bucket
-

@@ -35,11 +35,9 @@ import { GOOGLE_FETCH_TIMEOUT_MS, CLERK_TOKEN_TIMEOUT_MS, withTimeout, isUpstrea
 import { classifyMcpClient, classifyTransportRejection, installFingerprint, parseInitializeClientInfo, parseRpcEnvelope, resourceIdHash, type McpClientInfo } from '@/lib/mcpClientSignals';
 import { recordEagerResolve, shouldSkipEagerResolve } from '@/lib/connectionTouchMemo';
 import { after } from 'next/server';
-import { notifyOwnerOfApprovalLinks, type NotifyLink, type OwnerToken } from '@/lib/approvalNotify';
-import { notifyDenialLine } from '@/lib/approvalNotifyCopy';
 import { inSuccessSample, AUTH_SUCCESS_SAMPLE } from '@/lib/authSampling';
 import { ensureDefaultProfile } from '@/db/defaultProfile';
-import { mintApprovalLink, describeApproval, type ApprovalAction, type ApprovalPayload } from '@/lib/approvalLinks';
+import { mintApprovalLink, type ApprovalAction } from '@/lib/approvalLinks';
 import { connectionsDeepLink } from '@/lib/dashboardAgentLinks';
 import { recordApprovalMint, getApprovalRequestResourceName } from '@/lib/approvalRequests';
 import {
@@ -660,7 +658,6 @@ async function policyDenialWithLink(
   proxyKeyId: string,
   message: string,
   action: ApprovalAction | null,
-  ownerGrant?: OwnerToken | null,
 ) {
   // No action = nothing an agent can request lifts this (explicit block):
   // say so, or the agent gets "Access Denied" and tries again.
@@ -670,21 +667,8 @@ async function policyDenialWithLink(
     const mintCount = await recordApprovalMint({
       requestId, userId: conn.user.id, proxyKeyId, action: action.action, targetHash,
     });
-    // Out-of-band delivery (2026-09-14): the FIRST mint of a request also
-    // emails the link to the owner's own inbox, through their own Gmail
-    // grant. Measured 14 d to 2026-09-13, ~half of minted requests were
-    // never opened, and the never-openers cluster on agent surfaces that
-    // collapse the tool result (Claude Code) — the person never sees the
-    // URL however the text is worded. Later mints of the same request do
-    // not email again; the denial says when the email went out.
-    const notify = await notifyOwnerOfApprovalLinks({
-      owner: conn.user, agentLabel: agentLabel(conn), dashboardUrl: DASHBOARD_URL,
-      links: [{ requestId, action: action.action, url, description: describeApproval(approvalPayloadFor(conn.user.id, proxyKeyId, action, requestId)) }],
-      ownerGrant, fetchOwnerToken: () => ownerTokenForNotify(conn),
-    });
     captureServerEvent(conn.user.clerkUserId, 'approval_link_minted', {
       action: action.action, request_id: requestId, target_hash: targetHash, mint_count: mintCount,
-      notify_status: notify.status,
     });
     addToolCallProps({ approval_request_id: requestId });
     // The user-facing sentence exists because the denial text above is
@@ -694,11 +678,9 @@ async function policyDenialWithLink(
     // clean, so the remaining funnel loss is entirely in getting the click.
     // A quotable, jargon-free line doubles the URL's survival odds in
     // paraphrase and tells the user why clicking is safe.
-    const emailed = notifyDenialLine(notify.status, notify);
     return textResult(
       `${message}\n👉 Share this link with the user to approve it in one click: ${url}\n` +
       `Suggested wording to relay: "FGAC is blocking this until you approve it here: ${url} — one click, and you can revoke it any time from your dashboard."\n` +
-      (emailed ? `${emailed}\n` : '') +
       AGENT_APPROVAL_PROTOCOL,
     );
   } catch (err) {
@@ -708,47 +690,6 @@ async function policyDenialWithLink(
 }
 
 // AGENT_APPROVAL_PROTOCOL lives in src/lib/denialCopy.ts (tested by scripts/test-denial-copy.ts).
-
-/**
- * What the email calls the agent: the connection's nickname, else the MCP
- * client's registered name. A connection created without a name carries its
- * client_id as `clientName` (resolveConnection's fallback), and "72T5NfMm…
- * just tried to" is not a sentence for a person — an id-shaped name falls
- * back to the generic label (observed in local QA, 2026-09-14).
- */
-function agentLabel(conn: ConnectionApproved): string {
-  const name = conn.nickname || conn.clientName || '';
-  const idShaped = /^[A-Za-z0-9_-]{12,}$/.test(name) && !/[aeiou]{2}|\s/i.test(name);
-  return name && !idShaped ? name : 'Your AI agent';
-}
-
-/**
- * The owner's grant as the denied call already resolved it, when the target
- * mailbox WAS the owner's — spares the notification a second Clerk fetch.
- * Undefined for a delegated mailbox (a different person's token).
- */
-function ownerGrantOf(conn: ConnectionApproved, resolved: ResolvedAccount): OwnerToken | undefined {
-  if (resolved.targetEmail.toLowerCase() !== conn.user.email.toLowerCase()) return undefined;
-  return { token: resolved.token, hasGmailScope: resolved.hasGmailScope };
-}
-
-/** The owner's OWN token for the notification email — never a delegated one. */
-async function ownerTokenForNotify(conn: ConnectionApproved): Promise<OwnerToken | null> {
-  const t = await getGoogleToken(conn.user.email, conn.user, { quiet: true });
-  if ('failure' in t) return null;
-  return { token: t.token, hasGmailScope: t.hasGmailScope };
-}
-
-/** Payload shape `describeApproval` reads, without going through the URL. */
-function approvalPayloadFor(userId: string, proxyKeyId: string, action: ApprovalAction, requestId: string): ApprovalPayload {
-  return {
-    userId, proxyKeyId, action: action.action, requestId,
-    recipient: action.action === 'send_whitelist' ? action.recipient : undefined,
-    spreadsheetId: action.action === 'sheets_expose' || action.action === 'sheets_write' ? action.spreadsheetId : undefined,
-    documentId: action.action === 'docs_expose' || action.action === 'docs_write' ? action.documentId : undefined,
-    resourceName: 'resourceName' in action ? action.resourceName : undefined,
-  };
-}
 
 /**
  * Send denials offer BOTH one-click options: approve just this recipient, or
@@ -762,19 +703,10 @@ async function sendDenialWithLinks(
   conn: ConnectionApproved,
   proxyKeyId: string,
   denial: SendDenial,
-  ownerGrant?: OwnerToken | null,
 ) {
   const lines = [denial.message];
   addToolCallProps({ denial_code: denial.code });
-  // Mint events are buffered until the email outcome is known (they carry
-  // notify_status); the catch below flushes whatever was minted before a
-  // failure so a shown link is never missing from the funnel.
-  const mints: Array<Record<string, unknown>> = [];
   try {
-    // Both links go in ONE email, claimed on the per-recipient request when
-    // there is one (a new recipient is a new request; the per-owner hourly
-    // cap bounds a batch), else on the send-to-anyone request.
-    const emailLinks: NotifyLink[] = [];
     if (denial.deniedRecipient) {
       const one = await mintApprovalLink(DASHBOARD_URL, conn.user.id, proxyKeyId, {
         action: 'send_whitelist', recipient: denial.deniedRecipient,
@@ -784,11 +716,7 @@ async function sendDenialWithLinks(
         requestId: one.requestId, userId: conn.user.id, proxyKeyId,
         action: 'send_whitelist', targetHash: one.targetHash,
       });
-      emailLinks.push({
-        requestId: one.requestId, action: 'send_whitelist', url: one.url,
-        description: describeApproval(approvalPayloadFor(conn.user.id, proxyKeyId, { action: 'send_whitelist', recipient: denial.deniedRecipient }, one.requestId)),
-      });
-      mints.push({
+      captureServerEvent(conn.user.clerkUserId, 'approval_link_minted', {
         action: 'send_whitelist', request_id: one.requestId, target_hash: one.targetHash, via: 'send_denial',
         mint_count: oneMintCount,
       });
@@ -798,28 +726,13 @@ async function sendDenialWithLinks(
     const allMintCount = await recordApprovalMint({
       requestId: all.requestId, userId: conn.user.id, proxyKeyId, action: 'send_all',
     });
-    emailLinks.push({
-      requestId: all.requestId, action: 'send_all', url: all.url,
-      description: describeApproval(approvalPayloadFor(conn.user.id, proxyKeyId, { action: 'send_all' }, all.requestId)),
+    captureServerEvent(conn.user.clerkUserId, 'approval_link_minted', {
+      action: 'send_all', request_id: all.requestId, via: 'send_denial', mint_count: allMintCount,
     });
-    mints.push({ action: 'send_all', request_id: all.requestId, via: 'send_denial', mint_count: allMintCount });
-
-    const notify = await notifyOwnerOfApprovalLinks({
-      owner: conn.user, agentLabel: agentLabel(conn), dashboardUrl: DASHBOARD_URL, links: emailLinks,
-      ownerGrant, fetchOwnerToken: () => ownerTokenForNotify(conn),
-    });
-    for (const props of mints.splice(0)) {
-      captureServerEvent(conn.user.clerkUserId, 'approval_link_minted', { ...props, notify_status: notify.status });
-    }
     lines.push('Present both options and let the user pick; "any recipient" is the convenient choice if they expect to send freely, and it stays revocable from the dashboard rules.');
-    const emailed = notifyDenialLine(notify.status, notify);
-    if (emailed) lines.push(emailed);
     lines.push(AGENT_APPROVAL_PROTOCOL);
   } catch (err) {
     console.error('[MCP] Failed to mint approval link:', err);
-    for (const props of mints.splice(0)) {
-      captureServerEvent(conn.user.clerkUserId, 'approval_link_minted', { ...props, notify_status: 'failed' });
-    }
     lines.push(LINK_UNAVAILABLE_STOP);
   }
   return textResult(lines.join('\n'));
@@ -2065,7 +1978,7 @@ async function executeRawGoogleCall(
     const sid = resolveDriveFileId('sheet', cls.spreadsheetId);
     if ('denial' in sid) return sid.denial;
     const perm = await checkSheetsPermission(conn.user.id, resolved.proxyKeyId, cls.spreadsheetId, cls.isMutating);
-    if (!perm.allowed) return policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, sheetsDenialAction(perm, cls.spreadsheetId, cls.isMutating), ownerGrantOf(conn, resolved));
+    if (!perm.allowed) return policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, sheetsDenialAction(perm, cls.spreadsheetId, cls.isMutating));
 
     const result = await withSheetsGrace(perm, () => googleFetch(rawUrl(cleanPath), resolved.token, method, serializeBody(body), resolved.targetEmail));
     if (!result.ok) return sheetsErrorResult(result, cls.spreadsheetId);
@@ -2076,7 +1989,7 @@ async function executeRawGoogleCall(
     const did = resolveDriveFileId('doc', cls.documentId);
     if ('denial' in did) return did.denial;
     const perm = await checkDocsPermission(conn.user.id, resolved.proxyKeyId, cls.documentId, cls.isMutating);
-    if (!perm.allowed) return policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, docsDenialAction(perm, cls.documentId, cls.isMutating), ownerGrantOf(conn, resolved));
+    if (!perm.allowed) return policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, docsDenialAction(perm, cls.documentId, cls.isMutating));
 
     const result = await withDocsGrace(perm, () => googleFetch(rawUrl(cleanPath), resolved.token, method, serializeBody(body), resolved.targetEmail));
     if (!result.ok) return docsErrorResult(result, cls.documentId);
@@ -2087,7 +2000,7 @@ async function executeRawGoogleCall(
 
   if (cls.kind === 'gmail_send') {
     const denial = checkSendWhitelist(rules, extractSendRecipients(body));
-    if (denial) return sendDenialWithLinks(conn, resolved.proxyKeyId, denial, ownerGrantOf(conn, resolved));
+    if (denial) return sendDenialWithLinks(conn, resolved.proxyKeyId, denial);
   }
 
   if (cls.kind === 'gmail_draft_send') {
@@ -2127,7 +2040,7 @@ async function executeRawGoogleCall(
       return draftDenial('The draft has no parseable To/Cc/Bcc recipients. Update the draft with standard recipient headers, then retry drafts/send.');
     }
     const denial = checkSendWhitelist(rules, recipients);
-    if (denial) return sendDenialWithLinks(conn, resolved.proxyKeyId, denial, ownerGrantOf(conn, resolved));
+    if (denial) return sendDenialWithLinks(conn, resolved.proxyKeyId, denial);
   }
 
   const url = `https://www.googleapis.com/${cleanPath}`;
@@ -2565,7 +2478,7 @@ const handler = createMcpHandler(
         // Enforce send whitelist
         const rules = await loadApplicableRules(conn.user.id, resolved.proxyKeyId, resolved.targetEmail);
         const denial = checkSendWhitelist(rules, [to]);
-        if (denial) return sendDenialWithLinks(conn, resolved.proxyKeyId, denial, ownerGrantOf(conn, resolved));
+        if (denial) return sendDenialWithLinks(conn, resolved.proxyKeyId, denial);
 
         // Build RFC 2822 message
         const raw = Buffer.from(
@@ -2621,7 +2534,7 @@ const handler = createMcpHandler(
         if ('denial' in sid) return sid.denial;
         spreadsheetId = sid.id;
         const perm = await checkSheetsPermission(conn.user.id, resolved.proxyKeyId, spreadsheetId, false);
-        if (!perm.allowed) return policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, sheetsDenialAction(perm, spreadsheetId, false), ownerGrantOf(conn, resolved));
+        if (!perm.allowed) return policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, sheetsDenialAction(perm, spreadsheetId, false));
 
         const result = await withSheetsGrace(perm, () => sheetsFetch(resolved.token, `${spreadsheetId}`, 'GET', undefined, resolved.targetEmail));
         if (!result.ok) return sheetsErrorResult(result, spreadsheetId);
@@ -2657,7 +2570,7 @@ const handler = createMcpHandler(
         if ('denial' in sid) return sid.denial;
         spreadsheetId = sid.id;
         const perm = await checkSheetsPermission(conn.user.id, resolved.proxyKeyId, spreadsheetId, false);
-        if (!perm.allowed) return policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, sheetsDenialAction(perm, spreadsheetId, false), ownerGrantOf(conn, resolved));
+        if (!perm.allowed) return policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, sheetsDenialAction(perm, spreadsheetId, false));
 
         const encodedRange = encodeURIComponent(range);
         const result = await withSheetsGrace(perm, () => sheetsFetch(resolved.token, `${spreadsheetId}/values/${encodedRange}`, 'GET', undefined, resolved.targetEmail));
@@ -2691,7 +2604,7 @@ const handler = createMcpHandler(
         if ('denial' in sid) return sid.denial;
         spreadsheetId = sid.id;
         const perm = await checkSheetsPermission(conn.user.id, resolved.proxyKeyId, spreadsheetId, true);
-        if (!perm.allowed) return policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, sheetsDenialAction(perm, spreadsheetId, true), ownerGrantOf(conn, resolved));
+        if (!perm.allowed) return policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, sheetsDenialAction(perm, spreadsheetId, true));
 
         const encodedRange = encodeURIComponent(range);
         const body = JSON.stringify({ values, range });
@@ -2726,7 +2639,7 @@ const handler = createMcpHandler(
         if ('denial' in sid) return sid.denial;
         spreadsheetId = sid.id;
         const perm = await checkSheetsPermission(conn.user.id, resolved.proxyKeyId, spreadsheetId, true);
-        if (!perm.allowed) return policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, sheetsDenialAction(perm, spreadsheetId, true), ownerGrantOf(conn, resolved));
+        if (!perm.allowed) return policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, sheetsDenialAction(perm, spreadsheetId, true));
 
         const encodedRange = encodeURIComponent(range);
         const body = JSON.stringify({ values });
@@ -2760,7 +2673,7 @@ const handler = createMcpHandler(
         if ('denial' in sid) return sid.denial;
         spreadsheetId = sid.id;
         const perm = await checkSheetsPermission(conn.user.id, resolved.proxyKeyId, spreadsheetId, true);
-        if (!perm.allowed) return policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, sheetsDenialAction(perm, spreadsheetId, true), ownerGrantOf(conn, resolved));
+        if (!perm.allowed) return policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, sheetsDenialAction(perm, spreadsheetId, true));
 
         const body = JSON.stringify({ requests });
         const result = await withSheetsGrace(perm, () => sheetsFetch(resolved.token, `${spreadsheetId}:batchUpdate`, 'POST', body, resolved.targetEmail));
@@ -2792,7 +2705,7 @@ const handler = createMcpHandler(
         if ('denial' in did) return did.denial;
         documentId = did.id;
         const perm = await checkDocsPermission(conn.user.id, resolved.proxyKeyId, documentId, false);
-        if (!perm.allowed) return policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, docsDenialAction(perm, documentId, false), ownerGrantOf(conn, resolved));
+        if (!perm.allowed) return policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, docsDenialAction(perm, documentId, false));
 
         const query = fields ? `?fields=${encodeURIComponent(fields)}` : '';
         const result = await withDocsGrace(perm, () => docsFetch(resolved.token, `${encodeURIComponent(documentId)}${query}`, 'GET', undefined, resolved.targetEmail));
@@ -2828,7 +2741,7 @@ const handler = createMcpHandler(
         if ('denial' in did) return did.denial;
         documentId = did.id;
         const perm = await checkDocsPermission(conn.user.id, resolved.proxyKeyId, documentId, true);
-        if (!perm.allowed) return policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, docsDenialAction(perm, documentId, true), ownerGrantOf(conn, resolved));
+        if (!perm.allowed) return policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, docsDenialAction(perm, documentId, true));
 
         const body = JSON.stringify({ requests });
         const verifyPlan = planDocsDeleteVerification(requests);
@@ -3044,20 +2957,11 @@ const handler = createMcpHandler(
         // it — the response should say so rather than ask the agent again
         // (observed in QA 2026-09-08).
         const storedTitle = title ?? (action.action === 'send_whitelist' ? null : await getApprovalRequestResourceName(requestId));
-        const emailPayload = approvalPayloadFor(conn.user.id, conn.proxyKeyId, action, requestId);
-        if (storedTitle && !emailPayload.resourceName) emailPayload.resourceName = storedTitle;
-        const notify = await notifyOwnerOfApprovalLinks({
-          owner: conn.user, agentLabel: agentLabel(conn), dashboardUrl: DASHBOARD_URL,
-          links: [{ requestId, action: action.action, url, description: describeApproval(emailPayload) }],
-          fetchOwnerToken: () => ownerTokenForNotify(conn),
-        });
         captureServerEvent(conn.user.clerkUserId, 'approval_link_minted', {
           action: action.action, via: 'request_access', request_id: requestId, target_hash: targetHash,
           mint_count: mintCount, has_resource_name: !!storedTitle, resource_name_supplied: !!title,
-          notify_status: notify.status,
         });
         addToolCallProps({ approval_request_id: requestId });
-        const emailed = notifyDenialLine(notify.status, notify);
         return jsonResult({
           status: 'approval_required',
           summary: action.action === 'send_whitelist'
@@ -3066,7 +2970,6 @@ const handler = createMcpHandler(
               ? `Requesting ${type === 'docs_read' ? 'read-only' : 'read & write'} access to document ${storedTitle ? `"${storedTitle}" (${documentId})` : documentId}`
               : `Requesting ${type === 'sheets_read' ? 'read-only' : 'read & write'} access to spreadsheet ${storedTitle ? `"${storedTitle}" (${spreadsheetId})` : spreadsheetId}`,
           approvalUrl: url,
-          ...(emailed ? { emailed } : {}),
           note: 'Nothing has been granted. Show the approval link to the user VERBATIM as a clickable URL — only they can approve it. The link does not expire and stays valid, so re-requesting produces the same URL rather than a new one. Do not retry the original operation until they confirm.'
             + (action.action === 'send_whitelist' ? '' : storedTitle
               ? ` The approval page shows the file as "${storedTitle}".`
