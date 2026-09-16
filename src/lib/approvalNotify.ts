@@ -47,6 +47,9 @@ export interface SenderConfig {
   /** The mailbox the message is sent from and replies go to. */
   address: string;
   appPassword: string;
+  /** SMTP relay; Gmail's by default. QA points this at a capture server. */
+  host: string;
+  port: number;
 }
 
 /**
@@ -59,7 +62,9 @@ export function senderConfig(env: Record<string, string | undefined> = process.e
   const address = env.SUPPORT_SMTP_USER?.trim();
   const appPassword = env.SUPPORT_SMTP_APP_PASSWORD?.trim();
   if (!address || !appPassword || !address.includes('@')) return null;
-  return { address, appPassword };
+  const host = env.SUPPORT_SMTP_HOST?.trim() || 'smtp.gmail.com';
+  const port = Number(env.SUPPORT_SMTP_PORT) || 465;
+  return { address, appPassword, host, port };
 }
 
 export type SendResult =
@@ -89,7 +94,7 @@ export interface NotifyOwnerResult {
 async function smtpSend(cfg: SenderConfig, msg: { to: string; subject: string; text: string }): Promise<SendResult> {
   try {
     const transport = nodemailer.createTransport({
-      host: 'smtp.gmail.com', port: 465, secure: true,
+      host: cfg.host, port: cfg.port, secure: cfg.port === 465,
       auth: { user: cfg.address, pass: cfg.appPassword },
       connectionTimeout: SMTP_TIMEOUT_MS, greetingTimeout: SMTP_TIMEOUT_MS, socketTimeout: SMTP_TIMEOUT_MS,
     });

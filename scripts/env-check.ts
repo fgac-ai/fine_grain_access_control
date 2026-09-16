@@ -118,6 +118,15 @@ if (dbIsProd && mode === 'test') {
 //     never appear in the session.
 //   * scripts/qa-posthog-events.ts reads .env.local via dotenv.
 console.log('\nPOSTHOG (query access)');
+// Approval-link reminder email (src/lib/approvalNotify.ts): off unless the
+// support mailbox's SMTP credentials are present. Informational — local and
+// preview normally run with it off; production needs both set (Vercel env).
+if (process.env.SUPPORT_SMTP_USER && process.env.SUPPORT_SMTP_APP_PASSWORD) {
+  console.log(`Approval reminder email: ON, from ${process.env.SUPPORT_SMTP_USER} via ${process.env.SUPPORT_SMTP_HOST || 'smtp.gmail.com'}`);
+} else {
+  console.log('Approval reminder email: off (SUPPORT_SMTP_USER / SUPPORT_SMTP_APP_PASSWORD not set)');
+}
+
 const phKey = process.env.POSTHOG_PERSONAL_API_KEY;
 if (!phKey) {
   console.log(warn('POSTHOG_PERSONAL_API_KEY not set — analytics verification is blind'));

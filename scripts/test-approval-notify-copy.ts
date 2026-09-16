@@ -75,7 +75,9 @@ check('no credentials → off', senderConfig({}) === null);
 check('kill switch wins', senderConfig({ APPROVAL_LINK_EMAIL: 'off', SUPPORT_SMTP_USER: 'support@fgac.ai', SUPPORT_SMTP_APP_PASSWORD: 'x' }) === null);
 check('address without @ → off', senderConfig({ SUPPORT_SMTP_USER: 'support', SUPPORT_SMTP_APP_PASSWORD: 'x' }) === null);
 const cfg = senderConfig({ SUPPORT_SMTP_USER: ' support@fgac.ai ', SUPPORT_SMTP_APP_PASSWORD: ' abcd efgh ' });
-check('both present → sender, trimmed', cfg?.address === 'support@fgac.ai' && cfg?.appPassword === 'abcd efgh');
+check('both present → sender, trimmed, Gmail relay by default', cfg?.address === 'support@fgac.ai' && cfg?.appPassword === 'abcd efgh' && cfg?.host === 'smtp.gmail.com' && cfg?.port === 465);
+const qa = senderConfig({ SUPPORT_SMTP_USER: 'qa@example.test', SUPPORT_SMTP_APP_PASSWORD: 'x', SUPPORT_SMTP_HOST: 'smtp.ethereal.email', SUPPORT_SMTP_PORT: '587' });
+check('relay host/port are overridable for QA capture', qa?.host === 'smtp.ethereal.email' && qa?.port === 587);
 
 if (failures) { console.error(`\n${failures} approval-notify copy check(s) failed`); process.exit(1); }
 console.log('\nAll approval-notify copy checks passed');
