@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, uuid, uniqueIndex, jsonb, integer, boolean } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, uuid, uniqueIndex, index, jsonb, integer, boolean } from 'drizzle-orm/pg-core';
 
 // ─── Users ───────────────────────────────────────────────────────────────────
 // Core user table. proxyKey removed — keys now live in proxy_keys table.
@@ -70,6 +70,12 @@ export const approvalRequests = pgTable('approval_requests', {
   lastMintedAt: timestamp('last_minted_at').defaultNow().notNull(),
   openedAt: timestamp('opened_at'),
   approvedAt: timestamp('approved_at'),
+  // When FGAC emailed this request's link to the owner's own inbox (one
+  // email per request, ever — claimed atomically before the send so a
+  // looping agent or a concurrent mint cannot produce a second one). NULL =
+  // never emailed (owner lacks the Gmail scope, cap hit, send failed, or
+  // the row predates the feature).
+  notifiedAt: timestamp('notified_at'),
   // Human-readable title of the file behind a sheets/docs request, when the
   // agent supplied one via request_access. The approve page can only show
   // Google's file id for a file Google does not share with FGAC yet, and the
@@ -77,7 +83,58 @@ export const approvalRequests = pgTable('approval_requests', {
   // opaque id onto a sheet title themselves (the 2026-09 Picker-cancel leak).
   // First non-empty value wins; never carried in the URL.
   resourceName: text('resource_name'),
-});
+  // Approval sign-in wall (2026-09-16). A SIGNED-OUT visit to this request's
+  // link — Claude desktop's in-app browser holds no FGAC session, so every
+  // click from it lands there. The link itself identifies the owner (the key
+  // in it resolves to a user, and the signature verifies against that user),
+  // so the hit is recorded without a session. wallQuery is the link's own
+  // query string (a/k/r/s), stored verbatim so /dashboard can send a freshly
+  // signed-in owner straight back to the approval without re-deriving the
+  // signature. routedAt makes that redirect fire once per request.
+  wallHitAt: timestamp('wall_hit_at'),
+  wallQuery: text('wall_query'),
+  routedAt: timestamp('routed_at'),
+}, (table) => [
+  // The per-owner hourly email cap counts this owner's recent notified_at
+  // stamps on every first mint; keep that a range scan as the ledger grows.
+  index('approval_requests_user_notified_idx').on(table.userId, table.notifiedAt),
+]);
+
+// ─── Account Refusals ───────────────────────────────────────────────────────
+// One row per (proxy key, requested account) for the caller-chosen
+// `account_not_permitted` refusal: the agent passed an `account` the key
+// cannot use. No approval request exists for that path (only the owner can
+// add an account to a key, so there is nothing to mint), which is why the
+// reminder email's ledger could not live on approval_requests — and why,
+// until this table, the refused value was recorded nowhere: a scheduled job
+// was refused ~8 times a day for a week (2026-09-09 → 09-16) and what it was
+// passing had to be inferred from the response length.
+//
+// `windowCount` / `windowStartedAt` are the rolling 24 h window that decides
+// when the owner is emailed (ACCOUNT_REFUSAL_NOTIFY_AFTER refusals);
+// `notifiedAt` is the once-ever-per-row claim, taken atomically before the
+// send. Every refusal is one upsert.
+export const accountRefusals = pgTable('account_refusals', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  proxyKeyId: uuid('proxy_key_id').references(() => proxyKeys.id, { onDelete: 'cascade' }).notNull(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  // The `account` value the caller passed, lower-cased and trimmed (the
+  // access check is case-insensitive), capped at 254 characters.
+  requestedEmail: text('requested_email').notNull(),
+  refusalCount: integer('refusal_count').notNull().default(1),
+  windowStartedAt: timestamp('window_started_at').defaultNow().notNull(),
+  windowCount: integer('window_count').notNull().default(1),
+  firstRefusedAt: timestamp('first_refused_at').defaultNow().notNull(),
+  lastRefusedAt: timestamp('last_refused_at').defaultNow().notNull(),
+  // The MCP tool of the most recent refusal, for the email and the runbook.
+  lastTool: text('last_tool'),
+  notifiedAt: timestamp('notified_at'),
+}, (table) => [
+  uniqueIndex('account_refusals_key_email_unique').on(table.proxyKeyId, table.requestedEmail),
+  // The per-owner daily email cap counts this owner's recent stamps here
+  // and on approval_requests in one statement; keep both range scans.
+  index('account_refusals_user_notified_idx').on(table.userId, table.notifiedAt),
+]);
 
 // ─── Email Delegations ───────────────────────────────────────────────────────
 // Tracks cross-user email delegation. Owner grants delegate permission to

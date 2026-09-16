@@ -169,3 +169,100 @@
   users produced one production link with 14 approve events and another
   writing 11 duplicate rules for one sheet in 12 s (PostHog, 2026-08-30 →
   2026-09-04); reproduced locally as 6 clicks → 6 POSTs → 6 duplicate rules
+
+### A16: A repeat request emails the link from FGAC's support mailbox; a first request does not
+- Environment needs the sender configured: `SUPPORT_FGAC_PROXY_KEY` (an
+  FGAC proxy key on a profile with a send rule covering the recipients) and
+  `SUPPORT_SENDER_EMAIL` (that key's own mailbox). In production that is the
+  support mailbox's FGAC account. For QA, stand USER_A in for it: as USER_A
+  create a NEW profile (`FGAC reminders (QA)`; a profile is its own key) and
+  on it "+ Apply a rule → + Create a new rule" as a Gmail send whitelist with
+  pattern `*` (the quick-add button is Default-Profile-only), reveal the
+  key, write both values to `.secrets/sender.env`,
+  and start the dev server with `.claude/launch.json` `fgac-dev-sender`. The
+  reminder then lands in USER_A's own inbox, sent by USER_A's key — read it
+  through the MCP `gmail_list`/`gmail_read` tools. Without the two variables
+  every mint carries `notify_status: 'disabled'` and this assertion is
+  `blocked`, not `skip`. The 3-a-day cap is per OWNER of the connection and
+  lives in the branch DB, so an earlier session's run on the same Neon
+  branch can exhaust it (2026-09-16: three link reminders sent to USER_A at
+  ~05:00 UTC blocked a later run outright). Check headroom first
+  (read-only: `notified_at > now() - interval '24 hours'` on
+  `approval_requests` and `account_refusals`, grouped by owner) and, when
+  it is spent, run A16/A17 with the OTHER QA account as the connection
+  owner and recipient — never clear the stamps
+- Signed in as USER_A, trigger a send denial to a recipient never denied
+  before on this profile (a fresh `+tag` on `USER_B_EMAIL`), then trigger the
+  identical denial again within a minute, then a third time at least 5
+  minutes after the first
+- **Expected**: The FIRST and SECOND denials carry NO 📧 line (first ask;
+  repeat inside the same-turn window) and nothing is emailed. The THIRD
+  denial carries a 📧 line saying that because this is a repeat request FGAC
+  has also emailed the link to the user just now; the sender's inbox holds
+  exactly ONE message to USER_A's address, From `FGAC <support address>`,
+  Reply-To the support address, subject `Your agent has asked 3 times to
+  send email to … — approve it?`, plain text, body opening "FGAC has detected
+  <agent> asking 3 times, without approval, to:", naming the first request
+  time in UTC, carrying BOTH approval URLs from the denial each with
+  `&src=email` appended and the signed `a`/`k`/`r`/`s` params byte-identical,
+  and offering "do nothing" and "reply to this email" as the decline paths.
+  A FOURTH denial says the link was emailed "at <date HH:MM UTC>" and no
+  further email is sent; the mailbox still holds one message. Opening the
+  emailed link resolves and approves exactly like the chat link (A2), and
+  its `approval_link_opened` row carries `link_source: 'email'` (capability
+  16 A24). A request whose approve page was opened BEFORE the repeat ask
+  never emails (`notify_status: 'skipped_opened'`)
+- **Cap**: with three distinct requests already emailed to USER_A in the
+  last 24 h, a fourth due repeat carries no 📧 line and
+  `notify_status: 'skipped_rate_capped'`; the ledger row keeps
+  `notified_at` NULL
+- **Never**: no email is ever sent through a user's Google grant — the
+  sender is FGAC's own mailbox. Never assert on a production account's
+  inbox
+
+
+### A17: A repeatedly refused `account` value emails the owner once, naming the value and the fixes
+- Sender configured exactly as in A16 (`SUPPORT_FGAC_PROXY_KEY` /
+  `SUPPORT_SENDER_EMAIL`; USER_A stands in). Without them every refusal
+  carries `notify_status: 'disabled'`, the `account_refusals` row is still
+  written, and this assertion is `blocked`, not `skip`
+- Signed in as USER_A, on a profile whose mailbox list does NOT include the
+  value you will pass (the Default Profile is fine even when USER_B's
+  delegated mailbox is on it), call `sheets_read_range` (any spreadsheet id)
+  THREE times with `account` set to an address the profile does not include
+  (a fresh `+tag` on `USER_B_EMAIL` — never a real third party's address),
+  then a FOURTH time with the same value, then once with a DIFFERENT
+  unlisted value
+- **Expected**: every call is the 🚫 `account_not_permitted` refusal from
+  `accountNotPermittedByCaller` (names the refused value and the usable
+  account, "no approval link exists for it") — no approval link is ever
+  minted and no `approval_link_minted` row appears. The FIRST and SECOND
+  carry NO 📧 line. The THIRD carries a 📧 line saying FGAC has emailed the
+  user naming the account this task passes and the accounts the connection
+  can use; the sender's inbox holds exactly ONE message to USER_A's address,
+  From `FGAC <support address>`, Reply-To the support address, subject
+  `Your agent keeps asking for '<value>', an account it cannot use — a
+  change is needed`, plain text, body opening "FGAC has refused <agent> 3
+  times since <date HH:MM UTC> (its sheets_read_range calls) because it asks
+  for the Google account:", the value on its own line, "The account(s) it
+  can use: <every mailbox on the profile>.", "No approval link exists for
+  this", the two
+  numbered fixes (change the task / sign in as that account and delegate to
+  USER_A's address, with the `/dashboard/accounts` URL), and "will not email
+  you about this account again". The FOURTH says FGAC emailed the user about
+  this account "at <date HH:MM UTC>" and no further email is sent; the
+  mailbox still holds one message. The DIFFERENT value starts its own count
+  (no 📧 line on its first refusal)
+- **Ledger** (read-only query on the branch DB): one `account_refusals`
+  row per (profile key, value), `requested_email` lower-cased,
+  `refusal_count` 4 and `window_count` 4 for the first value, `last_tool`
+  `sheets_read_range`, `notified_at` set once and unchanged by the fourth
+  refusal; the second value's row has `notified_at` NULL
+- **Cap**: with three reminder emails already sent to USER_A in the last
+  24 h (A16 links and A17 notices count together), a due third refusal
+  carries no 📧 line and `notify_status: 'skipped_rate_capped'`; the row
+  keeps `notified_at` NULL
+- **Never**: a refusal never mints a link, never emails on the first or
+  second refusal, never emails twice for the same (key, value), and never
+  sends through a user's Google grant. Never assert on a production
+  account's inbox

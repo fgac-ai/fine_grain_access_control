@@ -217,9 +217,21 @@ export async function createProxyKey(formData: FormData) {
   const label = formData.get("label") as string;
   const emailAddresses = formData.getAll("emails") as string[];
 
+  // Profile adoption is otherwise invisible in PostHog (no event carries a
+  // key id), so the daily review needs the attempt AND the refusal reasons
+  // to tell "nobody wants profiles" from "people try and fail". The reasons
+  // are the refusals below, by design; the label itself is never captured.
+  const profileEvent = async (event: 'agent_profile_created' | 'agent_profile_create_failed', props: Record<string, unknown>) => {
+    const { captureServerEvent } = await import("@/lib/posthogServer");
+    captureServerEvent(dbUser.clerkUserId, event, { accounts: emailAddresses.length, ...props });
+  };
+
   // Returned, not thrown, like every refusal below — production masks thrown
   // server-action messages (see DelegationActionResult).
-  if (!label) return { error: "Label is required." };
+  if (!label) {
+    await profileEvent('agent_profile_create_failed', { reason: 'missing_label' });
+    return { error: "Label is required." };
+  }
 
   // Profile labels double as MCP URL slugs (/api/mcp/<slug>, see
   // src/lib/profileSlugs.ts). Two labels that slugify identically would make
@@ -228,12 +240,16 @@ export async function createProxyKey(formData: FormData) {
   // a value, not thrown: production masks server-action error messages, and
   // the user needs to see WHY the label was refused.
   const slug = slugifyProfileLabel(label);
-  if (!slug) return { error: "Label must contain at least one letter or number." };
+  if (!slug) {
+    await profileEvent('agent_profile_create_failed', { reason: 'unslugifiable_label' });
+    return { error: "Label must contain at least one letter or number." };
+  }
   const existingKeys = await db.query.proxyKeys.findMany({
     where: and(eq(proxyKeys.userId, dbUser.id), isNull(proxyKeys.revokedAt)),
   });
   const clash = existingKeys.find(k => slugifyProfileLabel(k.label) === slug);
   if (clash) {
+    await profileEvent('agent_profile_create_failed', { reason: 'slug_clash', existing_profiles: existingKeys.length });
     return {
       error: `A profile named "${clash.label}" already uses the URL slug "${slug}". Pick a label that differs by more than punctuation or casing.`,
     };
@@ -258,6 +274,7 @@ export async function createProxyKey(formData: FormData) {
         // delegationId — granting access that no delegation backed, that
         // revocation could not remove, and that looked like the user's own
         // mailbox to every downstream check.
+        await profileEvent('agent_profile_create_failed', { reason: 'no_delegation', existing_profiles: existingKeys.length });
         return { error: `No active delegation grants you access to ${email}.` };
       }
 
@@ -280,6 +297,13 @@ export async function createProxyKey(formData: FormData) {
     publicKey: publicKeyPem,
     label,
   }).returning().then(res => res[0]);
+
+  await profileEvent('agent_profile_created', {
+    delegated_accounts: grants.filter(g => g.delegationId).length,
+    // Live profiles BEFORE this one (the Default Profile counts): 1 = the
+    // user's first non-default profile, the adoption moment the review watches.
+    existing_profiles: existingKeys.length,
+  });
 
   for (const { email, delegationId } of grants) {
     await db.insert(keyEmailAccess).values({

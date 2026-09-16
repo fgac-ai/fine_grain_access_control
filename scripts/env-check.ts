@@ -118,6 +118,16 @@ if (dbIsProd && mode === 'test') {
 //     never appear in the session.
 //   * scripts/qa-posthog-events.ts reads .env.local via dotenv.
 console.log('\nPOSTHOG (query access)');
+// Approval-link reminder email (src/lib/approvalNotify.ts): off unless the
+// support mailbox's FGAC proxy key and address are present. Informational —
+// local and preview normally run with it off; production needs both set
+// (Vercel env). The key must belong to a profile that allows sending.
+if (process.env.SUPPORT_FGAC_PROXY_KEY && process.env.SUPPORT_SENDER_EMAIL) {
+  console.log(`Approval reminder email: ON, from ${process.env.SUPPORT_SENDER_EMAIL} through FGAC's proxy API (key ${process.env.SUPPORT_FGAC_PROXY_KEY.slice(0, 12)}…)`);
+} else {
+  console.log('Approval reminder email: off (SUPPORT_FGAC_PROXY_KEY / SUPPORT_SENDER_EMAIL not set)');
+}
+
 const phKey = process.env.POSTHOG_PERSONAL_API_KEY;
 if (!phKey) {
   console.log(warn('POSTHOG_PERSONAL_API_KEY not set — analytics verification is blind'));
