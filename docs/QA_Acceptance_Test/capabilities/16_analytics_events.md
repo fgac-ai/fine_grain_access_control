@@ -438,9 +438,13 @@ attributable to it.
   server-side `approval_link_opened` events with no pageview
 
 ### A22: The approval sign-in wall is measurable
-- Sign out of FGAC, open any approval link (`/dashboard/approve?a=…&s=…`) so
-  Clerk redirects to sign-in, then sign in from the plain `/dashboard` URL
-  (not from the redirect) so you land on a profile page. Query:
+- Sign out of FGAC, open an approval link that CANNOT route — one with an
+  invalid signature (`/dashboard/approve?a=sheets_expose&k=<any uuid>&r=x&s=bad`)
+  — so Clerk redirects to sign-in, then sign in from the plain `/dashboard`
+  URL (not from the redirect) so you land on a profile page. A real,
+  owner-linked link would be intercepted by A23's router and land on the
+  approve page instead (where `sign_in_completed` never fires); the
+  unroutable link isolates the lost-context measurement. Query:
   `SELECT event, properties.client, properties.navigation, properties.action,
   properties.target_hash, properties.after_approval_wall,
   properties.approval_wall_action, properties.landing_path FROM events WHERE
