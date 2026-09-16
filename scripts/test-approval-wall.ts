@@ -17,6 +17,7 @@ import {
   encodeApprovalWallCookie,
   isApprovalWallCandidate,
   isDocumentNavigation,
+  markerMatchesHit,
   readCookie,
 } from '../src/lib/approvalWall';
 import { approvalTargetHash } from '../src/lib/approvalLinks';
@@ -82,6 +83,15 @@ async function main() {
   check('missing cookie decodes to null', decodeApprovalWallCookie(undefined) === null);
   check('readCookie finds the marker among others', readCookie(`foo=bar; fgac_approval_wall=${encodeURIComponent(cookie)}; baz=1`, 'fgac_approval_wall') === cookie);
   check('readCookie misses absent names', readCookie('foo=bar', 'fgac_approval_wall') === undefined);
+
+  console.log('repeat-bounce dedupe:');
+  check('same request 3 s later is a repeat', markerMatchesHit(cookie, desktop, t0 + 3_000));
+  check('same request 4 min later is still a repeat', markerMatchesHit(cookie, desktop, t0 + 4 * 60_000));
+  check('same request 6 min later is a new hit', !markerMatchesHit(cookie, desktop, t0 + 6 * 60_000));
+  check('different target is a new hit', !markerMatchesHit(cookie, { action: 'sheets_expose', target_hash: 'other' }, t0 + 3_000));
+  check('different action is a new hit', !markerMatchesHit(cookie, { action: 'sheets_write', target_hash: desktop.target_hash }, t0 + 3_000));
+  check('send_all marker matches a send_all hit (no target on either side)', markerMatchesHit(encodeApprovalWallCookie({ action: 'send_all' }, t0), { action: 'send_all' }, t0 + 1_000));
+  check('no marker is never a repeat', !markerMatchesHit(undefined, desktop, t0));
 
   if (failures) { console.error(`\n${failures} approval-wall check(s) failed`); process.exit(1); }
   console.log('\nall approval-wall checks passed');

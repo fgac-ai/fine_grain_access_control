@@ -116,6 +116,25 @@ export function decodeApprovalWallCookie(value: string | undefined | null, nowMs
   };
 }
 
+/** How long a marker keeps counting repeat bounces of the SAME request as
+ *  one wall hit. A sign-in callback loop re-hits the wall every few seconds;
+ *  a person coming back after minutes is a new hit. */
+export const APPROVAL_WALL_REPEAT_WINDOW_S = 5 * 60;
+
+/** True when an existing marker describes this same request and is recent —
+ *  the hit is a bounce of one already recorded, not a new one. */
+export function markerMatchesHit(
+  cookieValue: string | undefined | null,
+  hit: Pick<ApprovalWallHit, 'action' | 'target_hash'>,
+  nowMs = Date.now(),
+): boolean {
+  const marker = decodeApprovalWallCookie(cookieValue, nowMs);
+  if (!marker) return false;
+  return marker.approval_wall_action === hit.action
+    && (marker.approval_wall_target_hash ?? undefined) === (hit.target_hash ?? undefined)
+    && marker.approval_wall_age_s <= APPROVAL_WALL_REPEAT_WINDOW_S;
+}
+
 /** Read one cookie out of a `document.cookie` string (client side). */
 export function readCookie(cookieHeader: string, name: string): string | undefined {
   for (const part of cookieHeader.split(';')) {

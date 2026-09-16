@@ -1,4 +1,4 @@
-import { clerkMiddleware, createRouteMatcher, type ClerkMiddlewareSessionAuthObject } from '@clerk/nextjs/server';
+import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server';
 import { NextResponse } from 'next/server';
 import type { NextFetchEvent, NextRequest } from 'next/server';
 import { MCP_PROFILE_PATH_RE } from '@/lib/profileSlugs';
@@ -10,6 +10,7 @@ import {
   describeApprovalWallHit,
   encodeApprovalWallCookie,
   isApprovalWallCandidate,
+  markerMatchesHit,
 } from '@/lib/approvalWall';
 import { captureEdgeEvent } from '@/lib/posthogEdge';
 
@@ -62,10 +63,7 @@ const clerkHandler = clerkMiddleware(async (auth, req, event) => {
     // the cookie lets sign_in_completed say "signed in after a wall hit and
     // landed somewhere other than the approve page" in one row.
     if (isApprovalWallCandidate(url)) {
-      // In middleware `auth()` resolves to the session object whose
-      // redirectToSignIn RETURNS a Response (the app-router typing says
-      // `never` because there it throws) — cast to the middleware shape.
-      const { userId, redirectToSignIn } = (await auth()) as ClerkMiddlewareSessionAuthObject;
+      const { userId } = await auth();
       if (userId) {
         // Context reached the page: retire any marker so a later, unrelated
         // sign-in in this browser is not attributed to this wall hit.
@@ -77,27 +75,43 @@ const clerkHandler = clerkMiddleware(async (auth, req, event) => {
         return;
       }
       const hit = await describeApprovalWallHit(url, req.headers);
-      event.waitUntil(captureEdgeEvent(APPROVAL_WALL_DISTINCT_ID, APPROVAL_WALL_EVENT, { ...hit }));
-      if (!hit.navigation) {
-        // Non-document fetches (agents, scripts) keep Clerk's own 404.
-        await auth.protect();
-        return;
+      // One row per wall hit, not per bounce: a browser stuck in a sign-in
+      // callback loop re-hits this wall every few seconds (QA 2026-09-16 saw
+      // 28 rows from one sign-in on a dev instance). A fresh marker for the
+      // same request means this hit is already counted.
+      const repeat = markerMatchesHit(req.cookies.get(APPROVAL_WALL_COOKIE)?.value, hit);
+      if (!repeat) {
+        event.waitUntil(captureEdgeEvent(APPROVAL_WALL_DISTINCT_ID, APPROVAL_WALL_EVENT, { ...hit }));
       }
-      const redirect = redirectToSignIn({ returnBackUrl: req.url });
-      const res = new NextResponse(null, { status: redirect.status, headers: redirect.headers });
-      res.cookies.set({
-        name: APPROVAL_WALL_COOKIE,
-        value: encodeApprovalWallCookie(hit),
-        maxAge: APPROVAL_WALL_COOKIE_MAX_AGE_S,
-        path: '/',
-        sameSite: 'lax',
-        secure: url.protocol === 'https:',
-      });
-      return res;
+      // The marker rides on Clerk's own sign-in redirect. `auth.protect()`
+      // THROWS a control-flow error that clerkMiddleware turns into the
+      // redirect (a 404 for non-document fetches), so the cookie cannot be
+      // attached here — the outer wrapper below reads it back off `req` and
+      // sets it on whatever redirect Clerk produced.
+      if (hit.navigation && !repeat) pendingWallMarkers.set(req, encodeApprovalWallCookie(hit));
     }
     await auth.protect();
   }
 });
+
+/** Wall hits whose marker cookie still has to be attached to Clerk's redirect
+ *  (keyed by the request object, which Clerk passes through unchanged). */
+const pendingWallMarkers = new WeakMap<NextRequest, string>();
+
+function attachWallMarker(req: NextRequest, res: Response | null | undefined | void): void {
+  const marker = pendingWallMarkers.get(req);
+  if (!marker || !res) return;
+  pendingWallMarkers.delete(req);
+  if (res.status < 300 || res.status > 399 || !(res instanceof NextResponse)) return;
+  res.cookies.set({
+    name: APPROVAL_WALL_COOKIE,
+    value: marker,
+    maxAge: APPROVAL_WALL_COOKIE_MAX_AGE_S,
+    path: '/',
+    sameSite: 'lax',
+    secure: req.nextUrl.protocol === 'https:',
+  });
+}
 
 /**
  * Clerk's decodeJwt (@clerk/backend 3.4.7, chunk-HVNR6UQP) JSON-parses the
@@ -113,7 +127,9 @@ const clerkHandler = clerkMiddleware(async (auth, req, event) => {
  */
 export default async function middleware(req: NextRequest, event: NextFetchEvent) {
   try {
-    return await clerkHandler(req, event);
+    const res = await clerkHandler(req, event);
+    attachWallMarker(req, res);
+    return res;
   } catch (err) {
     const hasBearer = req.headers.get('authorization')?.toLowerCase().startsWith('bearer ');
     if (!(err instanceof SyntaxError) || !hasBearer) throw err;
