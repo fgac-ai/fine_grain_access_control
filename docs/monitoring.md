@@ -1650,3 +1650,78 @@ cover. The change is judged working if, for people with `n_hinted > 0`,
 repeated 404s on the SAME id (7.11's `resource_id_hash` / `message_id_hash`)
 stop at one, and the next call on that hash succeeds with a different
 `account_email`.
+
+**7.24 — Agent-profile adoption (is anyone using a profile besides the
+Default Profile?).** Added 2026-09-16 at Ken's request, after a read-only count
+showed the answer was "almost nobody": of 256 external users with a live key,
+250 had only the Default Profile, 6 had a non-default profile (3 created since
+the 2026-08-16 launch — two by one power user, one of them never connected,
+and one created and abandoned with no connection, rules or accounts; the
+other 3 predate the directory launch, one revoked — and one of those belongs
+to a real, still-active user whose struggle setting up multiple emails is
+what prompted the Default Profile work: his second profile is bound to a
+connection used the day of the count, the reference case for multi-mailbox
+profile use, not pre-launch noise), and 3 of 240 agent connections were
+bound to a non-default profile. The population separate profiles are designed
+for — users with two or more agent connections — was 19 people, 17 of whom
+left every connection on the Default Profile (the two exceptions are that
+multi-email user and the power user above). On that baseline profile UX is not a
+priority; this section exists so the daily review notices when that changes,
+in either direction: people MAKING profiles, or people TRYING and failing.
+
+No PostHog event carries a proxy-key id, so the MADE half is a database read:
+
+```bash
+npx vercel env pull .secrets/prod.env --environment=production
+REVIEW_EXCLUDED_EMAILS=<internal,qa,addresses> npm run profiles:usage -- --prod   # SELECTs only
+rm .secrets/prod.env
+```
+
+`REVIEW_EXCLUDED_EMAILS` carries the internal/QA exclusion list every §7 query
+uses (never inlined in the repo); `.qa_test_emails.json` is read too when present.
+It prints the live-key distribution per user, every non-default profile
+(label slug, owner domain, bound connections, last use, rules, accounts —
+never an address or key), connections by profile type with 14-day use, and
+the 2+-connection population split by whether anything left the Default
+Profile.
+
+The TRIED half is PostHog, from the two server events `createProxyKey` emits
+(`docs/analytics.md`): `agent_profile_created` (props `accounts`,
+`delegated_accounts`, `existing_profiles`) and `agent_profile_create_failed`
+(`reason` = `missing_label` / `unslugifiable_label` / `slug_clash` /
+`no_delegation` — each a refusal the action returns by design, with a message
+the dialog shows). Before their deploy, and as a cross-check after it, the
+web side carries the same signal: `$autocapture` clicks with `$el_text`
+`+ New profile` (the dialog trigger in `AgentProfilesView.tsx`) and `Cancel`
+on `/dashboard` pages, and `$pageview` on `/dashboard/agents/<slug>` for a
+slug other than `default-profile`.
+
+```sql
+-- attempts vs outcomes, per person, 7 d (external)
+SELECT person.properties.email AS who,
+       countIf(event = '$autocapture' AND properties.$el_text = '+ New profile') AS dialog_opens,
+       countIf(event = 'agent_profile_created')       AS created,
+       countIf(event = 'agent_profile_create_failed') AS failed,
+       groupUniqArrayIf(properties.reason, event = 'agent_profile_create_failed') AS reasons,
+       countIf(event = '$pageview' AND properties.$current_url LIKE '%/dashboard/agents/%'
+                                   AND properties.$current_url NOT LIKE '%/default-profile%') AS nondefault_page_views
+FROM events
+WHERE timestamp > now() - INTERVAL 7 DAY
+  AND (event IN ('agent_profile_created', 'agent_profile_create_failed')
+       OR (event = '$autocapture' AND properties.$host = 'fgac.ai')
+       OR (event = '$pageview'    AND properties.$host = 'fgac.ai'))
+  AND person.properties.email NOT IN (/* internal + QA accounts: the same list every query in §7 uses */)
+GROUP BY who
+HAVING dialog_opens > 0 OR created > 0 OR failed > 0 OR nondefault_page_views > 0
+ORDER BY failed DESC, dialog_opens DESC
+```
+
+Reading it: a person with `dialog_opens > 0` or `failed > 0` and `created = 0`
+is an abandoned attempt — list each one in the review with what they clicked
+next. Two or more of those in a week is the "trying and failing" signal and a
+UX task, not a nudge. On the MADE side the flags are: three or more
+non-default profiles in a week by three different people; an organization
+(7.20) whose operators run two or more profiles; or anyone in the
+2+-connection population moving a connection off the Default Profile. A
+`reason` other than `slug_clash` / `no_delegation` means the dialog refused
+something it cannot explain — read `createProxyKey` before calling it a bug.
