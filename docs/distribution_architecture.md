@@ -40,6 +40,19 @@ Local Scripts (#2, #4):
     → Scripts mirror the standard Gmail API but route through gmail.fgac.ai
 ```
 
+Hosted-MCP bearer verification (`verifyMcpAuth`): signature + issuer (only
+FGAC's own Clerk instance verifies — production instance → fgac.ai;
+development instance → localhost and previews), then audience. Clerk issues
+no `aud` on its access tokens today and ignores the RFC 8707 `resource`
+parameter, so a token minted for one FGAC host of an instance verifies on
+every other host of that instance (observed across two previews,
+2026-09-16); no third-party resource server shares either instance, so this
+is a spec-compliance gap rather than a confused-deputy path. Since
+2026-09-16 the server enforces `aud` whenever a token carries one
+(`src/lib/mcpAudience.ts`: it must name this origin's `/api/mcp`, or its
+profile-slug URL) and stamps `aud_present` on `mcp_auth_attempt`, so the day
+Clerk honours `resource` the binding becomes end-to-end with no code change.
+
 ## Permission Chain
 
 All packages ultimately resolve to the same permission chain:

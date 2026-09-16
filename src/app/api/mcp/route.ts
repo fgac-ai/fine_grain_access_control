@@ -15,6 +15,7 @@
 import { createMcpHandler, experimental_withMcpAuth } from 'mcp-handler';
 import type { JWTVerifyGetKey } from 'jose';
 import { verifyClerkToken } from '@clerk/mcp-tools/next';
+import { expectedMcpAudiences, audienceClaim, checkTokenAudience, decodeJwtPayload } from '@/lib/mcpAudience';
 import { auth } from '@clerk/nextjs/server';
 import { z } from 'zod';
 import { db } from '@/db';
@@ -3509,6 +3510,26 @@ const verifyMcpAuth = async (req: Request, bearerToken?: string) => {
     strategyMemoSet(clientIdHint, strategyUsed);
   }
 
+  // Audience binding (MCP auth spec: the server MUST verify it is the token's
+  // intended recipient). Both strategies above verify signature + issuer
+  // only; Clerk issues no `aud` today, so a token minted for one FGAC host
+  // verified on every other host of the same Clerk instance (observed across
+  // two previews, 2026-09-16). Enforce the claim whenever it is present —
+  // read from the payload the strategy just verified — and count its absence
+  // so the day Clerk starts honouring `resource` is visible in analytics.
+  // See src/lib/mcpAudience.ts for the risk assessment.
+  let audPresent: boolean | undefined;
+  if (authInfo && bearerToken) {
+    const aud = audienceClaim(decodeJwtPayload(bearerToken));
+    const audience = checkTokenAudience(aud, expectedMcpAudiences(req.url, req.headers.get('x-fgac-profile-slug')));
+    audPresent = audience.present;
+    if (audience.present && !audience.ok) {
+      console.error('[MCP] Rejecting token whose audience does not name this server');
+      authInfo = undefined;
+      clerkErrorClass = 'audience_mismatch';
+    }
+  }
+
   // Client self-identification: in stateless streamable HTTP every POST gets
   // a fresh McpServer, so the `initialize` request is the ONLY place the
   // client's name/version exist server-side — and this auth wrapper is the
@@ -3547,6 +3568,10 @@ const verifyMcpAuth = async (req: Request, bearerToken?: string) => {
         optimizations_enabled: authOptimizationsEnabled(),
         success_sample_rate: AUTH_SUCCESS_SAMPLE,
         error_class: clerkErrorClass,
+        // Whether the verified token carried an `aud` claim at all (Clerk:
+        // never, as of 2026-09-16). A mismatch is outcome invalid_token with
+        // error_class 'audience_mismatch'.
+        aud_present: audPresent,
         kid: outcome === 'invalid_token' ? kid : undefined,
         method: req.method,
         connection_resolve: connectionResolve,
