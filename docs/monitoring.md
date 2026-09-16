@@ -1734,6 +1734,55 @@ WHERE event = 'approval_link_minted' AND properties.environment = 'production'
 GROUP BY status ORDER BY mints DESC
 ```
 
+```sql
+-- 7.24d — the refusal that mints no link (7 d): caller-chosen
+-- account_not_permitted refusals per person, the value the task passes vs.
+-- what the key can use, and whether the owner was emailed. Before 2026-09-16
+-- `account_requested` did not exist and the refused value was recorded
+-- nowhere (a scheduled job: 53 refusals in 6 days, inferred from the
+-- response length). The email fires once EVER per (key, requested value) on
+-- the 3rd refusal in a rolling 24 h; `not_due` on every row of a person
+-- with ≥ 3 refusals in a day means the window reset between them (cadence
+-- > 24 h) or the sender is off (`disabled`). Pair with:
+--   SELECT * FROM account_refusals ORDER BY last_refused_at DESC LIMIT 20
+-- (branch DB or a read-only production query) for the ledger itself.
+SELECT person.properties.email AS who,
+       toString(properties.$mcp_tool_name) AS tool,
+       toString(properties.account_requested) AS requested,
+       count() AS refusals, uniq(toDate(timestamp)) AS days,
+       max(toInt32OrNull(toString(properties.account_refusal_count))) AS max_in_window,
+       groupUniqArray(toString(properties.notify_status)) AS notify,
+       min(timestamp) AS first, max(timestamp) AS last
+FROM events
+WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
+  AND properties.denial_code = 'account_not_permitted'
+  AND timestamp > now() - INTERVAL 7 DAY
+  AND person.properties.email NOT IN (/* internal + QA accounts */)
+GROUP BY who, tool, requested ORDER BY refusals DESC LIMIT 20
+```
+
+```sql
+-- 7.24e — did the account-refusal email change anything (30 d)? For each
+-- emailed person: refusals of that value before vs. after the email, and
+-- whether any call on the key resolved afterwards (account_email set). A
+-- person whose refusals continue unchanged for days after `sent` did not
+-- read the email either, and the next lever is the dashboard, not more mail.
+WITH notified AS (
+  SELECT person_id, min(timestamp) AS emailed_at
+  FROM events WHERE event = 'account_refusal_notified' AND properties.environment = 'production'
+    AND timestamp > now() - INTERVAL 30 DAY
+  GROUP BY person_id
+)
+SELECT person.properties.email AS who, any(n.emailed_at) AS emailed_at,
+       countIf(e.properties.denial_code = 'account_not_permitted' AND e.timestamp < n.emailed_at) AS refusals_before,
+       countIf(e.properties.denial_code = 'account_not_permitted' AND e.timestamp >= n.emailed_at) AS refusals_after,
+       countIf(e.properties.account_email != '' AND e.timestamp >= n.emailed_at) AS resolved_after,
+       max(e.timestamp) AS last_call
+FROM events e JOIN notified n ON n.person_id = e.person_id
+WHERE e.event = '$mcp_tool_call' AND e.timestamp > now() - INTERVAL 30 DAY
+GROUP BY who ORDER BY refusals_after DESC
+```
+
 Before/after: the reminder only fires on a repeat ask that was still
 unopened, so the honest baseline for the emailed row is the pre-deploy open
 rate of *repeat-minted, unopened-at-repeat* requests — which is 0% by

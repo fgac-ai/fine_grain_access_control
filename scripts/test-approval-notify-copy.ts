@@ -14,9 +14,11 @@
  * Run: npx tsx scripts/test-approval-notify-copy.ts (part of `npm run mcp:lint`).
  */
 import {
+  accountRefusalDenialLine, accountRefusalEmailBody, accountRefusalEmailSubject,
   approvalEmailBody, approvalEmailRaw, approvalEmailSubject, emailLinkUrl, encodeHeaderWord, notifyDenialLine, sanitizeLine, shortGrant,
-  NOTIFY_MAX_PER_DAY, NOTIFY_MIN_GAP_MS, type NotifyLink,
+  ACCOUNT_REFUSAL_NOTIFY_AFTER, NOTIFY_MAX_PER_DAY, NOTIFY_MIN_GAP_MS, type NotifyLink,
 } from '../src/lib/approvalNotifyCopy';
+import { normalizeRequestedEmail } from '../src/lib/accountRefusals';
 
 let failures = 0;
 function check(name: string, cond: boolean) {
@@ -81,6 +83,33 @@ check('the encoded word decodes back to the subject', Buffer.from(raw.match(/Sub
 check('pure-ASCII headers are left readable', encodeHeaderWord('FGAC: plain') === 'FGAC: plain');
 check('a CRLF in the recipient cannot add a header', !approvalEmailRaw({ from: 'support@fgac.ai', to: 'a@b.c\r\nBcc: x@y.z', subject: 's', body: '' }).includes('\r\nBcc'));
 check('a CRLF in the sender cannot add a header', !approvalEmailRaw({ from: 's@example.com\r\nBcc: x@y.z', to: 'a@b.c', subject: 's', body: '' }).includes('\r\nBcc'));
+
+console.log('account-refusal notice (trigger 2)');
+check('threshold is 3 refusals in 24 h (plan v4 simulation)', ACCOUNT_REFUSAL_NOTIFY_AFTER === 3);
+check('requested value is normalised like the access check', normalizeRequestedEmail('  Ops.Team@Example.COM ') === 'ops.team@example.com');
+check('requested value is capped at 254', normalizeRequestedEmail('a'.repeat(300)).length === 254);
+const refusalSubject = accountRefusalEmailSubject('ops@example.com\r\nBcc: victim@example.com');
+check('subject names the refused account and cannot carry a header', refusalSubject.includes("'ops@example.com Bcc: victim@example.com'") && !/[\r\n]/.test(refusalSubject) && refusalSubject.length <= 160);
+const refusalBody = accountRefusalEmailBody({
+  agentLabel: 'Toolbox', requestedAccount: 'ops@example.com', usableAccounts: ['me@example.com'], ownerEmail: 'me@example.com',
+  tool: 'sheets_read_range', times: 3, firstRefusedAt: new Date('2026-09-09T00:37:00Z'), dashboardUrl: 'https://fgac.ai/', supportAddress: 'support@fgac.ai',
+});
+check('body opens with the count, the first time and the tool', refusalBody.startsWith('FGAC has refused Toolbox 3 times since 2026-09-09 00:37 UTC (its sheets_read_range calls) because it asks for the Google account:'));
+check('body names the refused account on its own line', refusalBody.includes('\n    ops@example.com\n'));
+check('body lists the usable account (singular)', refusalBody.includes('The account it can use: me@example.com.'));
+check('body says no approval link exists', refusalBody.includes('No approval link exists for this'));
+check('body offers the task fix and the delegation fix with the accounts URL', refusalBody.includes('1. The task should use an account listed above') && refusalBody.includes('delegate access to me@example.com') && refusalBody.includes('https://fgac.ai/dashboard/accounts'));
+check('body promises no repeat email for this account', refusalBody.includes('will not email you about this account again'));
+check('body signs off with the support address', refusalBody.trimEnd().endsWith('— FGAC (support@fgac.ai)'));
+const pluralBody = accountRefusalEmailBody({
+  agentLabel: 'x'.repeat(200), requestedAccount: 'ops@example.com', usableAccounts: ['a@example.com', 'b@example.com'], ownerEmail: 'a@example.com',
+  times: 5, firstRefusedAt: new Date('2026-09-09T00:37:00Z'), dashboardUrl: 'https://fgac.ai', supportAddress: 'support@fgac.ai',
+});
+check('body pluralises and omits the tool clause when unknown', pluralBody.includes('The accounts it can use: a@example.com, b@example.com.') && !pluralBody.includes('(its '));
+check('agent label is capped', !pluralBody.includes('x'.repeat(100)));
+check('refusal denial line: sent', accountRefusalDenialLine('sent', {}).startsWith('📧') && accountRefusalDenialLine('sent', {}).includes('emailed the user just now'));
+check('refusal denial line: already_sent names the time', accountRefusalDenialLine('already_sent', { notifiedAt: new Date('2026-09-09T03:37:00Z') }).includes('at 2026-09-09 03:37 UTC'));
+check('refusal denial line: nothing for not_due / disabled / failed / capped', ['not_due', 'disabled', 'failed', 'skipped_rate_capped'].every(s => accountRefusalDenialLine(s as never, {}) === ''));
 
 if (failures) { console.error(`\n${failures} approval-notify copy check(s) failed`); process.exit(1); }
 console.log('\nAll approval-notify copy checks passed');

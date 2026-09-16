@@ -89,6 +89,42 @@ export const approvalRequests = pgTable('approval_requests', {
   index('approval_requests_user_notified_idx').on(table.userId, table.notifiedAt),
 ]);
 
+// ─── Account Refusals ───────────────────────────────────────────────────────
+// One row per (proxy key, requested account) for the caller-chosen
+// `account_not_permitted` refusal: the agent passed an `account` the key
+// cannot use. No approval request exists for that path (only the owner can
+// add an account to a key, so there is nothing to mint), which is why the
+// reminder email's ledger could not live on approval_requests — and why,
+// until this table, the refused value was recorded nowhere: a scheduled job
+// was refused ~8 times a day for a week (2026-09-09 → 09-16) and what it was
+// passing had to be inferred from the response length.
+//
+// `windowCount` / `windowStartedAt` are the rolling 24 h window that decides
+// when the owner is emailed (ACCOUNT_REFUSAL_NOTIFY_AFTER refusals);
+// `notifiedAt` is the once-ever-per-row claim, taken atomically before the
+// send. Every refusal is one upsert.
+export const accountRefusals = pgTable('account_refusals', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  proxyKeyId: uuid('proxy_key_id').references(() => proxyKeys.id, { onDelete: 'cascade' }).notNull(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  // The `account` value the caller passed, lower-cased and trimmed (the
+  // access check is case-insensitive), capped at 254 characters.
+  requestedEmail: text('requested_email').notNull(),
+  refusalCount: integer('refusal_count').notNull().default(1),
+  windowStartedAt: timestamp('window_started_at').defaultNow().notNull(),
+  windowCount: integer('window_count').notNull().default(1),
+  firstRefusedAt: timestamp('first_refused_at').defaultNow().notNull(),
+  lastRefusedAt: timestamp('last_refused_at').defaultNow().notNull(),
+  // The MCP tool of the most recent refusal, for the email and the runbook.
+  lastTool: text('last_tool'),
+  notifiedAt: timestamp('notified_at'),
+}, (table) => [
+  uniqueIndex('account_refusals_key_email_unique').on(table.proxyKeyId, table.requestedEmail),
+  // The per-owner daily email cap counts this owner's recent stamps here
+  // and on approval_requests in one statement; keep both range scans.
+  index('account_refusals_user_notified_idx').on(table.userId, table.notifiedAt),
+]);
+
 // ─── Email Delegations ───────────────────────────────────────────────────────
 // Tracks cross-user email delegation. Owner grants delegate permission to
 // create API keys/rules that access the owner's Gmail.

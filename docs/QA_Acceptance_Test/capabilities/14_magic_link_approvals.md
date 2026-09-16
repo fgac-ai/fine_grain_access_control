@@ -213,3 +213,46 @@
   sender is FGAC's own mailbox. Never assert on a production account's
   inbox
 
+
+### A17: A repeatedly refused `account` value emails the owner once, naming the value and the fixes
+- Sender configured exactly as in A16 (`SUPPORT_FGAC_PROXY_KEY` /
+  `SUPPORT_SENDER_EMAIL`; USER_A stands in). Without them every refusal
+  carries `notify_status: 'disabled'`, the `account_refusals` row is still
+  written, and this assertion is `blocked`, not `skip`
+- Signed in as USER_A with a profile whose only mailbox is USER_A's own
+  address, call `sheets_read_range` (any spreadsheet id) THREE times with
+  `account` set to an address the profile does not include (a fresh
+  `+tag` on `USER_B_EMAIL` — never a real third party's address), then a
+  FOURTH time with the same value, then once with a DIFFERENT unlisted value
+- **Expected**: every call is the 🚫 `account_not_permitted` refusal from
+  `accountNotPermittedByCaller` (names the refused value and the usable
+  account, "no approval link exists for it") — no approval link is ever
+  minted and no `approval_link_minted` row appears. The FIRST and SECOND
+  carry NO 📧 line. The THIRD carries a 📧 line saying FGAC has emailed the
+  user naming the account this task passes and the accounts the connection
+  can use; the sender's inbox holds exactly ONE message to USER_A's address,
+  From `FGAC <support address>`, Reply-To the support address, subject
+  `Your agent keeps asking for '<value>', an account it cannot use — a
+  change is needed`, plain text, body opening "FGAC has refused <agent> 3
+  times since <date HH:MM UTC> (its sheets_read_range calls) because it asks
+  for the Google account:", the value on its own line, "The account it can
+  use: <USER_A address>.", "No approval link exists for this", the two
+  numbered fixes (change the task / sign in as that account and delegate to
+  USER_A's address, with the `/dashboard/accounts` URL), and "will not email
+  you about this account again". The FOURTH says FGAC emailed the user about
+  this account "at <date HH:MM UTC>" and no further email is sent; the
+  mailbox still holds one message. The DIFFERENT value starts its own count
+  (no 📧 line on its first refusal)
+- **Ledger** (read-only query on the branch DB): one `account_refusals`
+  row per (profile key, value), `requested_email` lower-cased,
+  `refusal_count` 4 and `window_count` 4 for the first value, `last_tool`
+  `sheets_read_range`, `notified_at` set once and unchanged by the fourth
+  refusal; the second value's row has `notified_at` NULL
+- **Cap**: with three reminder emails already sent to USER_A in the last
+  24 h (A16 links and A17 notices count together), a due third refusal
+  carries no 📧 line and `notify_status: 'skipped_rate_capped'`; the row
+  keeps `notified_at` NULL
+- **Never**: a refusal never mints a link, never emails on the first or
+  second refusal, never emails twice for the same (key, value), and never
+  sends through a user's Google grant. Never assert on a production
+  account's inbox

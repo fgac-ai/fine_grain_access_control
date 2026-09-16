@@ -155,3 +155,80 @@ export function notifyDenialLine(status: NotifyStatus, opts: { notifiedAt?: Date
   }
   return '';
 }
+
+// ─── Account-refusal notice (the refusal that mints no link) ────────────────
+// A second trigger for the same sender and cap (plan v4, 2026-09-16): the
+// caller-chosen `account_not_permitted` refusal — the agent passes an
+// `account` the key cannot use — mints nothing, so the reminder above can
+// never fire for it. Measured in production: a scheduled job refused 53
+// times in 6 days at a 1–3 h cadence, owner last on the dashboard 11 days
+// earlier, and the 🚫 text (PR #137) stopped its retries without changing
+// the task. This email names the value the task passes (which the dashboard
+// cannot show) and both fixes. Once ever per (key, requested account).
+
+/** Refusals of the same value on one key inside a rolling 24 h before the
+ * owner is emailed. 30 d of production refusals (2026-09-16): two callers
+ * at 7–11 a day, six one-offs at 1–2 in the month — any threshold from 3 to
+ * 7 separates them; 3 emails earliest. */
+export const ACCOUNT_REFUSAL_NOTIFY_AFTER = 3;
+
+export interface AccountRefusalNotice {
+  agentLabel: string;
+  /** The `account` value the caller passed (agent-controlled: sanitized). */
+  requestedAccount: string;
+  /** Every address the key can use. */
+  usableAccounts: string[];
+  /** The owner's sign-up address — the delegate in the "connect that account" fix. */
+  ownerEmail: string;
+  /** MCP tool of the latest refusal, if known. */
+  tool?: string | null;
+  times: number;
+  firstRefusedAt: Date;
+  dashboardUrl: string;
+  supportAddress: string;
+}
+
+export function accountRefusalEmailSubject(requestedAccount: string): string {
+  return sanitizeLine(`Your agent keeps asking for '${sanitizeLine(requestedAccount, 80)}', an account it cannot use — a change is needed`, 160);
+}
+
+export function accountRefusalEmailBody(opts: AccountRefusalNotice): string {
+  const agent = sanitizeLine(opts.agentLabel, 80) || 'Your AI agent';
+  const requested = sanitizeLine(opts.requestedAccount, 254);
+  const usable = opts.usableAccounts.map(a => sanitizeLine(a, 254)).filter(Boolean);
+  const tool = opts.tool ? sanitizeLine(opts.tool, 60) : '';
+  const base = opts.dashboardUrl.trim().replace(/\/+$/, '');
+  const lines: string[] = [
+    `FGAC has refused ${agent} ${opts.times} times since ${whenUtc(opts.firstRefusedAt)}${tool ? ` (its ${tool} calls)` : ''} because it asks for the Google account:`,
+    '',
+    `    ${requested}`,
+    '',
+    `That account is not on the agent's profile. The account${usable.length === 1 ? '' : 's'} it can use: ${usable.join(', ') || '(none)'}.`,
+    '',
+    'No approval link exists for this — adding an account to a profile is only ever done by you, so FGAC cannot offer one. Two ways to fix it:',
+    '',
+    `1. The task should use an account listed above: change the task (or tell the agent) to name that account, or to leave "account" unspecified so the profile's default is used.`,
+    `2. The task really should use ${requested}: sign in to FGAC as that account and, under Delegation Management, delegate access to ${sanitizeLine(opts.ownerEmail, 254)}; the mailbox then appears on your Default Profile automatically. ${base}/dashboard/accounts`,
+    '',
+    'Until one of these happens, every run is refused the same way. FGAC will not email you about this account again; reply to this email if you need a hand.',
+    '',
+    `Rules and connected agents: ${base}/dashboard`,
+    `— FGAC (${opts.supportAddress})`,
+  ];
+  return lines.join('\n');
+}
+
+/**
+ * The sentence appended to the 🚫 refusal after the account-refusal email.
+ * Same two states as `notifyDenialLine`; every other outcome adds nothing.
+ */
+export function accountRefusalDenialLine(status: NotifyStatus, opts: { notifiedAt?: Date | null }): string {
+  if (status === 'sent') {
+    return '📧 Because this account has now been refused repeatedly, FGAC has emailed the user just now naming the account this task passes and the accounts this connection can use — tell them to check their email.';
+  }
+  if (status === 'already_sent') {
+    const when = opts.notifiedAt ? ` at ${whenUtc(opts.notifiedAt)}` : ' earlier';
+    return `📧 FGAC emailed the user about this account${when}; no further email is sent for the same account — tell them to check their inbox.`;
+  }
+  return '';
+}

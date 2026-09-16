@@ -27,6 +27,16 @@ function tryNeonCmd(cmd: string): { result?: any; error?: string } {
   }
 }
 
+/** Plain-text neonctl output (commands whose `-o json` is not JSON, e.g. `connection-string`). */
+function tryNeonText(cmd: string): { result?: string; error?: string } {
+  try {
+    return { result: execSync(`npx --yes neonctl ${cmd}`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim() };
+  } catch (error: any) {
+    const stderr = error?.stderr?.toString?.() ?? '';
+    return { error: (stderr || error?.message || 'unknown neonctl error').trim() };
+  }
+}
+
 async function getGitBranch() {
   if (process.env.VERCEL_GIT_COMMIT_REF) {
     return process.env.VERCEL_GIT_COMMIT_REF;
@@ -143,9 +153,21 @@ async function main() {
         process.exit(1);
     }
   } else {
-    console.log(`🌿 Branch '${branchName}' already exists.`);
-    console.log(`⚠️ Because the branch already exists, we cannot insecurely extract its password via standard CLI.`);
-    console.log(`   If your .env.local isn't synced, manually retrieve the connection string from the Neon dash.`);
+    // A second checkout of the same git branch (a fresh worktree for an open
+    // PR) lands here with an .env.local that has never seen this branch.
+    // `neonctl connection-string` returns the pooled URI with the role
+    // password, so the existing branch can be adopted instead of leaving the
+    // guard hook to block every schema step (2026-09-16).
+    console.log(`🌿 Branch '${branchName}' already exists — adopting it.`);
+    const cs = tryNeonText(`connection-string --branch ${branchName} --project-id ${projectId} --pooled`);
+    const uri = typeof cs.result === 'string' ? cs.result.trim() : '';
+    if (cs.error || !/^postgres(ql)?:\/\//.test(uri)) {
+      console.error(`❌ Could not fetch the branch's connection string: ${cs.error || 'unexpected output'}`);
+      console.error('   Retrieve it from the Neon console and set neon__POSTGRES_URL in .env.local.');
+      process.exit(1);
+    }
+    await updateEnvLocal(uri);
+    console.log(`🎉 Ready! Local environment connected to existing branch: ${branchName}`);
   }
 }
 

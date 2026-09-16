@@ -458,3 +458,28 @@ attributable to it.
   policy denials, send denials, and `request_access` — or the delivery split
   in `monitoring.md` 7.24 silently drops that path into the unlabelled bucket
 
+
+### A23: The refusal that mints no link is measurable, with the refused value
+- Run capability 14 A17, then query the user's events for the last hour:
+  `SELECT event, properties.$mcp_tool_name, properties.denial_code,
+  properties.account_requested, properties.account_refusal_count,
+  properties.notify_status, properties.refusal_count, properties.tool FROM
+  events WHERE event IN ('$mcp_tool_call','account_refusal_notified',
+  'approval_link_minted') AND timestamp >= now() - INTERVAL 1 HOUR ORDER BY
+  timestamp`
+- **Expected**: the four `$mcp_tool_call` rows for the first value carry
+  `outcome: 'denied_by_policy'`, `denial_code: 'account_not_permitted'`,
+  `account_requested` = the value lower-cased, `account_refusal_count` 1, 2,
+  3, 4 in order, and `notify_status` `not_due`, `not_due`, `sent`,
+  `already_sent`; exactly ONE `account_refusal_notified {channel: 'email',
+  trigger: 'account_not_permitted', tool: 'sheets_read_range',
+  refusal_count: 3, usable_account_count: 1}` row, and ONE
+  `proxy_request {service: 'gmail', outcome: 'success'}` row under the
+  sender's key. The different value's row carries `account_refusal_count:
+  1` and `notify_status: 'not_due'`. NO `approval_link_minted` row exists
+  for any of them. With the sender unset every refusal carries
+  `notify_status: 'disabled'` and `account_requested` is still present
+- **Regression guard**: `account_requested` must be present on every
+  caller-chosen `account_not_permitted` refusal — it is the only record of
+  what the task passes (`monitoring.md` 7.24d); before 2026-09-16 that value
+  had to be inferred from `response_chars`

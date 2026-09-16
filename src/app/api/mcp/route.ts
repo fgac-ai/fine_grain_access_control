@@ -35,8 +35,8 @@ import { GOOGLE_FETCH_TIMEOUT_MS, CLERK_TOKEN_TIMEOUT_MS, withTimeout, isUpstrea
 import { classifyMcpClient, classifyTransportRejection, installFingerprint, parseInitializeClientInfo, parseRpcEnvelope, resourceIdHash, type McpClientInfo } from '@/lib/mcpClientSignals';
 import { recordEagerResolve, shouldSkipEagerResolve } from '@/lib/connectionTouchMemo';
 import { after } from 'next/server';
-import { notifyOwnerOfApprovalLinks, type NotifyLink } from '@/lib/approvalNotify';
-import { notifyDenialLine } from '@/lib/approvalNotifyCopy';
+import { notifyOwnerOfAccountRefusal, notifyOwnerOfApprovalLinks, type NotifyLink } from '@/lib/approvalNotify';
+import { accountRefusalDenialLine, notifyDenialLine } from '@/lib/approvalNotifyCopy';
 import { inSuccessSample, AUTH_SUCCESS_SAMPLE } from '@/lib/authSampling';
 import { ensureDefaultProfile } from '@/db/defaultProfile';
 import { mintApprovalLink, describeApproval, type ApprovalAction, type ApprovalPayload } from '@/lib/approvalLinks';
@@ -1621,6 +1621,9 @@ function withToolAnalytics<R extends ToolAnalyticsResult>(
 ) {
   return async (params: unknown, extra: { authInfo?: AuthInfo }): Promise<R> => runWithToolCallProps(async () => {
     const started = Date.now();
+    // Seed the bag with the tool name so code that runs inside the call
+    // (account resolution) can name the tool without a parameter.
+    addToolCallProps({ $mcp_tool_name: tool });
     // Distinct id = the caller's Clerk user id, matching the dashboard's
     // identify() — MCP usage lands on the same PostHog person.
     // Event/property names follow PostHog's canonical MCP Analytics schema
@@ -1740,7 +1743,21 @@ async function resolveAccountAndToken(
       // given, owner's own address not on the key) stays ❌: nothing the
       // caller sent caused it — but it names what would work.
       addToolCallProps({ failure_reason: 'account_not_permitted', denial_code: 'account_not_permitted' });
-      return { error: accountNotPermittedByCaller(targetEmail, usable) };
+      // No link is minted here, so the reminder email on the mint path can
+      // never reach this owner (plan v4): record the refused value and, on
+      // the third refusal of it in 24 h, email the owner once from the
+      // support mailbox naming what the task passes and what would work.
+      const notify = await notifyOwnerOfAccountRefusal({
+        owner: conn.user, proxyKeyId: conn.proxyKeyId, agentLabel: agentLabel(conn),
+        requestedAccount: targetEmail, usableAccounts: emails.map(e => e.targetEmail),
+        tool: typeof getToolCallProps().$mcp_tool_name === 'string' ? String(getToolCallProps().$mcp_tool_name) : null,
+        dashboardUrl: DASHBOARD_URL,
+      });
+      addToolCallProps({
+        account_requested: targetEmail, account_refusal_count: notify.refusalCount ?? undefined, notify_status: notify.status,
+      });
+      const emailed = accountRefusalDenialLine(notify.status, notify);
+      return { error: accountNotPermittedByCaller(targetEmail, usable) + (emailed ? `\n${emailed}` : '') };
     }
     return resolveFailure('account_not_permitted', accountNotPermittedByDefault(targetEmail, usable));
   }

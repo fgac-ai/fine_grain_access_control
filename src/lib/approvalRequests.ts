@@ -13,7 +13,7 @@
  * bookkeeping failed. Callers do not await correctness, only completion.
  */
 import { db } from '@/db';
-import { approvalRequests } from '@/db/schema';
+import { accountRefusals, approvalRequests } from '@/db/schema';
 import { and, eq, isNull, sql } from 'drizzle-orm';
 
 /**
@@ -124,9 +124,23 @@ export async function getApprovalNotificationState(requestId: string): Promise<
 }
 
 /**
+ * How many reminder emails this owner has been sent in the last 24 h, across
+ * BOTH ledgers (approval-link reminders on approval_requests, account-refusal
+ * notices on account_refusals). Both claims embed this in their UPDATE so the
+ * two triggers share one per-person budget and concurrent claims cannot each
+ * pass a separate count.
+ */
+export function recentNotificationCountSql(userId: string) {
+  return sql`((SELECT count(*) FROM ${approvalRequests} AS recent_links
+               WHERE recent_links.user_id = ${userId} AND recent_links.notified_at > now() - interval '24 hours')
+            + (SELECT count(*) FROM ${accountRefusals} AS recent_refusals
+               WHERE recent_refusals.user_id = ${userId} AND recent_refusals.notified_at > now() - interval '24 hours'))`;
+}
+
+/**
  * Claim the right to email this request's link: flips `notified_at` from
  * NULL to now() atomically, and only while the owner is under `maxPerDay`
- * emails in the last 24 h — cap and claim in ONE statement, so concurrent
+ * emails in the last 24 h (both ledgers) — cap and claim in ONE statement, so concurrent
  * mints cannot each pass a separate count check. Returns the stamp when
  * claimed; otherwise says why (already emailed, capped, no ledger row, or a
  * DB error — the last two are delivery failures, never "already emailed").
@@ -141,8 +155,7 @@ export async function claimApprovalNotification(requestId: string, userId: strin
       .where(and(
         eq(approvalRequests.requestId, requestId),
         isNull(approvalRequests.notifiedAt),
-        sql`(SELECT count(*) FROM ${approvalRequests} AS recent
-             WHERE recent.user_id = ${userId} AND recent.notified_at > now() - interval '24 hours') < ${maxPerDay}`,
+        sql`${recentNotificationCountSql(userId)} < ${maxPerDay}`,
       ))
       .returning({ notifiedAt: approvalRequests.notifiedAt });
     if (row) return { claimed: true, notifiedAt: row.notifiedAt };

@@ -31,13 +31,26 @@
  *   - Best-effort. Every failure degrades to "link only", exactly the
  *     response the agent got before this existed. Nothing here throws, and
  *     a non-due mint costs one SELECT.
+ *
+ * Second trigger (plan v4, 2026-09-16) — `notifyOwnerOfAccountRefusal`: the
+ * caller-chosen `account_not_permitted` refusal mints no link, so the
+ * repeat-mint rule above can never fire for it; a scheduled job was refused
+ * 53 times in 6 days that way with its owner off the dashboard. The
+ * ACCOUNT_REFUSAL_NOTIFY_AFTER-th refusal of the same value on one key in
+ * 24 h emails the owner once (ever, per key + value) from the same sender,
+ * under the same per-person daily cap (both ledgers count), naming the value
+ * the task passes and the accounts that would work.
  */
 import { NextRequest } from 'next/server';
 import { POST as proxyPost } from '@/app/api/proxy/[...path]/route';
 import {
+  accountRefusalEmailBody, accountRefusalEmailSubject, ACCOUNT_REFUSAL_NOTIFY_AFTER,
   approvalEmailBody, approvalEmailRaw, approvalEmailSubject, NOTIFY_MAX_PER_DAY, NOTIFY_MIN_GAP_MS,
   type NotifyLink, type NotifyStatus,
 } from './approvalNotifyCopy';
+import {
+  claimAccountRefusalNotification, recordAccountRefusal, releaseAccountRefusalNotification,
+} from './accountRefusals';
 import {
   claimApprovalNotification, getApprovalNotificationState, releaseApprovalNotification,
 } from './approvalRequests';
@@ -174,4 +187,94 @@ async function attempt(opts: NotifyOwnerOpts, primary: NotifyLink, sender: Sende
     hours_since_first_mint: Math.round((now.getTime() - state.firstMintedAt.getTime()) / 36_000) / 100,
   });
   return { status: 'sent', notifiedAt: claim.notifiedAt ?? now };
+}
+
+// ─── Trigger 2: the refusal that mints no link ──────────────────────────────
+
+export interface NotifyAccountRefusalOpts {
+  owner: { id: string; email: string; clerkUserId: string };
+  proxyKeyId: string;
+  agentLabel: string;
+  /** The `account` value the caller passed and the key refused. */
+  requestedAccount: string;
+  /** Every address the key can use. */
+  usableAccounts: string[];
+  /** MCP tool of this refusal, if known. */
+  tool?: string | null;
+  dashboardUrl: string;
+  /** Test seams. */
+  sender?: SenderConfig | null;
+  send?: (cfg: SenderConfig, raw: string) => Promise<SendResult>;
+  now?: () => Date;
+}
+
+export interface NotifyAccountRefusalResult {
+  status: NotifyStatus;
+  notifiedAt: Date | null;
+  /** Refusals of this value on this key inside the current 24 h window (null = ledger write failed). */
+  refusalCount: number | null;
+}
+
+/**
+ * Record a caller-chosen `account_not_permitted` refusal and, on the
+ * ACCOUNT_REFUSAL_NOTIFY_AFTER-th one for the same value on the same key
+ * within 24 h, email the owner ONCE (ever, per key + value) from the support
+ * mailbox under the shared daily cap. The ledger row is written whether or
+ * not the sender is configured — the refused value is the diagnosis
+ * analytics never carried. Never throws.
+ */
+export async function notifyOwnerOfAccountRefusal(opts: NotifyAccountRefusalOpts): Promise<NotifyAccountRefusalResult> {
+  const row = await recordAccountRefusal({
+    proxyKeyId: opts.proxyKeyId, userId: opts.owner.id, requestedEmail: opts.requestedAccount, tool: opts.tool,
+  });
+  if (!row) return { status: 'failed', notifiedAt: null, refusalCount: null };
+  const sender = opts.sender === undefined ? senderConfig() : opts.sender;
+  if (!sender) return { status: 'disabled', notifiedAt: null, refusalCount: row.windowCount };
+  if (row.notifiedAt) return { status: 'already_sent', notifiedAt: row.notifiedAt, refusalCount: row.windowCount };
+  if (row.windowCount < ACCOUNT_REFUSAL_NOTIFY_AFTER) return { status: 'not_due', notifiedAt: null, refusalCount: row.windowCount };
+  try {
+    return await attemptRefusalNotice(opts, row, sender);
+  } catch (err) {
+    console.error('[approvalNotify] account-refusal attempt failed:', err instanceof Error ? err.message : err);
+    return { status: 'failed', notifiedAt: null, refusalCount: row.windowCount };
+  }
+}
+
+async function attemptRefusalNotice(
+  opts: NotifyAccountRefusalOpts,
+  row: { id: string; windowCount: number; refusalCount: number; windowStartedAt: Date; firstRefusedAt: Date },
+  sender: SenderConfig,
+): Promise<NotifyAccountRefusalResult> {
+  const now = (opts.now ?? (() => new Date()))();
+  const claim = await claimAccountRefusalNotification(row.id, opts.owner.id, NOTIFY_MAX_PER_DAY);
+  if (!claim.claimed) {
+    if (claim.reason === 'already') return { status: 'already_sent', notifiedAt: claim.notifiedAt, refusalCount: row.windowCount };
+    if (claim.reason === 'capped') return { status: 'skipped_rate_capped', notifiedAt: null, refusalCount: row.windowCount };
+    return { status: 'failed', notifiedAt: null, refusalCount: row.windowCount };
+  }
+
+  const subject = accountRefusalEmailSubject(opts.requestedAccount);
+  const body = accountRefusalEmailBody({
+    agentLabel: opts.agentLabel, requestedAccount: opts.requestedAccount, usableAccounts: opts.usableAccounts,
+    ownerEmail: opts.owner.email, tool: opts.tool, times: row.windowCount, firstRefusedAt: row.windowStartedAt,
+    dashboardUrl: opts.dashboardUrl, supportAddress: sender.address,
+  });
+  const raw = Buffer.from(approvalEmailRaw({ from: sender.address, to: opts.owner.email, subject, body })).toString('base64url');
+  const sent = await (opts.send ?? proxySend)(sender, raw);
+  if (!sent.ok) {
+    console.error(`[approvalNotify] account-refusal send ${sent.definite ? 'refused' : 'unconfirmed'}:`, sent.error);
+    if (sent.definite) await releaseAccountRefusalNotification(row.id);
+    return { status: 'failed', notifiedAt: null, refusalCount: row.windowCount };
+  }
+
+  captureServerEvent(opts.owner.clerkUserId, 'account_refusal_notified', {
+    channel: 'email',
+    trigger: 'account_not_permitted',
+    tool: opts.tool || undefined,
+    refusal_count: row.windowCount,
+    refusal_count_ever: row.refusalCount,
+    usable_account_count: opts.usableAccounts.length,
+    hours_since_first_refusal: Math.round((now.getTime() - row.windowStartedAt.getTime()) / 36_000) / 100,
+  });
+  return { status: 'sent', notifiedAt: claim.notifiedAt ?? now, refusalCount: row.windowCount };
 }
