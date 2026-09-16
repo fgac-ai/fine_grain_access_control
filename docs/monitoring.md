@@ -1380,7 +1380,12 @@ moving any threshold**; the figures above are eleven hours of data.
 
 What the 09-10 population looked like (~60 distinct sources in nine hours):
 
-- Self-describing UAs: `SmitheryBot/1.0 (+https://smithery.ai)`,
+- Self-describing UAs: `SmitheryBot/1.0 (+https://smithery.ai)` (Smithery's
+  one-off listing scan; its recurring `client_name` is `smithery-probe`, a
+  `scanner` via `keyword:probe`. Smithery-listed users reach us through its
+  hosted proxy `fgac--fgac.run.tools`, so the first Smithery-originated *person*
+  would appear as an authenticated request whose `client_name`/UA is not an
+  Anthropic product — none seen as of 2026-09-16),
   `ProofBench/0.1 (…MCP registry health probe)`, `mcpscan/0.1 (…non-intrusive
   security scan)`, `MCPWatch/0.1.0 (…longitudinal MCP security research)`,
   `exaforce-mcprep/0.1 (MCP server reputation scanner)`, `mcp-observatory`,
