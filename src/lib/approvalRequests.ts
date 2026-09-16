@@ -14,7 +14,7 @@
  */
 import { db } from '@/db';
 import { approvalRequests } from '@/db/schema';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 
 /**
  * Record one mint ATTEMPT. First attempt inserts; retries increment
@@ -96,5 +96,76 @@ export async function markApprovalRequestApproved(requestId: string): Promise<vo
       .where(eq(approvalRequests.requestId, requestId));
   } catch (err) {
     console.error('[approvalRequests] approve record failed:', err);
+  }
+}
+
+// ─── Out-of-band notification bookkeeping (approvalNotify.ts) ───────────────
+
+/** What the reminder needs to decide whether this mint is "the agent asked again". */
+export async function getApprovalNotificationState(requestId: string): Promise<
+  | { kind: 'row'; mintCount: number; firstMintedAt: Date; openedAt: Date | null; notifiedAt: Date | null }
+  | { kind: 'missing' } | { kind: 'error' }
+> {
+  try {
+    const row = await db.select({
+      mintCount: approvalRequests.mintCount,
+      firstMintedAt: approvalRequests.firstMintedAt,
+      openedAt: approvalRequests.openedAt,
+      notifiedAt: approvalRequests.notifiedAt,
+    })
+      .from(approvalRequests)
+      .where(eq(approvalRequests.requestId, requestId))
+      .limit(1).then(r => r[0]);
+    return row ? { kind: 'row', ...row } : { kind: 'missing' };
+  } catch (err) {
+    console.error('[approvalRequests] notification state read failed:', err);
+    return { kind: 'error' };
+  }
+}
+
+/**
+ * Claim the right to email this request's link: flips `notified_at` from
+ * NULL to now() atomically, and only while the owner is under `maxPerDay`
+ * emails in the last 24 h — cap and claim in ONE statement, so concurrent
+ * mints cannot each pass a separate count check. Returns the stamp when
+ * claimed; otherwise says why (already emailed, capped, no ledger row, or a
+ * DB error — the last two are delivery failures, never "already emailed").
+ */
+export async function claimApprovalNotification(requestId: string, userId: string, maxPerDay: number): Promise<
+  { claimed: true; notifiedAt: Date | null }
+  | { claimed: false; notifiedAt: Date | null; reason: 'already' | 'capped' | 'missing' | 'error' }
+> {
+  try {
+    const [row] = await db.update(approvalRequests)
+      .set({ notifiedAt: sql`now()` })
+      .where(and(
+        eq(approvalRequests.requestId, requestId),
+        isNull(approvalRequests.notifiedAt),
+        sql`(SELECT count(*) FROM ${approvalRequests} AS recent
+             WHERE recent.user_id = ${userId} AND recent.notified_at > now() - interval '24 hours') < ${maxPerDay}`,
+      ))
+      .returning({ notifiedAt: approvalRequests.notifiedAt });
+    if (row) return { claimed: true, notifiedAt: row.notifiedAt };
+    const existing = await db.select({ notifiedAt: approvalRequests.notifiedAt })
+      .from(approvalRequests)
+      .where(eq(approvalRequests.requestId, requestId))
+      .limit(1).then(r => r[0]);
+    if (!existing) return { claimed: false, notifiedAt: null, reason: 'missing' };
+    if (existing.notifiedAt) return { claimed: false, notifiedAt: existing.notifiedAt, reason: 'already' };
+    return { claimed: false, notifiedAt: null, reason: 'capped' };
+  } catch (err) {
+    console.error('[approvalRequests] notification claim failed:', err);
+    return { claimed: false, notifiedAt: null, reason: 'error' };
+  }
+}
+
+/** Undo a claim whose send definitely did not happen, so the next repeat can try again. */
+export async function releaseApprovalNotification(requestId: string): Promise<void> {
+  try {
+    await db.update(approvalRequests)
+      .set({ notifiedAt: null })
+      .where(eq(approvalRequests.requestId, requestId));
+  } catch (err) {
+    console.error('[approvalRequests] notification release failed:', err);
   }
 }

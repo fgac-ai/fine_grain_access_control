@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, uuid, uniqueIndex, jsonb, integer, boolean } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, uuid, uniqueIndex, index, jsonb, integer, boolean } from 'drizzle-orm/pg-core';
 
 // ─── Users ───────────────────────────────────────────────────────────────────
 // Core user table. proxyKey removed — keys now live in proxy_keys table.
@@ -70,6 +70,12 @@ export const approvalRequests = pgTable('approval_requests', {
   lastMintedAt: timestamp('last_minted_at').defaultNow().notNull(),
   openedAt: timestamp('opened_at'),
   approvedAt: timestamp('approved_at'),
+  // When FGAC emailed this request's link to the owner's own inbox (one
+  // email per request, ever — claimed atomically before the send so a
+  // looping agent or a concurrent mint cannot produce a second one). NULL =
+  // never emailed (owner lacks the Gmail scope, cap hit, send failed, or
+  // the row predates the feature).
+  notifiedAt: timestamp('notified_at'),
   // Human-readable title of the file behind a sheets/docs request, when the
   // agent supplied one via request_access. The approve page can only show
   // Google's file id for a file Google does not share with FGAC yet, and the
@@ -77,7 +83,11 @@ export const approvalRequests = pgTable('approval_requests', {
   // opaque id onto a sheet title themselves (the 2026-09 Picker-cancel leak).
   // First non-empty value wins; never carried in the URL.
   resourceName: text('resource_name'),
-});
+}, (table) => [
+  // The per-owner hourly email cap counts this owner's recent notified_at
+  // stamps on every first mint; keep that a range scan as the ledger grows.
+  index('approval_requests_user_notified_idx').on(table.userId, table.notifiedAt),
+]);
 
 // ─── Email Delegations ───────────────────────────────────────────────────────
 // Tracks cross-user email delegation. Owner grants delegate permission to
