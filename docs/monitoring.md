@@ -1572,3 +1572,61 @@ pre-2026-09-09 Picker page. `analytics.md` (the approval funnel section) has
 the reading; the change is judged working if same-target mints stop
 climbing while distinct-target batches are unaffected.
 
+**7.23 — Cross-mailbox 404s (an id looked up in the wrong mailbox).** Added
+2026-09-15 with the 404 copy change (`googleNotFoundMessage` /
+`crossMailboxHint` in `src/lib/denialCopy.ts`). Gmail message, thread, and
+draft ids — and Drive file grants — belong to ONE Google account. A key that
+reaches several mailboxes (own + delegated) can obtain an id from a listing
+on one of them and then read it without `account`, which resolves to the
+primary mailbox and 404s. Before 2026-09-15 the 404 text named no account
+and mentioned no others, so the agent retried the same id unchanged: one
+operator whose work is entirely delegated hit this 20 times on raw thread
+reads in 2026-09-12 → 13, with 183 identical calls succeeding on the
+delegated mailbox in the same hours.
+
+The signature is direction-agnostic — the 404 can land on the own mailbox OR
+on a delegated one — so the query counts, per person and per tool/endpoint,
+404s that fall within 24 h AFTER a success on a *different* `account_email`
+with the same tool/endpoint. Wrong ids, deleted messages, and ungranted Drive
+files also 404, so this is an upper bound on the wrong-mailbox case; the
+`cross_mailbox_hint` property (stamped when the hint was actually appended,
+i.e. the key reaches more than one mailbox) narrows it.
+
+```sql
+-- per person + tool/endpoint: 404s within 24 h after a success on another mailbox
+SELECT cityHash64(distinct_id) % 100000 AS person_hash, k,
+       arrayCount(x -> arrayExists(s -> s.1 <= x.1 AND s.1 > x.1 - 86400 AND s.2 != x.2, oks), f) AS n404_after_ok_on_other_mailbox,
+       length(f) AS n404_total,
+       length(arrayDistinct(arrayMap(x -> x.2, f))) AS mailboxes_404ed,
+       countIf(hinted) AS n_hinted,
+       length(oks) AS ok_total
+FROM (
+  SELECT distinct_id,
+         concat(toString(properties.$mcp_tool_name), ' ', ifNull(toString(properties.raw_api_endpoint), '')) AS k,
+         arraySort(x -> x.1, groupArrayIf((toUnixTimestamp(timestamp), toString(properties.account_email)), properties.outcome = 'success')) AS oks,
+         arraySort(x -> x.1, groupArrayIf((toUnixTimestamp(timestamp), toString(properties.account_email)), toString(properties.error_status) = '404')) AS f,
+         groupArrayIf(toString(properties.cross_mailbox_hint) = 'true', toString(properties.error_status) = '404') AS hinted
+  FROM events
+  WHERE event = '$mcp_tool_call'
+    AND properties.environment = 'production'
+    AND timestamp >= now() - INTERVAL 30 DAY
+    AND person.properties.email NOT IN (/* internal + QA accounts: the same list every query in §7 uses */)
+  GROUP BY distinct_id, k
+)
+WHERE n404_total > 0
+ORDER BY n404_after_ok_on_other_mailbox DESC, n404_total DESC
+```
+
+Baseline, 30 d to 2026-09-15 (before the change, so `n_hinted` = 0
+throughout): five people and 52 events matched. Top rows were 26 on typed
+`gmail_read` (one person, 404s spread over two of their three mailboxes),
+20 on raw `GET gmail/v1/users/me/threads/{id}` (the operator above), and
+three people at 2 each (`gmail_read` ×2, raw with a pre-stamping null
+endpoint ×1). Every other 404 row in the window — 35 + 27 for one
+single-mailbox user on attachments/messages, the Drive `files/{id}` 404s —
+had zero same-tool successes on another mailbox and is the ordinary
+wrong-id / ungranted-file class 7.11 and `passthroughErrorResult` already
+cover. The change is judged working if, for people with `n_hinted > 0`,
+repeated 404s on the SAME id (7.11's `resource_id_hash` / `message_id_hash`)
+stop at one, and the next call on that hash succeeds with a different
+`account_email`.

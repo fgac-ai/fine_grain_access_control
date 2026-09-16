@@ -115,3 +115,44 @@ export function accountNotPermittedByDefault(targetEmail: string, usable: string
     `Pass one of the accessible addresses as "account", or ask the user to add '${targetEmail}' to this key's accounts in the FGAC dashboard. ` +
     'Retrying unchanged fails the same way.';
 }
+
+/**
+ * Upstream Google 404, named to the mailbox the call actually ran against.
+ *
+ * Measured 2026-09-12 → 09-13 (production): an operator whose mailbox work
+ * is 100% delegated fetched thread ids obtained from the delegated mailbox
+ * WITHOUT `account`, so every call resolved to their own (empty) mailbox and
+ * 404ed — 20 times, the same ids retried, because the response never said
+ * which mailbox had been searched. 183 identical calls WITH the delegated
+ * account succeeded in the same hours. The text now says which account the
+ * id was looked up in, so "not visible to this account" is checkable.
+ */
+export function googleNotFoundMessage(detail: string, targetEmail: string): string {
+  const who = targetEmail ? `'${targetEmail}'` : 'this account';
+  return `❌ Google resource not found (404)${detail ? `: ${detail}` : ''}. ` +
+    `The id is wrong, stale, or not visible to ${who} — the account this call ran against. ` +
+    `Verify it against a fresh listing on that account before retrying; the same id unchanged will 404 again.`;
+}
+
+/**
+ * Appended to a 404 ONLY when the connection reaches more than one mailbox
+ * (`otherAccounts` = every reachable address except the one the call used).
+ * Single-mailbox callers get the unchanged message: for them "another
+ * mailbox" is not a possible cause, and the sentence would be noise.
+ *
+ * Why it names the fix and not just the fact: the same 30-day query that
+ * found the operator above found five people and 52 events with the shape
+ * "404 on mailbox X within 24 h of a success on mailbox Y, same tool"
+ * (docs/monitoring.md 7.23) — on typed gmail_read as well as raw threads
+ * reads. None of them had been told that ids do not carry across mailboxes.
+ */
+export function crossMailboxHint(otherAccounts: readonly string[]): string {
+  const n = otherAccounts.length;
+  if (n === 0) return '';
+  const fix = n === 1
+    ? `pass account: '${otherAccounts[0]}'`
+    : `pass account: '<that address>'`;
+  return `This connection can also reach ${n} other mailbox${n === 1 ? '' : 'es'}: ${otherAccounts.join(', ')} (see list_accounts). ` +
+    `Gmail and Drive ids are mailbox-specific — an id from a listing or search on one account never resolves on another. ` +
+    `If this id came from one of those mailboxes, retry ONCE with the same id and ${fix}; if it did not, stop — retrying here will not change the answer.`;
+}
