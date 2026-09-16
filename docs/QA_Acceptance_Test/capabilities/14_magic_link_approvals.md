@@ -219,11 +219,13 @@
   `SUPPORT_SENDER_EMAIL`; USER_A stands in). Without them every refusal
   carries `notify_status: 'disabled'`, the `account_refusals` row is still
   written, and this assertion is `blocked`, not `skip`
-- Signed in as USER_A with a profile whose only mailbox is USER_A's own
-  address, call `sheets_read_range` (any spreadsheet id) THREE times with
-  `account` set to an address the profile does not include (a fresh
-  `+tag` on `USER_B_EMAIL` — never a real third party's address), then a
-  FOURTH time with the same value, then once with a DIFFERENT unlisted value
+- Signed in as USER_A, on a profile whose mailbox list does NOT include the
+  value you will pass (the Default Profile is fine even when USER_B's
+  delegated mailbox is on it), call `sheets_read_range` (any spreadsheet id)
+  THREE times with `account` set to an address the profile does not include
+  (a fresh `+tag` on `USER_B_EMAIL` — never a real third party's address),
+  then a FOURTH time with the same value, then once with a DIFFERENT
+  unlisted value
 - **Expected**: every call is the 🚫 `account_not_permitted` refusal from
   `accountNotPermittedByCaller` (names the refused value and the usable
   account, "no approval link exists for it") — no approval link is ever
@@ -235,8 +237,9 @@
   `Your agent keeps asking for '<value>', an account it cannot use — a
   change is needed`, plain text, body opening "FGAC has refused <agent> 3
   times since <date HH:MM UTC> (its sheets_read_range calls) because it asks
-  for the Google account:", the value on its own line, "The account it can
-  use: <USER_A address>.", "No approval link exists for this", the two
+  for the Google account:", the value on its own line, "The account(s) it
+  can use: <every mailbox on the profile>.", "No approval link exists for
+  this", the two
   numbered fixes (change the task / sign in as that account and delegate to
   USER_A's address, with the `/dashboard/accounts` URL), and "will not email
   you about this account again". The FOURTH says FGAC emailed the user about
