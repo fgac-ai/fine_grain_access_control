@@ -10,6 +10,16 @@
       ],
       "port": 3000,
       "autoPort": true
+    },
+    {
+      "name": "fgac-dev-smtp",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "export PATH=/Users/kyesh/local/node22/bin:$PATH && set -a && . ./.secrets/ethereal.env && set +a && exec npm run dev:qa"
+      ],
+      "port": 3000,
+      "autoPort": true
     }
   ]
 }

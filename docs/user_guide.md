@@ -142,6 +142,7 @@ These are always active — no configuration needed:
 - **Permanent deletion is blocked**: `DELETE` requests to trash/emptyTrash endpoints are denied.
 - **Send requires a whitelist**: If any `send_whitelist` rules exist, sending is only allowed to matching addresses. If no send rules exist, **all sending is denied by default**.
 - **Don't want to whitelist one address at a time?** The Default Profile's Gmail Rules card offers a one-click **"Enable sending to anyone"** button, which creates a `Send to Anyone` rule (pattern `*`). Send denials also include a one-click approval link for the same grant, alongside the per-recipient link. Delete the rule to return to deny-by-default.
+- **Missed the link in the chat?** If your agent asks for the same access again and you have not opened the link, FGAC emails it to your sign-up address from support@fgac.ai (subject starts with `Your agent has asked N times to …`). One email per request, at most three a day, and you can reply to that email if you intentionally do not want the agent to have that access. FGAC never sends mail through your own Google account.
 
 ### Quick Add: 2FA Block
 

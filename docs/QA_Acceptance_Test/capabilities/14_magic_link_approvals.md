@@ -169,3 +169,40 @@
   users produced one production link with 14 approve events and another
   writing 11 duplicate rules for one sheet in 12 s (PostHog, 2026-08-30 →
   2026-09-04); reproduced locally as 6 clicks → 6 POSTs → 6 duplicate rules
+
+### A16: A repeat request emails the link from FGAC's support mailbox; a first request does not
+- Environment needs the sender configured: `SUPPORT_SMTP_USER` /
+  `SUPPORT_SMTP_APP_PASSWORD` (QA points `SUPPORT_SMTP_HOST=smtp.ethereal.email`,
+  `SUPPORT_SMTP_PORT=587` at a throwaway Ethereal capture account —
+  `.claude/launch.json` `fgac-dev-smtp` sources `.secrets/ethereal.env`).
+  Without them every mint carries `notify_status: 'disabled'` and this
+  assertion is `blocked`, not `skip`
+- Signed in as USER_A, trigger a send denial to a recipient never denied
+  before on this profile (a fresh `+tag` on `USER_B_EMAIL`), then trigger the
+  identical denial again within a minute, then a third time at least 5
+  minutes after the first
+- **Expected**: The FIRST and SECOND denials carry NO 📧 line (first ask;
+  repeat inside the same-turn window) and nothing is emailed. The THIRD
+  denial carries a 📧 line saying that because this is a repeat request FGAC
+  has also emailed the link to the user just now; the capture mailbox holds
+  exactly ONE message to USER_A's address, From `FGAC <support address>`,
+  Reply-To the support address, subject `Your agent has asked 3 times to
+  send email to … — approve it?`, plain text, body opening "FGAC has detected
+  <agent> asking 3 times, without approval, to:", naming the first request
+  time in UTC, carrying BOTH approval URLs from the denial each with
+  `&src=email` appended and the signed `a`/`k`/`r`/`s` params byte-identical,
+  and offering "do nothing" and "reply to this email" as the decline paths.
+  A FOURTH denial says the link was emailed "at <date HH:MM UTC>" and no
+  further email is sent; the mailbox still holds one message. Opening the
+  emailed link resolves and approves exactly like the chat link (A2), and
+  its `approval_link_opened` row carries `link_source: 'email'` (capability
+  16 A22). A request whose approve page was opened BEFORE the repeat ask
+  never emails (`notify_status: 'skipped_opened'`)
+- **Cap**: with three distinct requests already emailed to USER_A in the
+  last 24 h, a fourth due repeat carries no 📧 line and
+  `notify_status: 'skipped_rate_capped'`; the ledger row keeps
+  `notified_at` NULL
+- **Never**: no email is ever sent through a user's Google grant — the
+  sender is FGAC's own mailbox. Never assert on a production account's
+  inbox
+

@@ -1572,3 +1572,91 @@ pre-2026-09-09 Picker page. `analytics.md` (the approval funnel section) has
 the reading; the change is judged working if same-target mints stop
 climbing while distinct-target batches are unaffected.
 
+**7.23 — Approval-link reminder email: does the emailed link get more
+interaction than the one the agent was handed?** Added 2026-09-15 with the
+repeat-request reminder (`src/lib/approvalNotify.ts`; sender = FGAC's
+support mailbox, never a user's grant). Per request (`uniq(request_id)`,
+external users, 7 d to 2026-09-12): 128 minted → 71 opened (55%) → 58
+approved; the week before 90 → 41 (46%) → 33. The open step is where every
+lost request is lost, and the people who never open cluster on agent
+surfaces that collapse the tool result. Read per request, never per event
+(`approval_link_opened` fires per render, ~2 rows per request).
+
+```sql
+-- 7.23a — emailed vs agent-only requests: open and approve rates (30 d).
+-- A request is "emailed" if approval_link_notified fired for it; every
+-- other minted request relied on the agent alone. Emailed requests are BY
+-- CONSTRUCTION the ones the agent already failed to deliver (a repeat ask
+-- with no open), so read `pct_opened` for the emailed row against the
+-- never-opened baseline (0%) that those requests would otherwise have had,
+-- not against the agent-only row.
+WITH minted AS (
+  SELECT properties.request_id AS rid, any(properties.action) AS action, min(timestamp) AS first_mint
+  FROM events
+  WHERE event = 'approval_link_minted' AND properties.environment = 'production'
+    AND timestamp > now() - INTERVAL 30 DAY
+    AND person.properties.email NOT IN (/* internal + QA accounts — the same list every §7 query uses, never inline them here */)
+  GROUP BY rid),
+emailed AS (SELECT DISTINCT properties.request_id AS rid FROM events
+  WHERE event = 'approval_link_notified' AND timestamp > now() - INTERVAL 30 DAY),
+opened AS (
+  SELECT properties.request_id AS rid,
+         countIf(toString(properties.link_source) = 'email') > 0 AS via_email,
+         min(timestamp) AS first_open
+  FROM events
+  WHERE event = 'approval_link_opened' AND timestamp > now() - INTERVAL 30 DAY
+  GROUP BY rid),
+appr AS (SELECT DISTINCT properties.request_id AS rid FROM events
+  WHERE event = 'approval_link_approved' AND timestamp > now() - INTERVAL 30 DAY)
+SELECT if(e.rid != '', 'emailed', 'agent_only') AS delivery,
+       count()                                        AS requests,
+       countIf(o.rid != '')                           AS opened,
+       countIf(o.via_email)                           AS opened_via_email,
+       countIf(a.rid != '')                           AS approved,
+       round(100 * countIf(o.rid != '') / count(), 1) AS pct_opened,
+       round(100 * countIf(a.rid != '') / count(), 1) AS pct_approved
+FROM minted m
+LEFT JOIN emailed e ON e.rid = m.rid
+LEFT JOIN opened  o ON o.rid = m.rid
+LEFT JOIN appr    a ON a.rid = m.rid
+GROUP BY delivery
+```
+
+```sql
+-- 7.23b — volume and the cap (7 d): reminders per person per day. Anything
+-- at 3 is the cap doing its job; a person at 3 on several days is an agent
+-- asking for many files repeatedly — look at 7.22 for who.
+SELECT toDate(timestamp) AS d, cityHash64(toString(person_id)) % 100000 AS who,
+       count() AS reminders, uniq(properties.request_id) AS requests,
+       max(properties.mint_count) AS max_asks
+FROM events
+WHERE event = 'approval_link_notified' AND properties.environment = 'production'
+  AND timestamp > now() - INTERVAL 7 DAY
+  AND person.properties.email NOT IN (/* internal + QA accounts */)
+GROUP BY d, who ORDER BY reminders DESC, d DESC LIMIT 20
+```
+
+```sql
+-- 7.23c — delivery health (7 d): mint outcomes by notify_status. `disabled`
+-- everywhere = the SMTP credentials are missing in that environment;
+-- `failed` = the relay refused or the send was unconfirmed (server logs:
+-- "[approvalNotify]"); `skipped_rate_capped` = the daily cap engaged.
+SELECT toString(properties.notify_status) AS status, count() AS mints,
+       uniq(properties.request_id) AS requests, uniq(person_id) AS people
+FROM events
+WHERE event = 'approval_link_minted' AND properties.environment = 'production'
+  AND timestamp > now() - INTERVAL 7 DAY
+  AND person.properties.email NOT IN (/* internal + QA accounts */)
+GROUP BY status ORDER BY mints DESC
+```
+
+Before/after: the reminder only fires on a repeat ask that was still
+unopened, so the honest baseline for the emailed row is the pre-deploy open
+rate of *repeat-minted, unopened-at-repeat* requests — which is 0% by
+definition at the moment of the repeat, and ends near 19% of never-opened
+requests ever being re-asked at all (30 d to 2026-09-15: 161 never-opened
+requests, 30 re-minted). The reminder cannot reach the other 131; if
+`opened_via_email` stays near zero after a month while 7.23c shows `sent`
+rows, the email is not being read either and the next lever is the
+dashboard, not more mail.
+
