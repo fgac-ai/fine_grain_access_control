@@ -537,3 +537,31 @@ attributable to it.
   caller-chosen `account_not_permitted` refusal — it is the only record of
   what the task passes (`monitoring.md` 7.26d); before 2026-09-16 that value
   had to be inferred from `response_chars`
+
+### A26: The pricing fake door is measurable per plan
+- In the built-in browser, open `/pricing` on the environment under test
+  signed out. Toggle the interval to Annual, click **Get Pro**, submit the
+  dialog with a QA address, open one FAQ item, then sign in as `USER_A`,
+  return to `/pricing`, click **Talk to us**, pick a team size and submit.
+- Query: `SELECT event, properties.plan, properties.interval,
+  properties.signed_in, properties.team_size, properties.question,
+  properties.pricing_variant FROM events WHERE event LIKE 'pricing_%' AND
+  properties.environment = '<env>' AND timestamp >= now() - INTERVAL 1 HOUR
+  ORDER BY timestamp`
+- **Expected**: one `pricing_interval_toggled {interval: 'annual'}`; a
+  `pricing_plan_clicked {plan: 'pro', interval: 'annual', signed_in: false}`
+  followed by `pricing_interest_submitted` with the same plan and interval;
+  one `pricing_faq_opened` whose `question` is the FAQ heading text; then a
+  `pricing_plan_clicked {plan: 'team', signed_in: true}` and a
+  `pricing_interest_submitted {plan: 'team', team_size: '<the bucket>'}`.
+  Every row carries `pricing_variant` (`v1-2026-09` today). The signed-out
+  submission's person carries `properties.pricing_interest_plan = 'pro'`
+  and the submitted `email`; the signed-in one carries
+  `pricing_interest_plan = 'team'` on `USER_A`'s existing person. No new
+  rows appear in any application table — the door writes to PostHog only.
+- **Regression guard**: `pricing_plan_clicked` must fire BEFORE the dialog
+  opens (it is the click-through measure; the dialog can be dismissed) and
+  the Personal CTA must still emit `sign_up_started {cta_location:
+  'pricing_personal'}` so the sign-up funnel keeps counting pricing-page
+  sign-ups
+
