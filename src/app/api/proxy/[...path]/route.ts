@@ -422,7 +422,10 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
 
       // Forward to the kind's API host (sheets/docs/slides.googleapis.com)
       const prefix = `${d.apiPathPrefix}/`;
-      const cleanPath = fullPath.startsWith(prefix) ? fullPath.slice(prefix.length) : fullPath;
+      const rest = fullPath.startsWith(prefix) ? fullPath.slice(prefix.length) : fullPath;
+      // Bare `presentations/{id}` spelling (accepted by the classifier) needs
+      // the version segment Google expects.
+      const cleanPath = rest.startsWith(`${d.apiVersion}/`) ? rest : `${d.apiVersion}/${rest}`;
       const googleUrl = `https://${d.apiHost}/${cleanPath}${request.nextUrl.search}`;
       const headers = new Headers(request.headers);
       headers.set('Authorization', `Bearer ${realGoogleToken.token}`);

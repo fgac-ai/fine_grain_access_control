@@ -2184,7 +2184,10 @@ async function executeRawGoogleCall(
     if (k) {
       const d = DRIVE_FILE_KINDS[k];
       const prefix = `${d.apiPathPrefix}/`;
-      return `https://${d.apiHost}/${p.startsWith(prefix) ? p.slice(prefix.length) : p}`;
+      const rest = p.startsWith(prefix) ? p.slice(prefix.length) : p;
+      // The bare `presentations/{id}` / `spreadsheets/{id}` spelling the
+      // classifier accepts has no version segment; Google needs one.
+      return `https://${d.apiHost}/${rest.startsWith(`${d.apiVersion}/`) ? rest : `${d.apiVersion}/${rest}`}`;
     }
     return /(^|\/)forms(\/|$)/.test(p)
       ? `https://forms.googleapis.com/${p.replace(/^forms\//, '')}`
