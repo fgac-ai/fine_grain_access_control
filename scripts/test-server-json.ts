@@ -37,7 +37,7 @@ check(`description is 1–100 chars (${server.description?.length})`,
 check(`version matches package.json (${pkg.version})`, server.version === pkg.version);
 check('version is exact, not a range', /^\d+\.\d+\.\d+/.test(server.version));
 check('repository points at the public repo with source github',
-  server.repository?.url === 'https://github.com/kyesh/fine_grain_access_control' && server.repository?.source === 'github');
+  server.repository?.url === 'https://github.com/fgac-ai/fine_grain_access_control' && server.repository?.source === 'github');
 check('exactly one remote, streamable-http at https://fgac.ai/api/mcp',
   Array.isArray(server.remotes) && server.remotes.length === 1
   && server.remotes[0].type === 'streamable-http' && server.remotes[0].url === 'https://fgac.ai/api/mcp');

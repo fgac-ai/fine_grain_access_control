@@ -16,7 +16,7 @@ FGAC.AI provides **Fine Grain Access Control** for AI agents accessing Google AP
 ### Via Claude Code Marketplace (Recommended)
 
 ```
-/plugin marketplace add kyesh/fine_grain_access_control
+/plugin marketplace add fgac-ai/fine_grain_access_control
 /plugin install fgac@fine_grain_access_control
 ```
 
@@ -24,7 +24,7 @@ FGAC.AI provides **Fine Grain Access Control** for AI agents accessing Google AP
 
 ```bash
 # Clone into your Claude Code skills directory
-git clone https://github.com/kyesh/fine_grain_access_control.git /tmp/fgac
+git clone https://github.com/fgac-ai/fine_grain_access_control.git /tmp/fgac
 cp -r /tmp/fgac/public/skills/claude-code-cli/skills/fgac ~/.claude/skills/fgac
 cp -r /tmp/fgac/public/skills/claude-code-cli/scripts ~/.claude/skills/fgac/scripts
 cd ~/.claude/skills/fgac/scripts && npm install

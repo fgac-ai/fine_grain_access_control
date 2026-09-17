@@ -47,7 +47,7 @@ A single proxy key can access multiple inboxes if the key owner has delegated ac
 For users who prefer local scripts over MCP, install the `fgac` plugin:
 
 ```
-/plugin marketplace add kyesh/fine_grain_access_control
+/plugin marketplace add fgac-ai/fine_grain_access_control
 /plugin install fgac@fine_grain_access_control
 ```
 

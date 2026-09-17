@@ -1,6 +1,6 @@
 import { execSync } from 'child_process';
 const token = execSync('gh auth token').toString().trim();
-const response = await fetch(`https://api.github.com/repos/kyesh/fine_grain_access_control/commits/main/status`, {
+const response = await fetch(`https://api.github.com/repos/fgac-ai/fine_grain_access_control/commits/main/status`, {
 headers: { Authorization: `Bearer ${token}` }
 });
 const status = await response.json();

@@ -1,0 +1,10 @@
+{
+  "name": "fgac-mcp",
+  "version": "1.0.0",
+  "description": "FGAC.ai hosted MCP server: multiple Gmail accounts, editable Google Sheets & Docs for AI agents, behind deny-by-default access rules. OAuth sign-in on first connect, nothing to install.",
+  "author": { "name": "FGAC.ai", "url": "https://fgac.ai" },
+  "homepage": "https://fgac.ai/docs",
+  "repository": "https://github.com/fgac-ai/fine_grain_access_control",
+  "license": "MIT-0",
+  "keywords": ["fgac", "fgac.ai", "fgac gmail", "fgac google workspace", "fgac mcp"]
+}

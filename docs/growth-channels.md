@@ -21,6 +21,8 @@ Listing copy source of truth: `docs/connector_submission/listing_copy.md`
 | PulseMCP | — | optional, not submitted — submit button on the site | https://www.pulsemcp.com/submit |
 | Glama | — | optional — `/.well-known/glama.json` (maintainer: support@fgac.ai) is served; claim at https://glama.ai/mcp/servers | https://glama.ai/mcp/servers |
 | awesome-mcp-servers (mcpservers.org) | — | optional, not submitted | https://mcpservers.org/submit |
+| xAI plugin marketplace (Grok Build) | — | **ready to submit** — plugin package at `public/skills/fgac-mcp/` (manifest + hosted MCP entry + skill, no code); PR to `xai-org/plugin-marketplace` from a fork under the `fgac-ai` org (see §7) | https://github.com/xai-org/plugin-marketplace |
+| Cursor Marketplace (also Grok Bot's Plugins pane) | — | **ready to submit** — same package; list on cursor.directory first, then the publish form (see §7) | https://cursor.com/marketplace |
 
 Update the *submitted* and *status* columns as each step lands.
 
@@ -40,7 +42,9 @@ So attribution is **by client family**, which maps to a directory closely
 enough for the channels above: `Anthropic/ClaudeAI` / `claude-ai` = Claude
 connector directory; VS Code / Copilot client names = GitHub MCP Registry
 (the official registry is not a VS Code surface by itself); Cline = Cline
-marketplace; Smithery **proxies** every request through its gateway, so its
+marketplace; Grok Build / Grok Bot / Cursor client names = the xAI plugin
+marketplace or the Cursor Marketplace (record the exact `client_name` each
+reports during the §7 verification step); Smithery **proxies** every request through its gateway, so its
 installs show a Smithery user agent. PulseMCP, Glama and awesome-lists cannot
 be told apart from organic (any client). Baseline in the 30 days to
 2026-09-10, before any registry listing: `claude-code` (129 users),
@@ -75,6 +79,7 @@ volume.
 | Smithery server card | `src/app/.well-known/mcp/server-card.json/route.ts` | JSON card built from `server.json` + `TOOL_DEFS` at `https://fgac.ai/.well-known/mcp/server-card.json` |
 | Glama maintainer file | `public/.well-known/glama.json` | `https://fgac.ai/.well-known/glama.json` |
 | 400×400 logo | `public/logo-400.png` | `https://fgac.ai/logo-400.png` (registry `icons`, Cline marketplace) |
+| Grok / Cursor / Claude Code plugin package | `public/skills/fgac-mcp/` | `.grok-plugin/`, `.cursor-plugin/` and `.claude-plugin/` manifests, `.mcp.json` (Grok Build, Claude Code) and `mcp.json` (Cursor) pointing at `https://fgac.ai/api/mcp`, one skill, README, MIT-0 license. Root `.grok-plugin/marketplace.json` and `.cursor-plugin/marketplace.json` list it so the repo itself is an installable marketplace |
 | Publish workflow | `.github/workflows/mcp-registry-publish.yml` | `workflow_dispatch`: install `mcp-publisher`, check the live proof, `login http`, `publish`, verify search |
 
 The private key exists **only** at `.secrets/mcp-registry-key.pem` on the machine
@@ -108,11 +113,11 @@ openssl pkey -in .secrets/mcp-registry-key.pem -noout -text | grep -A3 "priv:" |
 ```
 
 Either paste it at
-https://github.com/kyesh/fine_grain_access_control/settings/secrets/actions/new
+https://github.com/fgac-ai/fine_grain_access_control/settings/secrets/actions/new
 or from the CLI (reads from stdin, nothing lands in shell history):
 
 ```bash
-openssl pkey -in .secrets/mcp-registry-key.pem -noout -text | grep -A3 "priv:" | tail -n +2 | tr -d ' :\n' | gh secret set MCP_PUBLISHER_PRIVATE_KEY --repo kyesh/fine_grain_access_control
+openssl pkey -in .secrets/mcp-registry-key.pem -noout -text | grep -A3 "priv:" | tail -n +2 | tr -d ' :\n' | gh secret set MCP_PUBLISHER_PRIVATE_KEY --repo fgac-ai/fine_grain_access_control
 ```
 
 ### 3. Merge the PR and deploy production
@@ -129,7 +134,7 @@ the tool count (currently 19).
 
 ### 4. Publish to the official MCP Registry
 
-**Option A — one click:** https://github.com/kyesh/fine_grain_access_control/actions/workflows/mcp-registry-publish.yml
+**Option A — one click:** https://github.com/fgac-ai/fine_grain_access_control/actions/workflows/mcp-registry-publish.yml
 → *Run workflow* on `main`. The job checks the live proof, validates
 `server.json`, logs in with the secret, publishes, and greps the search API.
 
@@ -166,7 +171,7 @@ re-run the workflow. The registry refuses to overwrite an existing version.
 ### 5. Smithery
 
 1. Sign in at https://smithery.ai/new (GitHub account).
-2. Submit the server URL `https://fgac.ai/api/mcp` (Streamable HTTP, OAuth). Namespace `fgac` (create an empty GitHub org `fgac` or `fgac-ai` and pick it — do not move the repo), server ID `fgac`, so the install string matches the registry name.
+2. Submit the server URL `https://fgac.ai/api/mcp` (Streamable HTTP, OAuth). Namespace `fgac` (the `fgac-ai` GitHub org owns the repo since 2026-09-16), server ID `fgac`, so the install string matches the registry name.
 3. If the automatic scan stalls at the auth wall (Smithery registers clients
    via Client ID Metadata Documents; FGAC's Clerk authorization server uses
    Dynamic Client Registration), Smithery falls back to the card at
@@ -182,7 +187,7 @@ https://github.com/cline/mcp-marketplace/issues/new/choose ("Server Submission")
 and attach `public/logo-400.png` (400×400 PNG, resampled from the 381×379
 brand mark `public/logo-v2.png`). Body:
 
-> **GitHub Repo URL:** https://github.com/kyesh/fine_grain_access_control
+> **GitHub Repo URL:** https://github.com/fgac-ai/fine_grain_access_control
 >
 > **Logo:** attached, 400×400 PNG.
 >
@@ -204,13 +209,13 @@ brand mark `public/logo-v2.png`). Body:
 > https://fgac.ai/docs. Privacy policy: https://fgac.ai/privacy.
 
 **PulseMCP** — https://www.pulsemcp.com/submit. Fields: name `FGAC.ai`; URL
-`https://fgac.ai/api/mcp`; repo `https://github.com/kyesh/fine_grain_access_control`;
+`https://fgac.ai/api/mcp`; repo `https://github.com/fgac-ai/fine_grain_access_control`;
 short description:
 
 > Multiple Gmail accounts, editable Google Sheets & Docs for AI agents. Deny-by-default access rules.
 
 **Glama** — https://glama.ai/mcp/servers → *Add server* → repo URL
-`https://github.com/kyesh/fine_grain_access_control`. Ownership is proven by
+`https://github.com/fgac-ai/fine_grain_access_control`. Ownership is proven by
 `https://fgac.ai/.well-known/glama.json` (maintainer email support@fgac.ai);
 click *Claim* on the server page once it is indexed.
 
@@ -219,3 +224,41 @@ Productivity / Communication. Name `FGAC.ai — Gmail, Google Sheets & Docs`;
 URL `https://fgac.ai`; one-liner:
 
 > Connect AI agents to multiple Gmail accounts and editable Google Sheets and Docs behind deny-by-default, per-file and per-recipient access rules. Hosted MCP server with OAuth — nothing to install.
+
+### 7. Grok Build, Grok Bot and Cursor (researched 2026-09-16)
+
+Grok Bot's Plugins pane **is the Cursor Marketplace** (SpaceXAI owns Cursor);
+Grok Build, the coding CLI, reads `xai-org/plugin-marketplace`. Both accept a
+manifest-only plugin that points at a hosted OAuth MCP server. The package is
+`public/skills/fgac-mcp/`. The Grok Bot template marketplace is curated with no
+submission path, and grok.com custom connectors are Business/Enterprise
+admin-only — neither is a channel.
+
+**Prerequisites (user):** the repo lives under the `fgac-ai` org (both catalogs
+close branded plugins submitted from personal accounts), and a Cursor Pro or
+SuperGrok subscription for the verification step.
+
+1. **Verify the handshake before submitting.** In Grok Build:
+   `grok mcp add --transport http fgac https://fgac.ai/api/mcp` → browser
+   sign-in → `list_accounts` returns the pending-approval link. In Grok Bot:
+   message a bot "Add a custom MCP server called fgac at
+   https://fgac.ai/api/mcp" → Authorize on the connect card. In Cursor: add
+   the same URL under Settings → Tools & MCP. Record each client's
+   `mcp_client_initialize` `client_name` in the attribution list above.
+2. **xAI marketplace PR.** Fork `xai-org/plugin-marketplace` **into the
+   `fgac-ai` org** (`gh repo fork xai-org/plugin-marketplace --org fgac-ai`),
+   add one entry to `.grok-plugin/marketplace.json`:
+   `{"name":"fgac-mcp","category":"productivity","source":{"source":"url","url":"https://github.com/fgac-ai/fine_grain_access_control.git","sha":"<40-char main SHA>","path":"public/skills/fgac-mcp"},"homepage":"https://fgac.ai/docs","keywords":["fgac","fgac.ai","fgac gmail","fgac google workspace","fgac mcp"],"domains":["fgac.ai","gmail.fgac.ai"]}`,
+   run `python3 scripts/generate-plugin-index.py && python3 scripts/validate-catalog.py`,
+   open the PR with their template (declare the endpoints from the plugin
+   README). Third-party merges took 3–19 days in September 2026; xAI's bot
+   re-pins the SHA daily after merge.
+3. **Cursor.** List on https://cursor.directory (community marketplace,
+   self-managed, faster) first, then submit the repo link at
+   https://cursor.com/marketplace/publish. The form is tied to the submitting
+   user's account: note "company submission, contact support@fgac.ai" in the
+   notes field. Manual review, follow-up by email, no status page. The plugin
+   files are MIT-0; if review asks about the repo's personal-use root license,
+   mirror `public/skills/fgac-mcp/` into a dedicated `fgac-ai/fgac-plugin` repo.
+4. Record listing links and the go-live dates in the ledger, and add a PostHog
+   annotation per listing.
