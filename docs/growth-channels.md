@@ -12,7 +12,7 @@ Listing copy source of truth: `docs/connector_submission/listing_copy.md`
 
 | surface | submitted | status | listing link |
 |---|---|---|---|
-| Claude connector directory | 2026-08-16 | **live** | https://claude.ai/directory (search "FGAC") |
+| Claude connector directory | 2026-08-16 | **live** — listing copy update (Google Docs added as a feature: title "Manage Multiple Gmail Accounts & Edit Google Sheets and Docs", `docs_*` / `comments_*` tools listed) sat in Anthropic's review queue for weeks after submission; **approved 2026-09-17** 02:14 UTC (Anthropic's directory mailbox wrote to FGAC that its automated review had approved the submitted changes and they would be live within 30 minutes) and confirmed on the public listing page the same day | https://claude.ai/directory/connectors/fgac-ai |
 | Official MCP Registry (registry.modelcontextprotocol.io) | 2026-09-10 | **live** — `ai.fgac/fgac` v0.1.1 (republished 2026-09-17 with the `fgac-ai` repository URL after the org transfer; v0.1.0 (renamed 2026-09-10 from `ai.fgac/google-workspace`, which is marked `deleted`: a Google trademark must not be the server's own name — descriptive use in title/description is fine) via the **MCP Registry Publish** action | https://registry.modelcontextprotocol.io/v0.1/servers?search=ai.fgac |
 | GitHub MCP Registry (github.com/mcp) | 2026-09-10 (via official) | pending propagation — auto-ingests from the official registry, no separate submission (VS Code / Copilot `/mcp search` consumes it); check within a day and paste the link | https://github.com/mcp |
 | Smithery | 2026-09-10 | **live** — `fgac/fgac` (19 tools indexed, ranks in Smithery search for "fgac"; SmitheryBot scanned the endpoint 2026-09-10, the day Clerk CIMD went live, and its `smithery-probe` client re-checks it a few times a day). Smithery fronts our remote through its hosted proxy `https://fgac--fgac.run.tools` — a Smithery-originated user shows up in `mcp_auth_attempt` / `mcp_client_initialize` as a non-Anthropic `client_name` or user agent, never as `Claude-User`; as of 2026-09-16 none has (probe traffic only, `useCount` is null on their API). `/.well-known/mcp/server-card.json` remains the fallback card | https://smithery.ai/server/fgac/fgac |
@@ -22,7 +22,7 @@ Listing copy source of truth: `docs/connector_submission/listing_copy.md`
 | Glama | — | optional — `/.well-known/glama.json` (maintainer: support@fgac.ai) is served; claim at https://glama.ai/mcp/servers | https://glama.ai/mcp/servers |
 | awesome-mcp-servers (mcpservers.org) | — | optional, not submitted | https://mcpservers.org/submit |
 | xAI plugin marketplace (Grok Build) | 2026-09-17 | **submitted** — PR https://github.com/xai-org/plugin-marketplace/pull/766 from the `fgac-ai/plugin-marketplace` fork, pinned to main `952a187`; Socket scan green, Semgrep + catalog validation awaiting first-contributor workflow approval; third-party merges took 3–19 days in Sep 2026 | https://github.com/xai-org/plugin-marketplace |
-| cursor.directory (Cursor community marketplace) | 2026-09-17 | **submitted** — listing created from the repo scan (root `.mcp.json` dev PostHog entry removed by hand before publishing; scanner ignores subdirectory URLs), hidden until their security agent finishes | https://cursor.directory/plugins/fgacai-gmail-google-sheets-docs |
+| cursor.directory (Cursor community marketplace) | 2026-09-17 | **live** — went live 2026-09-17 (verified ~11:20 UTC in a browser: title "FGAC.ai — Gmail, Google Sheets & Docs", the description, "MCP Servers (1) / Skills (1)", an "Add to Cursor" button and the install config `{"type":"http","url":"https://fgac.ai/api/mcp"}`; the "unpublished" / "Scanning your plugin" text is gone). The listing shows exactly one MCP server, `fgac` — the dev-only PostHog entry from the root `.mcp.json` (removed by hand before publishing; their scanner ignores subdirectory URLs) did NOT come back in the security scan. Plain `curl` to the listing URL returns HTTP 429 from a "Vercel Security Checkpoint" bot challenge, so the daily watch must read it through a real browser, never curl | https://cursor.directory/plugins/fgacai-gmail-google-sheets-docs |
 | Cursor Marketplace (first-party; also Grok Bot's Plugins pane) | 2026-09-17 | **application submitted** — publisher application (org name FGAC.ai, handle `fgac-ai`, contact support@fgac.ai, repo + logo + website) accepted with "Thanks for applying"; manual review, no status page, follow-up comes by email from Cursor's marketplace-publishing mailbox. Watch item: cursor.directory's scanner reads the repo root, so a re-scan would re-add the dev-only PostHog server from the root `.mcp.json` | https://cursor.com/marketplace |
 
 Update the *submitted* and *status* columns as each step lands.
@@ -261,5 +261,9 @@ SuperGrok subscription for the verification step.
    notes field. Manual review, follow-up by email, no status page. The plugin
    files are MIT-0; if review asks about the repo's personal-use root license,
    mirror `public/skills/fgac-mcp/` into a dedicated `fgac-ai/fgac-plugin` repo.
+   *2026-09-17: cursor.directory listing went live the same day it was submitted
+   (their security scan kept the single `fgac` server; the page is behind a
+   Vercel bot challenge for `curl`, check it in a browser). Cursor Marketplace
+   application still pending.*
 4. Record listing links and the go-live dates in the ledger, and add a PostHog
    annotation per listing.
