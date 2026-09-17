@@ -37,8 +37,8 @@ export const TOOL_DEFS = {
   },
   gmail_list: {
     name: 'gmail_list',
-    title: 'List Gmail messages',
-    description: 'List recent Gmail message IDs, optionally filtered by a Gmail search query (e.g. "is:unread"). Works across every connected or delegated Gmail inbox — pass the "account" parameter to target a specific mailbox (see list_accounts). Other Gmail read endpoints (threads, drafts, history, settings) are available via google_api_get.',
+    title: 'Search or list Gmail messages',
+    description: 'Search or list Gmail messages: returns recent message IDs, optionally filtered by a Gmail search query (e.g. "is:unread", "from:alice newer_than:7d") — this is the Gmail search tool; read a result with gmail_read. Works across every connected or delegated Gmail inbox — pass the "account" parameter to target a specific mailbox (see list_accounts). Other Gmail read endpoints (threads, drafts, history, settings) are available via google_api_get.',
     readOnly: true,
   },
   gmail_read: {
