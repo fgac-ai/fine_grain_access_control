@@ -23,7 +23,8 @@ const READ_TOOLS: Array<[string, string]> = [
   ["sheets_get_spreadsheet", "Spreadsheet metadata and sheet tabs"],
   ["sheets_read_range", "Reads cell values from a range"],
   ["docs_read_document", "Reads a Google Doc (optionally trimmed by a field mask)"],
-  ["comments_read", "Lists the comments and replies on a doc or sheet"],
+  ["slides_get_presentation", "Reads a Google Slides presentation (optionally trimmed by a field mask)"],
+  ["comments_read", "Lists the comments and replies on a doc, sheet or presentation"],
   ["get_my_permissions", "Shows the rules that govern this connection"],
   ["google_api_get", "Any Google API read endpoint, rule-checked (others limited by your Google grant)"],
   ["request_access", "Asks you to approve a specific permission upgrade"],
@@ -34,9 +35,10 @@ const WRITE_TOOLS: Array<[string, string]> = [
   ["sheets_update_range", "Overwrites cells — needs Read & Write on the sheet"],
   ["sheets_append_rows", "Appends rows — needs Read & Write on the sheet"],
   ["docs_edit", "Edits a doc via Docs batchUpdate (text, tables, styles) — needs Read & Write"],
+  ["slides_edit", "Edits a presentation via Slides batchUpdate (slides, shapes, text) — needs Read & Write"],
   ["sheets_edit", "Formats/restructures a sheet via Sheets batchUpdate — needs Read & Write"],
-  ["comments_add", "Adds a comment or reply on a doc or sheet — needs Read & Write"],
-  ["google_api_modify", "Write endpoints incl. Docs/Sheets batchUpdate and file creation, rule-checked"],
+  ["comments_add", "Adds a comment or reply on a doc, sheet or presentation — needs Read & Write"],
+  ["google_api_modify", "Write endpoints incl. Docs/Sheets/Slides batchUpdate and file creation, rule-checked"],
 ];
 
 const EXAMPLES: Array<{
@@ -238,9 +240,9 @@ export default function DocsPage() {
               Sheets API
             </a>{" "}
             without loosening anything: raw reads pass the same read rules, the
-            only raw Gmail write is <em>send</em> (whitelist-checked), Sheets
-            and Docs writes (including <em>batchUpdate</em>{" "}and file creation)
-            need the same Read &amp; Write grants, and endpoints outside those
+            only raw Gmail write is <em>send</em> (whitelist-checked), Sheets,
+            Docs and Slides writes (including <em>batchUpdate</em>{" "}and file
+            creation) need the same Read &amp; Write grants, and endpoints outside those
             services are bounded by the narrow Google OAuth scopes FGAC holds.
           </p>
         </section>
@@ -258,10 +260,10 @@ export default function DocsPage() {
 
           <ul className="m-0 flex list-none flex-col gap-2.5 p-0">
             {[
-              ["Gmail, Google Sheets, and Google Docs are the enforced services.", "Requests to other Google services are limited by the narrow OAuth scopes FGAC holds — Drive access, for example, covers only files you picked or the agent created (drive.file), and services like Calendar or Slides fail at Google without a granted scope. Rule enforcement arrives service by service."],
+              ["Gmail, Google Sheets, Google Docs, and Google Slides are the enforced services.", "Requests to other Google services are limited by the narrow OAuth scopes FGAC holds — Drive access, for example, covers only files you picked or the agent created (drive.file), and services like Calendar or Contacts fail at Google without a granted scope. Rule enforcement arrives service by service."],
               ["Agents can never delete.", "No tool exposes DELETE. Trash, empty-trash, and destructive Gmail settings are refused regardless of your rules."],
               ["Sending requires a whitelist.", "With no send-whitelist rule configured, all outbound mail is refused. That's the default. When a send is denied, you get a one-click, single-use link to approve exactly that recipient — or the agent can ask via request_access."],
-              ["New connections start read-only.", "Connecting attaches the agent to your Default Profile: it can read this account's mail — plus any inbox its owner has delegated to you — and nothing else: no sending, no Sheets or Docs, no undelegated inboxes. You can review, re-scope, or block it from the dashboard at any time."],
+              ["New connections start read-only.", "Connecting attaches the agent to your Default Profile: it can read this account's mail — plus any inbox its owner has delegated to you — and nothing else: no sending, no Sheets, Docs or Slides, no undelegated inboxes. You can review, re-scope, or block it from the dashboard at any time."],
               ["Attachments cap at ~150 KB", "through MCP responses. Larger files must be fetched from Gmail directly."],
               ["Delegated inboxes need an explicit delegation", "created by the inbox owner from their own FGAC account, revocable any time. Once granted, the inbox attaches to your Default Profile automatically."],
             ].map(([lead, rest]) => (

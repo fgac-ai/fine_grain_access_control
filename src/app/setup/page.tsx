@@ -62,6 +62,10 @@ export default function SetupPage() {
               <span className="h-[7px] w-[7px] rounded-full bg-docs" />
               Google Docs
             </span>
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-slides-border bg-slides-bg px-3 py-1 text-[13px] font-semibold text-slides">
+              <span className="h-[7px] w-[7px] rounded-full bg-slides" />
+              Google Slides
+            </span>
           </div>
 
           <h1 className="mb-3.5 text-[34px] font-extrabold leading-[1.1] tracking-[-0.03em] text-foreground sm:text-[44px]">
@@ -276,16 +280,16 @@ export default function SetupPage() {
           <div className="overflow-hidden rounded-lg border border-border bg-card">
             <div className="flex items-start gap-3.5 border-b border-border px-6 py-5">
               <span className="mt-px shrink-0 rounded-full border border-sheets-border bg-sheets-bg px-2.5 py-0.5 text-xs font-bold text-sheets">
-                Sheets &amp; Docs
+                Sheets, Docs &amp; Slides
               </span>
               <div>
                 <strong className="text-sm text-foreground">
-                  Expose spreadsheets and documents with the Google Picker
+                  Expose spreadsheets, documents and presentations with the Google Picker
                 </strong>
                 <p className="mt-0.5 text-[13px] leading-relaxed text-muted-foreground">
-                  Click <strong>+ Expose a sheet</strong> on a profile and pick
-                  files. Each sheet starts read-only; enable write access per
-                  sheet when the agent needs it. Full walkthrough with video:{" "}
+                  Click <strong>+ Expose a sheet</strong> (or a doc, or a
+                  presentation) on a profile and pick files. Each file starts
+                  read-only; enable write access per file when the agent needs it. Full walkthrough with video:{" "}
                   <Link
                     href="/use-cases/google-sheets-agent"
                     className="text-primary underline underline-offset-2"

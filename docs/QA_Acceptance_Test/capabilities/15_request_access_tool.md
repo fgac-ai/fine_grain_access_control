@@ -41,6 +41,14 @@
   after approval the corresponding docs call succeeds. Omitting `documentId`
   is refused with the requestable-permissions explanation.
 
+### A9: Slides access via request_access mirrors the sheets and docs flows
+- `request_access` with `type=slides_read` and a `presentationId` (and again
+  with `type=slides_write` on a Read-only presentation)
+- **Expected**: Mints a `slides_expose` / `slides_write` link naming the
+  presentation; nothing is granted until the owner approves; after approval
+  the corresponding slides call succeeds. Omitting `presentationId` is refused
+  with the requestable-permissions explanation, which now names presentations.
+
 ### A5: Unsupported capabilities are refused without a link
 - Call `request_access` for an unsupported grant (e.g. deleting mail, or a
   non-Gmail/Sheets/Docs Google API)

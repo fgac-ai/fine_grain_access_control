@@ -2001,3 +2001,36 @@ requests, 30 re-minted). The reminder cannot reach the other 131; if
 rows, the email is not being read either and the next lever is the
 dashboard, not more mail.
 
+**7.27 — Slides adoption and the SERVICE_DISABLED cliff.** Added 2026-09-17
+with the Slides per-file feature (`docs/implementation_plans/claude_practical-meninsky-d8c66c_v1.md`).
+Slides rides the same `drive.file` grant as Sheets/Docs, but the Google
+Slides API must be enabled on the production GCP project (727876597677) for
+any call to succeed; until it is, every Slides call — typed or raw — fails at
+Google with 403 `SERVICE_DISABLED` (`error_status=403`,
+`error_reason=SERVICE_DISABLED`), which the route surfaces as the per-file
+grant-recovery 🚫 (it cannot tell a disabled API from a missing grant at the
+status level). Watch for it explicitly:
+
+```sql
+SELECT toDate(timestamp) AS day,
+       countIf(properties.outcome = 'success') AS ok,
+       countIf(properties.error_reason = 'SERVICE_DISABLED') AS api_disabled,
+       countIf(properties.denial_code IN ('slides_not_exposed','slides_read_only','slides_blocked')) AS rule_denied,
+       countIf(properties.denial_code = 'file_grant_missing_at_google') AS grant_missing,
+       uniq(distinct_id) AS users
+FROM events
+WHERE event = '$mcp_tool_call'
+  AND timestamp > now() - INTERVAL 14 DAY
+  AND (properties.$mcp_tool_name LIKE 'slides_%'
+       OR properties.file_service = 'slides'
+       OR properties.raw_api_family IN ('slides', 'presentations'))
+GROUP BY day ORDER BY day
+```
+
+`api_disabled > 0` after the feature ships means the console step was not
+done (or was done on the wrong project — dev is 627660126377, prod is
+727876597677); it is a Ken action, not a code fix. `ok = 0` with
+`rule_denied > 0` is the normal pre-approval funnel (7.13 applies, with
+`slides_expose` / `slides_write` as the actions). Note the family rename in
+`docs/analytics.md`: pre-2026-09-17 Slides rows carry `raw_api_family='slides'`,
+enforced rows carry `'presentations'`.

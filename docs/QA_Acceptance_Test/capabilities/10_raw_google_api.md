@@ -59,6 +59,12 @@
   per-document rules when Google Docs support landed — a raw
   `v1/documents/<id>` call must be FGAC-classified (capability 19 A6), never
   `raw_api_passthrough`. Sheets and Docs are both enforced families now.
+- **Slides enforced (2026-09-17)**: `slides/v1/presentations/<id>` and the
+  bare `v1/presentations/<id>` spelling classify as an enforced per-file call
+  (`raw_api_family='presentations'`, `file_service='slides'`; capability 21
+  A6) — no longer `raw_api_passthrough` with family `slides`. An id-less
+  `POST v1/presentations` is a create, auto-granted like sheets/docs
+  (capability 21 A10).
 - **Comments carve-out (2026-08-23)**: `drive/v3/files/<id>/comments` (and
   `/replies`) classify as `file_comments` and inherit the file's per-file
   rule — a comment write on a read-only or blocked doc/sheet is denied, and
@@ -68,7 +74,7 @@
   call classifies `drive_file` and follows the file's rule — see A14.
 - **Bare Drive spelling (2026-08-31)**: `v3/files/…` without the `drive/`
   prefix canonicalizes to `drive/v3/…` before classification and routing
-  (mirroring the accepted `v4/spreadsheets` / `v1/documents` / mis-routed
+  (mirroring the accepted `v4/spreadsheets` / `v1/documents` /
   `v1/presentations` spellings) — so `v3/files/<id>/comments` classifies as
   `file_comments`, is enforced per-file, and reaches
   `www.googleapis.com/drive/v3/…` instead of 404ing on a nonexistent path.
