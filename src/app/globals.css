@@ -71,6 +71,9 @@
   --docs: #4285F4;
   --docs-bg: #F0F5FF;
   --docs-border: #C6DAFC;
+  --slides: #B8860B;
+  --slides-bg: #FFFBEB;
+  --slides-border: #FDE68A;
   /* Anthropic's Claude clay — same rule as above: the hue identifies the
      third party, only the surrounding tint themes. */
   --claude: #AE5630;
@@ -127,6 +130,9 @@
   --docs: #669DF6;
   --docs-bg: #0D1B33;
   --docs-border: #1E3A6F;
+  --slides: #FBBF24;
+  --slides-bg: #2A2108;
+  --slides-border: #5C4A0F;
   --claude: #E08D64;
   --claude-bg: #2A170E;
   --claude-border: #5C331C;
@@ -179,6 +185,9 @@
   --color-docs: var(--docs);
   --color-docs-bg: var(--docs-bg);
   --color-docs-border: var(--docs-border);
+  --color-slides: var(--slides);
+  --color-slides-bg: var(--slides-bg);
+  --color-slides-border: var(--slides-border);
   --color-claude: var(--claude);
   --color-claude-bg: var(--claude-bg);
   --color-claude-border: var(--claude-border);

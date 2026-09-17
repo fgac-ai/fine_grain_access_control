@@ -169,6 +169,19 @@ docker compose -f test/qa-envs/openclaw/docker-compose.yml down
 
 ---
 
+## Capability: Slides Management (→ capabilities/21_slides_management.md)
+
+- From the OpenClaw container, exercise slides_get_presentation / slides_edit /
+  comments_read / comments_add and the raw presentations calls against the
+  connected FGAC MCP server; assert denials carry the slides_expose/slides_write
+  links (A6, A8) and reads/writes succeed per rule level (A7, A8).
+- Browser/dashboard halves (A1–A4, A12) via `/browser-agent` outside the
+  container, as with sheets and docs.
+- A14: a 403 `SERVICE_DISABLED` on any Slides call is the GCP-console
+  blocker — record it as `blocked`.
+
+---
+
 ## Capability: Windowed Large Responses (→ capabilities/20_attachment_reading.md)
 
 - Fixtures: an under-150 KB attachment, an over-160 KB attachment, and a

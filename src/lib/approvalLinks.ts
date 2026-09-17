@@ -36,19 +36,63 @@
  * be provisioned. Rotating the Clerk secret invalidates outstanding links.
  */
 
+import { DRIVE_FILE_KINDS, kindForApprovalAction, type DriveFileKind } from './driveFileKinds';
+
 export type ApprovalAction =
   | { action: 'send_whitelist'; recipient: string }
   | { action: 'send_all' }
   | { action: 'sheets_expose'; spreadsheetId: string; resourceName?: string }
   | { action: 'sheets_write'; spreadsheetId: string; resourceName?: string }
   | { action: 'docs_expose'; documentId: string; resourceName?: string }
-  | { action: 'docs_write'; documentId: string; resourceName?: string };
+  | { action: 'docs_write'; documentId: string; resourceName?: string }
+  | { action: 'slides_expose'; presentationId: string; resourceName?: string }
+  | { action: 'slides_write'; presentationId: string; resourceName?: string };
 
 export type ApprovalActionName = ApprovalAction['action'];
 
 export const APPROVAL_ACTIONS: readonly ApprovalActionName[] = [
   'send_whitelist', 'send_all', 'sheets_expose', 'sheets_write', 'docs_expose', 'docs_write',
+  'slides_expose', 'slides_write',
 ] as const;
+
+/**
+ * Build the per-file approval action for a kind at a level. This is the ONE
+ * construction site for per-file actions, and it is a switch on the kind on
+ * purpose: the union above pairs each action name with its own id key, and
+ * only an explicit per-member literal lets the compiler verify that pairing
+ * (a descriptor-driven `{ [d.idKey]: id }` would need a cast and could pair
+ * `slides_write` with `documentId` without a type error). Adding a kind means
+ * adding its two union members and its case here — nowhere else.
+ */
+export function fileApprovalActionFor(
+  kind: DriveFileKind,
+  level: 'expose' | 'write',
+  fileId: string,
+  resourceName?: string,
+): ApprovalAction {
+  const write = level === 'write';
+  const named = resourceName ? { resourceName } : {};
+  switch (kind) {
+    case 'sheet': return write
+      ? { action: 'sheets_write', spreadsheetId: fileId, ...named }
+      : { action: 'sheets_expose', spreadsheetId: fileId, ...named };
+    case 'doc': return write
+      ? { action: 'docs_write', documentId: fileId, ...named }
+      : { action: 'docs_expose', documentId: fileId, ...named };
+    case 'slide': return write
+      ? { action: 'slides_write', presentationId: fileId, ...named }
+      : { action: 'slides_expose', presentationId: fileId, ...named };
+  }
+}
+
+/** The per-file kind an approval payload or action targets, if any. */
+export const approvalFileKind = kindForApprovalAction;
+
+/** The file id a per-file approval payload carries (under the kind's id key). */
+export function approvalFileId(p: Pick<ApprovalPayload, 'action' | 'spreadsheetId' | 'documentId' | 'presentationId'>): string | undefined {
+  const kind = kindForApprovalAction(p.action);
+  return kind ? p[DRIVE_FILE_KINDS[kind].idKey] : undefined;
+}
 
 /** URL query parameter names — short, because the URL is shown to humans. */
 export const APPROVAL_PARAMS = { action: 'a', key: 'k', target: 'r', signature: 's' } as const;
@@ -60,13 +104,14 @@ export interface ApprovalPayload {
   recipient?: string;
   spreadsheetId?: string;
   documentId?: string;
+  presentationId?: string;
   /** Display name, when a caller knows it. Never carried in the URL. */
   resourceName?: string;
   /** Deterministic analytics id joining minted → opened → approved. */
   requestId: string;
 }
 
-/** The single field an action targets: recipient, spreadsheet, or document. */
+/** The single field an action targets: recipient, or the per-file id. */
 export function actionTarget(action: ApprovalAction): string {
   switch (action.action) {
     case 'send_whitelist': return action.recipient;
@@ -75,6 +120,8 @@ export function actionTarget(action: ApprovalAction): string {
     case 'sheets_write': return action.spreadsheetId;
     case 'docs_expose':
     case 'docs_write': return action.documentId;
+    case 'slides_expose':
+    case 'slides_write': return action.presentationId;
   }
 }
 
@@ -224,10 +271,15 @@ export async function verifyApprovalParams(
       action: name,
       requestId,
       recipient: name === 'send_whitelist' ? target : undefined,
-      spreadsheetId: name === 'sheets_expose' || name === 'sheets_write' ? target : undefined,
-      documentId: name === 'docs_expose' || name === 'docs_write' ? target : undefined,
+      ...fileIdFields(name, target),
     },
   };
+}
+
+/** `{ <idKey>: target }` for a per-file action, `{}` otherwise. */
+export function fileIdFields(action: string, target: string): Partial<ApprovalPayload> {
+  const kind = kindForApprovalAction(action);
+  return kind ? { [DRIVE_FILE_KINDS[kind].idKey]: target } : {};
 }
 
 /**
@@ -248,13 +300,18 @@ export function describeApproval(p: ApprovalPayload): string {
       return `Allow this agent to send email to ${p.recipient}`;
     case 'send_all':
       return 'Allow this agent to send email to ANY recipient, from every mailbox on its profile';
+    // Every per-file action is listed so the switch stays exhaustive: a new
+    // action without copy is a compile error, never a raw slug on the
+    // consent page. The copy itself comes from the kind descriptor.
     case 'sheets_expose':
-      return `Give this agent read-only access to spreadsheet ${p.resourceName || p.spreadsheetId}`;
     case 'sheets_write':
-      return `Give this agent read & write access to spreadsheet ${p.resourceName || p.spreadsheetId}`;
     case 'docs_expose':
-      return `Give this agent read-only access to document ${p.resourceName || p.documentId}`;
     case 'docs_write':
-      return `Give this agent read & write access to document ${p.resourceName || p.documentId}`;
+    case 'slides_expose':
+    case 'slides_write': {
+      const d = DRIVE_FILE_KINDS[kindForApprovalAction(p.action)!];
+      const level = p.action === d.approvalActions.write ? 'read & write' : 'read-only';
+      return `Give this agent ${level} access to ${d.noun} ${p.resourceName || approvalFileId(p)}`;
+    }
   }
 }

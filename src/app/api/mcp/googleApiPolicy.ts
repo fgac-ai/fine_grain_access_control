@@ -18,11 +18,15 @@
  * No db/env imports: unit-testable via `npx tsx scripts/test-google-api-policy.ts`.
  */
 
+import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, type DriveFileKind } from '../../../lib/driveFileKinds';
+import { fileApprovalActionFor, type ApprovalAction } from '../../../lib/approvalLinks';
+
 export type RawCallClass =
-  | { kind: 'sheets'; spreadsheetId: string; isMutating: boolean }
-  | { kind: 'sheets_create' }
-  | { kind: 'docs'; documentId: string; isMutating: boolean }
-  | { kind: 'docs_create' }
+  /** A call addressed to one Sheets/Docs/Slides file by id: enforced per-file. */
+  | { kind: 'file'; fileKind: DriveFileKind; fileId: string; isMutating: boolean }
+  /** `POST v4/spreadsheets` / `v1/documents` / `v1/presentations` — a native
+   * create, allowed and auto-granted to the calling key. */
+  | { kind: 'file_create'; fileKind: DriveFileKind }
   | { kind: 'gmail_read' }
   | { kind: 'gmail_send' }
   | { kind: 'gmail_draft_send' }
@@ -42,7 +46,8 @@ export type DenialCode =
   | 'gmail_write_unsupported'
   | 'gmail_settings_unsupported'
   | 'file_id_malformed'
-  | 'file_id_wrong_kind';
+  | 'file_id_wrong_kind'
+  | 'raw_api_path_malformed';
 
 /**
  * The HTTP methods the raw tools forward, and nothing else. "Deletion is
@@ -119,19 +124,66 @@ const UNSUPPORTED_GOOGLE_APIS: Record<string, string> = {
  */
 const DRIVE_BARE_PATH = /^v[23]\/(files|drives|about|changes)([/?#:]|$)/i;
 
+/** True when any path segment is `.` / `..` in plain or percent-encoded form. */
+export function hasDotSegment(path: string): boolean {
+  return path.split(/[?#]/)[0].split('/').some(seg => {
+    let s = seg;
+    try { s = decodeURIComponent(seg); } catch { /* keep raw */ }
+    return s === '.' || s === '..';
+  });
+}
+
 export function canonicalizeGoogleApiPath(rawPath: string): string {
   const path = rawPath.replace(/^\/+/, '');
   return DRIVE_BARE_PATH.test(path) ? `drive/${path}` : path;
 }
 
-export function extractSheetsSpreadsheetId(path: string): string | null {
-  const match = path.match(/(?:v4\/spreadsheets|sheets\/v4\/spreadsheets|spreadsheets)\/([^/?:#]+)/);
+/**
+ * Per-kind id regexes, compiled once at module load from the descriptor:
+ * `v4/spreadsheets/{id}`, `sheets/v4/spreadsheets/{id}`, or the bare
+ * `spreadsheets/{id}` spelling, with any `:verb` suffix excluded. The API
+ * version is pinned (a `v1/spreadsheets/…` path is not a Sheets call).
+ */
+const FILE_ID_RE: Record<DriveFileKind, RegExp> = Object.fromEntries(
+  (Object.keys(DRIVE_FILE_KINDS) as DriveFileKind[]).map(kind => {
+    const d = DRIVE_FILE_KINDS[kind];
+    return [kind, new RegExp(
+      `(?:${d.apiVersion}\\/${d.apiCollection}|${d.apiPathPrefix}\\/${d.apiVersion}\\/${d.apiCollection}|${d.apiCollection})\\/([^/?:#]+)`,
+    )];
+  }),
+) as Record<DriveFileKind, RegExp>;
+
+/**
+ * The file id after a kind's collection segment, or null when the path names
+ * the collection without an id (a create, or nonsense Google will reject
+ * itself).
+ */
+export function extractDriveFileKindId(kind: DriveFileKind, path: string): string | null {
+  const match = path.match(FILE_ID_RE[kind]);
   return match ? decodeURIComponent(match[1]) : null;
 }
 
+/**
+ * The per-file kind a raw path addresses, by exact collection segment
+ * (`spreadsheets` / `documents` / `presentations`, with any `:verb`
+ * stripped) — shared by the MCP classifier and the REST proxy so both
+ * surfaces agree on which paths are Sheets/Docs/Slides calls.
+ */
+export function driveFileKindForPath(path: string): DriveFileKind | null {
+  const segments = path.split(/[?#]/)[0].split('/').filter(Boolean);
+  for (const kind of ACTIVE_DRIVE_FILE_KINDS) {
+    const coll = DRIVE_FILE_KINDS[kind].apiCollection;
+    if (segments.some(s => s.split(':')[0] === coll)) return kind;
+  }
+  return null;
+}
+
+export function extractSheetsSpreadsheetId(path: string): string | null {
+  return extractDriveFileKindId('sheet', path);
+}
+
 export function extractDocsDocumentId(path: string): string | null {
-  const match = path.match(/(?:v1\/documents|docs\/v1\/documents|documents)\/([^/?:#]+)/);
-  return match ? decodeURIComponent(match[1]) : null;
+  return extractDriveFileKindId('doc', path);
 }
 
 /**
@@ -144,6 +196,14 @@ export function classifyGoogleApiCall(rawPath: string, method: string): RawCallC
   if (!isForwardableGoogleMethod(method)) return methodDenial(method);
 
   const path = canonicalizeGoogleApiPath(rawPath).split(/[?#]/)[0];
+  // Dot segments are refused before anything else looks at the path: the
+  // per-file check authorizes the id after the collection segment, but the
+  // URL parser would collapse `<allowed>/../<other>` before the request
+  // leaves, so policy and Google would see different files. `%2e` spellings
+  // count too (WHATWG treats them as dots).
+  if (hasDotSegment(path)) {
+    return { kind: 'denied', code: 'raw_api_path_malformed', reason: '🚫 Access Denied: the path contains a "." or ".." segment, which FGAC never forwards — spell the full path to the resource instead.' };
+  }
   let segments = path.split('/').filter(Boolean).map(s => s.toLowerCase());
 
   // Media-upload variants (`upload/gmail/v1/…`, `upload/drive/v3/…`) are the
@@ -184,32 +244,23 @@ export function classifyGoogleApiCall(rawPath: string, method: string): RawCallC
 
   const isMutating = method !== 'GET';
 
-  if (segments.includes('spreadsheets')) {
-    const spreadsheetId = extractSheetsSpreadsheetId(path);
-    if (!spreadsheetId) {
-      // POST v4/spreadsheets = create. Creation is allowed (2026-08-19 posture
-      // change): the Sheets policy exists to keep agents out of the user's
-      // EXISTING sheets, not to stop them making new ones. The route handler
-      // auto-grants the created id to the calling key so the agent can keep
-      // working on what it made. Anything else id-less is nonsense Google
-      // will reject itself — forward it rather than inventing a denial.
-      if (isMutating) return { kind: 'sheets_create' };
-      return { kind: 'passthrough', family: 'spreadsheets', isMutating };
+  // Per-file families (Sheets, Docs, Slides), one rule for all of them. The
+  // collection segment identifies the kind whether the agent spells the path
+  // `v4/spreadsheets/…`, `docs/v1/documents/…`, or bare `presentations/…`.
+  // An id-addressed call is enforced per file; an id-less POST is a native
+  // create — allowed (2026-08-19 posture change: the per-file policy keeps
+  // agents out of the user's EXISTING files, not from making new ones) and
+  // auto-granted to the calling key by the route so the agent can keep
+  // working on what it made. Anything else id-less is nonsense Google will
+  // reject itself — forward it rather than inventing a denial.
+  const fileKind = driveFileKindForPath(path);
+  if (fileKind) {
+    const fileId = extractDriveFileKindId(fileKind, path);
+    if (!fileId) {
+      if (isMutating) return { kind: 'file_create', fileKind };
+      return { kind: 'passthrough', family: DRIVE_FILE_KINDS[fileKind].apiCollection, isMutating };
     }
-    return { kind: 'sheets', spreadsheetId, isMutating };
-  }
-
-  if (segments.includes('documents')) {
-    const documentId = extractDocsDocumentId(path);
-    if (!documentId) {
-      // POST v1/documents = create. Same posture as sheets_create: the Docs
-      // policy keeps agents out of the user's EXISTING documents, not out of
-      // making new ones — the route handler auto-grants the created id to
-      // the calling key. Anything else id-less is nonsense Google rejects.
-      if (isMutating) return { kind: 'docs_create' };
-      return { kind: 'passthrough', family: 'documents', isMutating };
-    }
-    return { kind: 'docs', documentId, isMutating };
+    return { kind: 'file', fileKind, fileId, isMutating };
   }
 
   if (segments[0] === 'gmail') {
@@ -245,17 +296,6 @@ export function classifyGoogleApiCall(rawPath: string, method: string): RawCallC
     // raw_api_endpoint carries the id-stripped path so which writes agents
     // actually use keeps feeding rule-engine prioritization.
     return { kind: 'gmail_write' };
-  }
-
-  // Slides rides drive.file exactly like Sheets/Docs (creates and app-created
-  // or user-picked presentations), but per-file Slides policy is the stubbed
-  // `slide` kind in driveFileKinds.ts — a separate feature. Until it ships,
-  // Slides is scope-backstop passthrough; classifying it here (both
-  // `slides/v1/…` and the bare `v1/presentations` spelling agents fall back
-  // to) is what lets the route send it to slides.googleapis.com instead of
-  // www.googleapis.com, which does not serve Slides and 404s every call.
-  if (segments.some(s => s.split(':')[0] === 'presentations')) {
-    return { kind: 'passthrough', family: 'slides', isMutating };
   }
 
   // Comments on a Drive file (which is how Docs/Sheets comments are
@@ -315,7 +355,7 @@ export function classifyGoogleApiCall(rawPath: string, method: string): RawCallC
 // Resource collections whose next path segment is a caller-supplied
 // identifier (message id, spreadsheet id, file id, …).
 const ID_PARENT_SEGMENTS = new Set([
-  'spreadsheets', 'documents', 'messages', 'threads', 'drafts', 'labels',
+  'spreadsheets', 'documents', 'presentations', 'messages', 'threads', 'drafts', 'labels',
   'attachments', 'files', 'calendars', 'events', 'tasklists', 'tasks', 'contacts',
 ]);
 
@@ -370,12 +410,9 @@ export function templateGoogleApiPath(rawPath: string): string {
  */
 export function rawApiFamily(cls: RawCallClass): string | null {
   switch (cls.kind) {
-    case 'sheets':
-    case 'sheets_create':
-      return 'spreadsheets';
-    case 'docs':
-    case 'docs_create':
-      return 'documents';
+    case 'file':
+    case 'file_create':
+      return DRIVE_FILE_KINDS[cls.fileKind].apiCollection;
     case 'gmail_read':
     case 'gmail_send':
     case 'gmail_draft_send':
@@ -541,25 +578,27 @@ function fileApprovalLevel(denial: FileDenialKind, isMutating: boolean): 'expose
   return isMutating ? 'write' : 'expose';
 }
 
-export function sheetsApprovalAction(
-  denial: SheetsDenialKind,
-  spreadsheetId: string,
+/**
+ * The approval action a per-file denial should mint, for any kind, or null
+ * for explicit blocks. The policy decision (which LEVEL the denied operation
+ * needs) lives here; the typed action object is built by approvalLinks'
+ * fileApprovalActionFor, the one construction site for the union.
+ */
+export function fileApprovalAction(
+  kind: DriveFileKind,
+  denial: FileDenialKind,
+  fileId: string,
   isMutating: boolean,
-): { action: 'sheets_expose' | 'sheets_write'; spreadsheetId: string } | null {
+): ApprovalAction | null {
   const level = fileApprovalLevel(denial, isMutating);
-  if (!level) return null;
-  return { action: level === 'write' ? 'sheets_write' : 'sheets_expose', spreadsheetId };
+  return level ? fileApprovalActionFor(kind, level, fileId) : null;
 }
 
-export function docsApprovalAction(
-  denial: FileDenialKind,
-  documentId: string,
-  isMutating: boolean,
-): { action: 'docs_expose' | 'docs_write'; documentId: string } | null {
-  const level = fileApprovalLevel(denial, isMutating);
-  if (!level) return null;
-  return { action: level === 'write' ? 'docs_write' : 'docs_expose', documentId };
-}
+export const sheetsApprovalAction = (denial: SheetsDenialKind, spreadsheetId: string, isMutating: boolean) =>
+  fileApprovalAction('sheet', denial, spreadsheetId, isMutating);
+
+export const docsApprovalAction = (denial: FileDenialKind, documentId: string, isMutating: boolean) =>
+  fileApprovalAction('doc', denial, documentId, isMutating);
 
 // ── Drive file id shape ───────────────────────────────────────────────
 
@@ -576,8 +615,8 @@ export function isWellFormedDriveFileId(id: string): boolean {
   return DRIVE_FILE_ID_RE.test(id);
 }
 
-/** Which product a Docs/Sheets URL path names, when it names one. */
-export type DriveUrlKind = 'sheet' | 'doc' | 'other';
+/** Which product a Docs/Sheets/Slides URL path names, when it names one. */
+export type DriveUrlKind = DriveFileKind | 'other';
 
 export type DriveFileIdParse =
   /** `input` records how the id arrived: `bare` needs no normalization;
@@ -586,11 +625,14 @@ export type DriveFileIdParse =
   | { ok: true; id: string; input: 'bare' | 'url' | 'suffixed'; urlKind?: DriveUrlKind }
   | { ok: false; code: 'file_id_malformed' | 'file_id_wrong_kind'; reason: string };
 
-const KIND_NOUN: Record<'sheet' | 'doc' | 'file', string> = { sheet: 'spreadsheet', doc: 'document', file: 'file' };
+/** `expected === null` means a kind-agnostic file id (Drive comments, copies). */
+const kindNoun = (expected: DriveFileKind | null): string =>
+  expected ? DRIVE_FILE_KINDS[expected].noun : 'file';
 
 function urlKindFromPath(pathname: string): DriveUrlKind {
-  if (/\/spreadsheets\//.test(pathname)) return 'sheet';
-  if (/\/document\//.test(pathname)) return 'doc';
+  for (const kind of ACTIVE_DRIVE_FILE_KINDS) {
+    if (pathname.includes(`/${DRIVE_FILE_KINDS[kind].urlPathSegment}/`)) return kind;
+  }
   return 'other';
 }
 
@@ -624,11 +666,11 @@ function clip(raw: string): string {
  * Anything else is `file_id_malformed` and the reason names the shape. Neither
  * refusal mints an approval link.
  */
-export function parseDriveFileId(raw: string, expected: 'sheet' | 'doc' | 'file'): DriveFileIdParse {
+export function parseDriveFileId(raw: string, expected: DriveFileKind | null): DriveFileIdParse {
   const s = raw.trim();
   if (DRIVE_FILE_ID_RE.test(s)) return { ok: true, id: s, input: 'bare' };
 
-  const noun = KIND_NOUN[expected];
+  const noun = kindNoun(expected);
   const malformed = (): DriveFileIdParse => ({
     ok: false,
     code: 'file_id_malformed',
@@ -642,15 +684,13 @@ export function parseDriveFileId(raw: string, expected: 'sheet' | 'doc' | 'file'
     const id = fromPath?.[1] ?? url.searchParams.get('id') ?? '';
     if (!DRIVE_FILE_ID_RE.test(id)) return malformed();
     const urlKind = urlKindFromPath(url.pathname);
-    if ((expected === 'sheet' && urlKind === 'doc') || (expected === 'doc' && urlKind === 'sheet')) {
-      const isSheetUrl = urlKind === 'sheet';
+    if (expected && urlKind !== 'other' && urlKind !== expected) {
+      const u = DRIVE_FILE_KINDS[urlKind];
       return {
         ok: false,
         code: 'file_id_wrong_kind',
-        reason: `🚫 Access Denied: '${clip(s)}' is a Google ${isSheetUrl ? 'Sheets' : 'Docs'} URL, but this call addresses a ${noun}. ` +
-          (isSheetUrl
-            ? `Use the sheets_* tools (or request_access with type sheets_read / sheets_write) with spreadsheetId '${id}'.`
-            : `Use docs_read_document / docs_edit (or request_access with type docs_read / docs_write) with documentId '${id}'.`) +
+        reason: `🚫 Access Denied: '${clip(s)}' is a ${u.productName} URL, but this call addresses a ${noun}. ` +
+          `Use ${u.tools.read} / ${u.tools.edit} (or request_access with type ${u.requestTypes.read} / ${u.requestTypes.write}) with ${u.idKey} '${id}'.` +
           ' No approval link was created.',
       };
     }

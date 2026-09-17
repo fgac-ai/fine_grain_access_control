@@ -54,9 +54,9 @@ export function FileApprovalFlow({
 }) {
   const [state, setState] = useState<FlowState>({ step: "checking" });
   const d = DRIVE_FILE_KINDS[kind];
-  const short = kind === "sheet" ? "sheet" : d.noun;
-  const testPrefix = kind === "sheet" ? "sheets" : "docs";
-  const verifyPath = kind === "sheet" ? "/api/rules/verify-sheets-access" : "/api/rules/verify-docs-access";
+  const short = d.shortNoun;
+  const testPrefix = d.service;
+  const verifyPath = d.verifyPath;
 
   useEffect(() => {
     let cancelled = false;
@@ -170,7 +170,7 @@ export function FileApprovalFlow({
           First time? Google will ask you to allow FGAC&apos;s file picker
           (drive.file) and then bring you straight back here.
         </p>
-        {kind === "sheet" && (
+        {d.hasSetupVideo && (
           <div className="rounded-lg border border-border bg-card p-2">
             <div className="px-1.5 pb-1.5 pt-0.5 text-sm font-semibold text-foreground">
               Watch how it works (2 min)

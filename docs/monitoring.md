@@ -915,10 +915,10 @@ stuck user, check:
 -- Gate-hit persons: denied ids vs ids they later used successfully, 7 d.
 SELECT cityHash64(person.properties.email) % 100000 AS u,
        groupUniqArrayIf(cityHash64(toString(properties.file_id)) % 10000,
-         event = '$mcp_tool_call' AND properties.denial_code IN ('sheets_not_exposed','docs_not_exposed')) AS denied_ids,
+         event = '$mcp_tool_call' AND properties.denial_code IN ('sheets_not_exposed','docs_not_exposed','slides_not_exposed')) AS denied_ids,
        groupUniqArrayIf(cityHash64(toString(properties.file_id)) % 10000,
          event = '$mcp_tool_call' AND properties.outcome = 'success'
-         AND (properties.$mcp_tool_name LIKE 'sheets%' OR properties.$mcp_tool_name LIKE 'docs%')) AS ok_ids,
+         AND (properties.$mcp_tool_name LIKE 'sheets%' OR properties.$mcp_tool_name LIKE 'docs%' OR properties.$mcp_tool_name LIKE 'slides%')) AS ok_ids,
        countIf(event IN ('agent_sheet_created','agent_doc_created')) AS agent_created,
        countIf(event = 'approval_link_opened')   AS opened,
        countIf(event = 'approval_link_approved') AS approved
@@ -927,7 +927,7 @@ WHERE properties.environment = 'production'
   AND person.properties.email NOT IN (/* internal + QA accounts */)
   AND timestamp > now() - INTERVAL 7 DAY
   AND (event IN ('approval_link_opened','approval_link_approved','agent_sheet_created','agent_doc_created')
-       OR (event = '$mcp_tool_call' AND (properties.$mcp_tool_name LIKE 'sheets%' OR properties.$mcp_tool_name LIKE 'docs%')))
+       OR (event = '$mcp_tool_call' AND (properties.$mcp_tool_name LIKE 'sheets%' OR properties.$mcp_tool_name LIKE 'docs%' OR properties.$mcp_tool_name LIKE 'slides%')))
 GROUP BY u HAVING length(denied_ids) > 0
 ORDER BY approved, agent_created DESC
 ```
@@ -1108,12 +1108,12 @@ WITH per AS (
          countIf(event = 'google_scope_missing' AND properties.scope = 'gmail') AS gmail_scope_denied,
          countIf(event = '$mcp_tool_call' AND properties.$mcp_tool_name LIKE 'gmail_%') AS gmail_tried,
          countIf(event = '$mcp_tool_call' AND properties.$mcp_tool_name LIKE 'gmail_%' AND properties.outcome = 'success') AS gmail_ok,
-         countIf(event = '$mcp_tool_call' AND (properties.$mcp_tool_name LIKE 'sheets_%' OR properties.$mcp_tool_name LIKE 'docs_%')) AS sd_tried,
-         countIf(event = '$mcp_tool_call' AND properties.denial_code IN ('sheets_not_exposed', 'docs_not_exposed')) AS sd_not_exposed,
+         countIf(event = '$mcp_tool_call' AND (properties.$mcp_tool_name LIKE 'sheets_%' OR properties.$mcp_tool_name LIKE 'docs_%' OR properties.$mcp_tool_name LIKE 'slides_%')) AS sd_tried,
+         countIf(event = '$mcp_tool_call' AND properties.denial_code IN ('sheets_not_exposed', 'docs_not_exposed', 'slides_not_exposed')) AS sd_not_exposed,
          countIf(event = 'approval_link_opened')   AS link_opened,
          countIf(event = 'approval_link_approved') AS link_approved,
          countIf(event = 'picker_picked')          AS picked,
-         countIf(event = '$mcp_tool_call' AND (properties.$mcp_tool_name LIKE 'sheets_%' OR properties.$mcp_tool_name LIKE 'docs_%') AND properties.outcome = 'success') AS sd_ok,
+         countIf(event = '$mcp_tool_call' AND (properties.$mcp_tool_name LIKE 'sheets_%' OR properties.$mcp_tool_name LIKE 'docs_%' OR properties.$mcp_tool_name LIKE 'slides_%') AND properties.outcome = 'success') AS sd_ok,
          countIf(event = '$mcp_tool_call' AND properties.outcome = 'success') AS any_ok
   FROM events
   WHERE properties.environment = 'production'
@@ -2001,3 +2001,36 @@ requests, 30 re-minted). The reminder cannot reach the other 131; if
 rows, the email is not being read either and the next lever is the
 dashboard, not more mail.
 
+**7.27 — Slides adoption and the SERVICE_DISABLED cliff.** Added 2026-09-17
+with the Slides per-file feature (`docs/implementation_plans/claude_practical-meninsky-d8c66c_v1.md`).
+Slides rides the same `drive.file` grant as Sheets/Docs, but the Google
+Slides API must be enabled on the production GCP project (727876597677) for
+any call to succeed; until it is, every Slides call — typed or raw — fails at
+Google with 403 `SERVICE_DISABLED` (`error_status=403`,
+`error_reason=SERVICE_DISABLED`), which the route surfaces as the per-file
+grant-recovery 🚫 (it cannot tell a disabled API from a missing grant at the
+status level). Watch for it explicitly:
+
+```sql
+SELECT toDate(timestamp) AS day,
+       countIf(properties.outcome = 'success') AS ok,
+       countIf(properties.error_reason = 'SERVICE_DISABLED') AS api_disabled,
+       countIf(properties.denial_code IN ('slides_not_exposed','slides_read_only','slides_blocked')) AS rule_denied,
+       countIf(properties.denial_code = 'file_grant_missing_at_google') AS grant_missing,
+       uniq(distinct_id) AS users
+FROM events
+WHERE event = '$mcp_tool_call'
+  AND timestamp > now() - INTERVAL 14 DAY
+  AND (properties.$mcp_tool_name LIKE 'slides_%'
+       OR properties.file_service = 'slides'
+       OR properties.raw_api_family IN ('slides', 'presentations'))
+GROUP BY day ORDER BY day
+```
+
+`api_disabled > 0` after the feature ships means the console step was not
+done (or was done on the wrong project — dev is 627660126377, prod is
+727876597677); it is a Ken action, not a code fix. `ok = 0` with
+`rule_denied > 0` is the normal pre-approval funnel (7.13 applies, with
+`slides_expose` / `slides_write` as the actions). Note the family rename in
+`docs/analytics.md`: pre-2026-09-17 Slides rows carry `raw_api_family='slides'`,
+enforced rows carry `'presentations'`.

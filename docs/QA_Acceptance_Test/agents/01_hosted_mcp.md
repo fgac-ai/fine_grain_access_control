@@ -310,6 +310,24 @@ curl -s $BASE_URL/api/mcp -X POST \
 
 ---
 
+## Capability: Slides Management (→ capabilities/21_slides_management.md)
+
+- A5–A10, A13: `tools/call` via curl on `slides_get_presentation` /
+  `slides_edit` / `comments_read` / `comments_add` / `google_api_get`
+  (`v1/presentations/<id>` and `slides/v1/presentations/<id>`) /
+  `google_api_modify` (`:batchUpdate`, and POST `v1/presentations` for the
+  auto-grant), using the setup doc's exposed + external presentation fixtures.
+- A11: proxy-route probes with the profile's `sk_proxy_` bearer against
+  `$BASE_URL/api/proxy/v1/presentations/...` and `.../drive/v3/files/<presentation id>`.
+- A1–A4, A12: browser assertions via `/browser-agent` (picker iframe caveats
+  identical to capability 09; app-API seam is `POST /api/rules/grant-slides-access`;
+  full-fidelity picks via the Playwright CDP path).
+- A14 (API enablement): read `error_reason` on any Slides failure — a 403
+  `SERVICE_DISABLED` is the GCP-console blocker, not a rule or grant problem;
+  report it as `blocked` with the project number from the error body.
+
+---
+
 ## Capability: Windowed Large Responses (→ capabilities/20_attachment_reading.md)
 
 - Fixtures: an under-150 KB attachment, an over-160 KB attachment, and a

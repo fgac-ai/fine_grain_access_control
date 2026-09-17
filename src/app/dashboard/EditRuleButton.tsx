@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useTransition } from "react";
 import { updateRule } from "./actions";
+import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, kindForService } from "@/lib/driveFileKinds";
 
 interface GmailLabel {
   id: string;
@@ -39,6 +40,7 @@ export function EditRuleButton({
   const [isOpen, setIsOpen] = useState(false);
   const [selectedService, setSelectedService] = useState(rule.service);
   const [selectedActionType, setSelectedActionType] = useState(rule.actionType);
+  const selectedFileKind = kindForService(selectedService);
   const [gmailLabels, setGmailLabels] = useState<GmailLabel[]>([]);
   const [isLoadingLabels, setIsLoadingLabels] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -147,19 +149,15 @@ export function EditRuleButton({
                   value={selectedService}
                   onChange={(e) => {
                     setSelectedService(e.target.value);
-                    if (e.target.value === 'sheets') {
-                      setSelectedActionType('sheet_read');
-                    } else if (e.target.value === 'docs') {
-                      setSelectedActionType('doc_read');
-                    } else {
-                      setSelectedActionType('read_blacklist');
-                    }
+                    const fileKind = kindForService(e.target.value);
+                    setSelectedActionType(fileKind ? DRIVE_FILE_KINDS[fileKind].actionTypes.read : 'read_blacklist');
                   }}
                   className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 shadow-sm"
                 >
                   <option value="gmail">Gmail</option>
-                  <option value="sheets">Google Sheets</option>
-                  <option value="docs">Google Docs</option>
+                  {ACTIVE_DRIVE_FILE_KINDS.map(k => (
+                    <option key={k} value={DRIVE_FILE_KINDS[k].service}>{DRIVE_FILE_KINDS[k].productName}</option>
+                  ))}
                 </select>
               </div>
 
@@ -173,27 +171,15 @@ export function EditRuleButton({
                   onChange={(e) => setSelectedActionType(e.target.value)}
                   className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 shadow-sm"
                 >
-                  {selectedService === 'sheets' ? (
+                  {selectedFileKind ? (
                     <>
-                      <option value="sheet_read">
+                      <option value={DRIVE_FILE_KINDS[selectedFileKind].actionTypes.read}>
                         Read Only (GET)
                       </option>
-                      <option value="sheet_read_write">
+                      <option value={DRIVE_FILE_KINDS[selectedFileKind].actionTypes.readWrite}>
                         Read & Write (GET + POST/PUT)
                       </option>
-                      <option value="sheet_block">
-                        Blocked (Deny All)
-                      </option>
-                    </>
-                  ) : selectedService === 'docs' ? (
-                    <>
-                      <option value="doc_read">
-                        Read Only (GET)
-                      </option>
-                      <option value="doc_read_write">
-                        Read & Write (GET + POST/PUT)
-                      </option>
-                      <option value="doc_block">
+                      <option value={DRIVE_FILE_KINDS[selectedFileKind].actionTypes.block}>
                         Blocked (Deny All)
                       </option>
                     </>
@@ -219,10 +205,10 @@ export function EditRuleButton({
                 </select>
               </div>
 
-              {selectedService === 'sheets' || selectedService === 'docs' ? (
+              {selectedFileKind ? (
                 <div>
                   <label className="block text-sm font-semibold text-slate-700 mb-1.5">
-                    {selectedService === 'sheets' ? 'Spreadsheet ID' : 'Document ID'}
+                    {DRIVE_FILE_KINDS[selectedFileKind].nounCap} ID
                   </label>
                   <input
                     type="text"
@@ -233,7 +219,7 @@ export function EditRuleButton({
                     className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 shadow-sm"
                   />
                   <p className="text-xs text-slate-500 mt-1">
-                    Document Title: {rule.resourceName || (selectedService === 'sheets' ? 'Google Sheet' : 'Google Doc')}
+                    Document Title: {rule.resourceName || DRIVE_FILE_KINDS[selectedFileKind].productName}
                   </p>
                 </div>
               ) : (

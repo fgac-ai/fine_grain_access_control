@@ -134,6 +134,7 @@ Access rules let you control what your agent can do. Create them in the **"Acces
 | **Label Whitelist** | Only allows reading emails that have specific Gmail labels | `AI-Allowed` restricts reading to tagged emails only |
 | **Sheets access** | Per-spreadsheet Read Only / Read & Write / Blocked, granted by picking the sheet in the Google Picker | Expose one budget spreadsheet, keep the rest of Drive invisible |
 | **Docs access** | Per-document Read Only / Read & Write / Blocked, granted by picking the doc in the Google Picker. Read & Write on a doc permits full-document editing (the Docs API has no finer write granularity) | Let an agent append meeting notes to one running doc |
+| **Slides access** | Per-presentation Read Only / Read & Write / Blocked, granted by picking the deck in the Google Picker. Read & Write on a presentation permits full-deck editing via the Slides `batchUpdate` API (add/remove slides, shapes, text) | Let an agent draft the weekly update deck from a template presentation |
 
 ### Built-In Safeguards
 
@@ -211,8 +212,8 @@ Owner (user_a@example.com)              Delegate (user_b@example.com)
    - The delegated email (indigo **"Delegated"** badge)
 4. **Your Default Profile picks up the delegated mailbox automatically** — agents
    connected on the Default Profile can read it immediately, with the same
-   read-only default posture as your own mailbox (no sending, no Sheets or
-   Docs, until you add rules).
+   read-only default posture as your own mailbox (no sending, no Sheets,
+   Docs, or Slides, until you add rules).
 5. For a **custom** API key/profile, mailbox access stays opt-in: check both
    emails under **"Email Access"** when creating the key.
 6. Either way, one key serves both inboxes — no separate key per mailbox.

@@ -10,6 +10,7 @@ import { Card, CardHeader, Badge, EmptyState, buttonSecondary } from '@/componen
 import { DelegateAccessButton } from '../DelegateAccessButton';
 import { RevokeDelegationButton } from '../RevokeDelegationButton';
 import { ExposedFilesManager } from '../ExposedFilesManager';
+import { ACTIVE_DRIVE_FILE_KINDS } from '@/lib/driveFileKinds';
 import { AddDelegatedAccountButton } from './AddDelegatedAccountButton';
 import { ReconnectGoogleButton } from './ReconnectGoogleButton';
 import { checkGoogleAccess } from '../googleAccess';
@@ -266,8 +267,9 @@ export default async function AccountsPage({
           {/* Renders its own card chrome and header, and its horizontal
               header layout needs the full-width column — nesting it in the
               narrow side column wrapped the heading one word per line. */}
-          <ExposedFilesManager kind="sheet" activeKeys={activeKeys} />
-          <ExposedFilesManager kind="doc" activeKeys={activeKeys} />
+          {ACTIVE_DRIVE_FILE_KINDS.map(kind => (
+            <ExposedFilesManager key={kind} kind={kind} activeKeys={activeKeys} />
+          ))}
         </div>
 
         {/* ─── Side column ────────────────────────────────────────────── */}
