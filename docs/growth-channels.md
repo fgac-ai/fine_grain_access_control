@@ -22,7 +22,8 @@ Listing copy source of truth: `docs/connector_submission/listing_copy.md`
 | Glama | — | optional — `/.well-known/glama.json` (maintainer: support@fgac.ai) is served; claim at https://glama.ai/mcp/servers | https://glama.ai/mcp/servers |
 | awesome-mcp-servers (mcpservers.org) | — | optional, not submitted | https://mcpservers.org/submit |
 | xAI plugin marketplace (Grok Build) | 2026-09-17 | **submitted** — PR https://github.com/xai-org/plugin-marketplace/pull/766 from the `fgac-ai/plugin-marketplace` fork, pinned to main `952a187`; Socket scan green, Semgrep + catalog validation awaiting first-contributor workflow approval; third-party merges took 3–19 days in Sep 2026 | https://github.com/xai-org/plugin-marketplace |
-| Cursor Marketplace (also Grok Bot's Plugins pane) | — | **blocked on a Cursor sign-in** — https://cursor.com/marketplace/publish is a "plugin publisher application" behind a Cursor account login (user action); cursor.directory listing pending the same | https://cursor.com/marketplace |
+| cursor.directory (Cursor community marketplace) | 2026-09-17 | **submitted** — listing created from the repo scan (root `.mcp.json` dev PostHog entry removed by hand before publishing; scanner ignores subdirectory URLs), hidden until their security agent finishes | https://cursor.directory/plugins/fgacai-gmail-google-sheets-docs |
+| Cursor Marketplace (first-party; also Grok Bot's Plugins pane) | — | publisher application at https://cursor.com/marketplace/publish (Cursor account, manual review, email follow-up) | https://cursor.com/marketplace |
 
 Update the *submitted* and *status* columns as each step lands.
 
