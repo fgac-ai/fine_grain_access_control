@@ -13,7 +13,7 @@
 
 1. Add the FGAC marketplace:
    ```
-   /plugin marketplace add kyesh/fine_grain_access_control
+   /plugin marketplace add fgac-ai/fine_grain_access_control
    ```
 
 2. Install the Gmail skill:

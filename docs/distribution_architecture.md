@@ -15,6 +15,7 @@ We ship **4 distinct packages**, each designed for a different client and use ca
 | 3 | **Claude Code MCP Plugin** | OAuth (via hosted MCP server) | `claude mcp add` command | Claude Code (MCP users) |
 | 4 | **Claude Code CLI Plugin** | OAuth baked into local scripts (shared w/ #2) | `SKILL.md` + local scripts | Claude Code (CLI users) |
 | 5 | **Partner Handoff** | Pre-registered OAuth app → FGAC consent interstitial (consent-time provisioning, no pending step) | Nothing — `/oauth/authorize` + `/api/auth/partner-token`; optional signed webhooks | Third-party web apps with server-side agents |
+| 6 | **Hosted MCP Plugin** (Grok Build, Grok Bot, Cursor, Claude Code) | OAuth (via hosted MCP server, same as #1) | `public/skills/fgac-mcp/` — manifests + `.mcp.json`/`mcp.json` pointing at `/api/mcp`, one skill, no code | Plugin marketplaces: `xai-org/plugin-marketplace`, Cursor Marketplace, Claude Code `/plugin` |
 
 ## Key Design Principles
 
@@ -206,6 +207,8 @@ the operation findable.
 | Claude Code CLI plugin | `public/skills/claude-code-cli/` |
 | Claude Code CLI SKILL.md | `public/skills/claude-code-cli/skills/fgac/SKILL.md` |
 | Claude Code CLI scripts | `public/skills/claude-code-cli/scripts/` *(canonical location)* |
+| Hosted MCP plugin (Grok/Cursor/Claude Code) | `public/skills/fgac-mcp/` |
+| Cursor / Grok marketplace manifests | `.cursor-plugin/marketplace.json`, `.grok-plugin/marketplace.json` |
 | Marketplace manifest | `.claude-plugin/marketplace.json` |
 | Plugin manifest | `public/skills/claude-code-cli/.claude-plugin/plugin.json` |
 | Discovery endpoints | `src/app/.well-known/oauth-*/route.ts` |

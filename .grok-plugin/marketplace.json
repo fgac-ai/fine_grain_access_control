@@ -1,0 +1,16 @@
+{
+  "name": "fgac-ai",
+  "description": "Official FGAC.ai plugins for Grok Build and Grok Bot",
+  "owner": { "name": "FGAC.ai" },
+  "plugins": [
+    {
+      "name": "fgac-mcp",
+      "description": "FGAC.ai hosted MCP server: multiple Gmail accounts, editable Google Sheets & Docs for AI agents, behind deny-by-default access rules. OAuth sign-in on first connect, nothing to install.",
+      "category": "productivity",
+      "source": { "type": "local", "path": "./public/skills/fgac-mcp" },
+      "homepage": "https://fgac.ai/docs",
+      "keywords": ["fgac", "fgac.ai", "fgac gmail", "fgac google workspace", "fgac mcp"],
+      "domains": ["fgac.ai", "gmail.fgac.ai"]
+    }
+  ]
+}

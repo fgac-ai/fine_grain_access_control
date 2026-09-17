@@ -57,7 +57,7 @@ const mcpBody = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' });
 // so the probe's own 401s never read as install attempts or as a 401 storm.
 // Before 2026-09-10 the probe sent Node's default `node` UA and its no_token
 // rows were indistinguishable from a registry crawler on the same runtime.
-const PROBE_USER_AGENT = 'fgac-auth-probe/1 (+https://github.com/kyesh/fine_grain_access_control)';
+const PROBE_USER_AGENT = 'fgac-auth-probe/1 (+https://github.com/fgac-ai/fine_grain_access_control)';
 const mcpHeaders = {
   'content-type': 'application/json',
   accept: 'application/json, text/event-stream',

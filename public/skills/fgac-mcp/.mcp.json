@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "fgac": {
+      "type": "http",
+      "url": "https://fgac.ai/api/mcp"
+    }
+  }
+}

@@ -3,10 +3,10 @@
   "name": "ai.fgac/fgac",
   "title": "FGAC.ai: Multiple Gmail Accounts, Google Sheets & Docs",
   "description": "Multiple Gmail accounts, editable Google Sheets & Docs for AI agents. Deny-by-default access rules.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "websiteUrl": "https://fgac.ai",
   "repository": {
-    "url": "https://github.com/kyesh/fine_grain_access_control",
+    "url": "https://github.com/fgac-ai/fine_grain_access_control",
     "source": "github"
   },
   "icons": [

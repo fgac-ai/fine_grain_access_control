@@ -375,7 +375,7 @@ deploy of that git branch. Facts that are easy to get wrong:
 
 ## This Repository Is Public
 
-`kyesh/fine_grain_access_control` is open source. Everything pushed or posted — code,
+`fgac-ai/fine_grain_access_control` is open source. Everything pushed or posted — code,
 commit messages, issues, PRs, comments, releases — is world-readable, permanently and
 immediately.
 

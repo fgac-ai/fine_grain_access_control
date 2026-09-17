@@ -13,6 +13,11 @@
       "name": "fgac",
       "source": "./public/skills/claude-code-cli",
       "description": "Secure Google Workspace access (Gmail, Sheets) via the FGAC.ai proxy with fine-grained access control"
+    },
+    {
+      "name": "fgac-mcp",
+      "source": "./public/skills/fgac-mcp",
+      "description": "FGAC.ai hosted MCP server (Gmail, Sheets, Docs) with deny-by-default access rules — OAuth on first connect, no local scripts"
     }
   ]
 }

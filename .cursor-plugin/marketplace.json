@@ -1,0 +1,14 @@
+{
+  "name": "fgac-ai",
+  "owner": { "name": "FGAC.ai", "email": "support@fgac.ai" },
+  "plugins": [
+    {
+      "name": "fgac-mcp",
+      "source": "./public/skills/fgac-mcp",
+      "description": "FGAC.ai hosted MCP server: multiple Gmail accounts, editable Google Sheets & Docs for AI agents, behind deny-by-default access rules. OAuth sign-in on first connect, nothing to install.",
+      "homepage": "https://fgac.ai/docs",
+      "license": "MIT-0",
+      "keywords": ["fgac", "fgac.ai", "fgac gmail", "fgac google workspace", "fgac mcp"]
+    }
+  ]
+}
