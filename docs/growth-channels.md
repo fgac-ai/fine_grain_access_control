@@ -13,7 +13,7 @@ Listing copy source of truth: `docs/connector_submission/listing_copy.md`
 | surface | submitted | status | listing link |
 |---|---|---|---|
 | Claude connector directory | 2026-08-16 | **live** | https://claude.ai/directory (search "FGAC") |
-| Official MCP Registry (registry.modelcontextprotocol.io) | 2026-09-10 | **live** — `ai.fgac/fgac` v0.1.0 (renamed 2026-09-10 from `ai.fgac/google-workspace`, which is marked `deleted`: a Google trademark must not be the server's own name — descriptive use in title/description is fine) via the **MCP Registry Publish** action | https://registry.modelcontextprotocol.io/v0.1/servers?search=ai.fgac |
+| Official MCP Registry (registry.modelcontextprotocol.io) | 2026-09-10 | **live** — `ai.fgac/fgac` v0.1.1 (republished 2026-09-17 with the `fgac-ai` repository URL after the org transfer; v0.1.0 (renamed 2026-09-10 from `ai.fgac/google-workspace`, which is marked `deleted`: a Google trademark must not be the server's own name — descriptive use in title/description is fine) via the **MCP Registry Publish** action | https://registry.modelcontextprotocol.io/v0.1/servers?search=ai.fgac |
 | GitHub MCP Registry (github.com/mcp) | 2026-09-10 (via official) | pending propagation — auto-ingests from the official registry, no separate submission (VS Code / Copilot `/mcp search` consumes it); check within a day and paste the link | https://github.com/mcp |
 | Smithery | 2026-09-10 | **live** — `fgac/fgac` (19 tools indexed, ranks in Smithery search for "fgac"; SmitheryBot scanned the endpoint 2026-09-10, the day Clerk CIMD went live, and its `smithery-probe` client re-checks it a few times a day). Smithery fronts our remote through its hosted proxy `https://fgac--fgac.run.tools` — a Smithery-originated user shows up in `mcp_auth_attempt` / `mcp_client_initialize` as a non-Anthropic `client_name` or user agent, never as `Claude-User`; as of 2026-09-16 none has (probe traffic only, `useCount` is null on their API). `/.well-known/mcp/server-card.json` remains the fallback card | https://smithery.ai/server/fgac/fgac |
 | ChatGPT Plugin directory | — | pending (30–120 day review, no fee; see memory note "OpenAI Plugin Directory") | https://chatgpt.com/plugins |
@@ -21,8 +21,8 @@ Listing copy source of truth: `docs/connector_submission/listing_copy.md`
 | PulseMCP | — | optional, not submitted — submit button on the site | https://www.pulsemcp.com/submit |
 | Glama | — | optional — `/.well-known/glama.json` (maintainer: support@fgac.ai) is served; claim at https://glama.ai/mcp/servers | https://glama.ai/mcp/servers |
 | awesome-mcp-servers (mcpservers.org) | — | optional, not submitted | https://mcpservers.org/submit |
-| xAI plugin marketplace (Grok Build) | — | **ready to submit** — plugin package at `public/skills/fgac-mcp/` (manifest + hosted MCP entry + skill, no code); PR to `xai-org/plugin-marketplace` from a fork under the `fgac-ai` org (see §7) | https://github.com/xai-org/plugin-marketplace |
-| Cursor Marketplace (also Grok Bot's Plugins pane) | — | **ready to submit** — same package; list on cursor.directory first, then the publish form (see §7) | https://cursor.com/marketplace |
+| xAI plugin marketplace (Grok Build) | 2026-09-17 | **submitted** — PR https://github.com/xai-org/plugin-marketplace/pull/766 from the `fgac-ai/plugin-marketplace` fork, pinned to main `952a187`; Socket scan green, Semgrep + catalog validation awaiting first-contributor workflow approval; third-party merges took 3–19 days in Sep 2026 | https://github.com/xai-org/plugin-marketplace |
+| Cursor Marketplace (also Grok Bot's Plugins pane) | — | **blocked on a Cursor sign-in** — https://cursor.com/marketplace/publish is a "plugin publisher application" behind a Cursor account login (user action); cursor.directory listing pending the same | https://cursor.com/marketplace |
 
 Update the *submitted* and *status* columns as each step lands.
 
