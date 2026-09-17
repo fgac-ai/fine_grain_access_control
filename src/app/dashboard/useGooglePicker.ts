@@ -158,7 +158,7 @@ export function useGooglePicker(
       if (!tokenData.hasDriveFileScope) {
         if (fromOAuthReturn) {
           failFlow('oauth_return_scope_missing', 'drive.file still missing after consent',
-            `Google did not grant ${kind === 'sheet' ? 'Sheets' : 'Docs'} access on that pass — this usually means the consent screen was closed early, or a second authorization round is needed. Click the pick button again to retry; if it keeps happening, reconnect Google from Dashboard → Accounts.`);
+            `Google did not grant ${kindDesc.productName} access on that pass — this usually means the consent screen was closed early, or a second authorization round is needed. Click the pick button again to retry; if it keeps happening, reconnect Google from Dashboard → Accounts.`);
           return;
         }
 

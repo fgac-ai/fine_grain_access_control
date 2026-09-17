@@ -4,7 +4,8 @@ import { headers } from "next/headers";
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { classifyApproveClient, type ApproveClient } from "@/lib/approveClientClass";
 import { EMAIL_LINK_SOURCE_PARAM, EMAIL_LINK_SOURCE_VALUE } from "@/lib/approvalNotifyCopy";
-import { describeApproval, peekApprovalParams, APPROVAL_PARAMS, type ApprovalPayload, type ApprovalSearchParams } from "@/lib/approvalLinks";
+import { describeApproval, peekApprovalParams, approvalFileKind, approvalFileId, APPROVAL_PARAMS, type ApprovalPayload, type ApprovalSearchParams } from "@/lib/approvalLinks";
+import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS } from "@/lib/driveFileKinds";
 import { markApprovalRequestOpened, getApprovalRequestResourceName } from "@/lib/approvalRequests";
 import { captureServerEvent } from "@/lib/posthogServer";
 import { approveMagicLink, resolveApprovalLink } from "../actions";
@@ -83,7 +84,7 @@ export default async function ApprovePage({
 }: {
   searchParams: Promise<{
     a?: string; k?: string; r?: string; s?: string;
-    result?: string; message?: string; sid?: string; did?: string; notice?: string;
+    result?: string; message?: string; sid?: string; did?: string; pid?: string; notice?: string;
     /** `email` when the link came from FGAC's own notification email (approvalNotify.ts). */
     src?: string;
   }>;
@@ -95,12 +96,14 @@ export default async function ApprovePage({
     // Per-file (sheets/docs) approvals settle asynchronously on Google's
     // side — verify the grant is live before claiming the agent can retry
     // (grant-race fix).
-    if (params.sid || params.did) {
+    // The settle param is the kind's own setup id param (sid / did / pid).
+    const settleKind = ACTIVE_DRIVE_FILE_KINDS.find(k => params[DRIVE_FILE_KINDS[k].setupIdParam as "sid" | "did" | "pid"]);
+    if (settleKind) {
       return (
         <Card>
           <ApprovedSettling
-            kind={params.sid ? "sheet" : "doc"}
-            fileId={(params.sid || params.did)!}
+            kind={settleKind}
+            fileId={params[DRIVE_FILE_KINDS[settleKind].setupIdParam as "sid" | "did" | "pid"]!}
             message={params.message || "The permission has been granted."}
           />
         </Card>
@@ -256,23 +259,18 @@ export default async function ApprovePage({
     const q = linkQuery(submitted);
     const result = await approveMagicLink(submitted, rw, picked);
     if (result.ok) {
-      if (result.needsSheetsGrant) {
+      if (result.needsFileGrant) {
         // Fallback only (verification was inconclusive at page load): the
-        // rule exists but Google can't reach the sheet — finish in recovery.
-        const s = new URLSearchParams({ sid: result.needsSheetsGrant.spreadsheetId, from: "approval" });
-        if (result.needsSheetsGrant.resourceName) s.set("name", result.needsSheetsGrant.resourceName);
-        redirect(`/dashboard/sheets-setup?${s.toString()}`);
+        // rule exists but Google can't reach the file — finish in the kind's
+        // recovery page.
+        const d = DRIVE_FILE_KINDS[result.needsFileGrant.kind];
+        const s = new URLSearchParams({ [d.setupIdParam]: result.needsFileGrant.fileId, from: "approval" });
+        if (result.needsFileGrant.resourceName) s.set("name", result.needsFileGrant.resourceName);
+        redirect(`${d.setupPath}?${s.toString()}`);
       }
-      if (result.needsDocsGrant) {
-        const s = new URLSearchParams({ did: result.needsDocsGrant.documentId, from: "approval" });
-        if (result.needsDocsGrant.resourceName) s.set("name", result.needsDocsGrant.resourceName);
-        redirect(`/dashboard/docs-setup?${s.toString()}`);
-      }
-      const settle = result.grantedSpreadsheetId
-        ? `&sid=${encodeURIComponent(result.grantedSpreadsheetId)}`
-        : result.grantedDocumentId
-          ? `&did=${encodeURIComponent(result.grantedDocumentId)}`
-          : "";
+      const settle = result.grantedFile
+        ? `&${DRIVE_FILE_KINDS[result.grantedFile.kind].setupIdParam}=${encodeURIComponent(result.grantedFile.fileId)}`
+        : "";
       redirect(`/dashboard/approve?result=ok&message=${encodeURIComponent(result.description)}${settle}`);
     }
     if (result.retryable) {
@@ -285,8 +283,10 @@ export default async function ApprovePage({
     redirect(`/dashboard/approve?result=error&message=${encodeURIComponent(result.reason)}&${q}`);
   }
 
-  const isSheets = (p.action === "sheets_expose" || p.action === "sheets_write") && p.spreadsheetId;
-  const isDocs = (p.action === "docs_expose" || p.action === "docs_write") && p.documentId;
+  // Per-file approvals (sheets / docs / slides) share one picker-first flow.
+  const fileKind = approvalFileKind(p.action);
+  const fileId = approvalFileId(p);
+  const isFile = !!(fileKind && fileId);
 
   // The Google account whose Drive the Picker will list — the pick-first
   // panel names it. Two of this week's abandoned approvals (2026-09-09 review)
@@ -294,7 +294,7 @@ export default async function ApprovePage({
   // connected to FGAC: the Picker could never show it, they cancelled within
   // seconds, and nothing on the page said which account it was searching.
   let connectedGoogleEmail: string | null = null;
-  if (isSheets || isDocs) {
+  if (isFile) {
     try {
       const cu = await currentUser();
       connectedGoogleEmail = cu?.externalAccounts.find(
@@ -317,11 +317,11 @@ export default async function ApprovePage({
           {params.notice}
         </div>
       )}
-      {isSheets || isDocs ? (
+      {isFile ? (
         <FileApprovalFlow
           link={link}
-          kind={isSheets ? "sheet" : "doc"}
-          fileId={(isSheets ? p.spreadsheetId : p.documentId)!}
+          kind={fileKind!}
+          fileId={fileId!}
           resourceName={p.resourceName || null}
           connectedGoogleEmail={connectedGoogleEmail}
           level={p.action.endsWith("_write") ? "write" : "expose"}

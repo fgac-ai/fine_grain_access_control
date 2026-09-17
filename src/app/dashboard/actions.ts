@@ -12,6 +12,7 @@ import { revalidatePath } from "next/cache";
 import { validateRulePattern, patternKind, assertStorablePattern } from "@/lib/rulePatterns";
 import { slugifyProfileLabel } from "@/lib/profileSlugs";
 import type { ApprovalSearchParams, ApprovalPayload } from "@/lib/approvalLinks";
+import { DRIVE_FILE_KINDS, kindForService, kindForActionType, kindForApprovalAction, type DriveFileKind } from "@/lib/driveFileKinds";
 import * as jose from "jose";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -427,7 +428,7 @@ export async function createRule(formData: FormData): Promise<RuleActionResult> 
   let finalRegexPattern: string | null = null;
   let targetResourceId: string | null = null;
 
-  if (service === 'sheets' || service === 'docs') {
+  if (kindForService(service)) {
     targetResourceId = rawPattern;
   } else {
     finalRegexPattern = rawPattern;
@@ -477,22 +478,23 @@ export async function createRule(formData: FormData): Promise<RuleActionResult> 
   // verifies against. Record the grant state at rule birth so these rules are
   // visible in the funnel instead of silently broken. Telemetry only: a
   // Google hiccup must never fail rule creation.
-  if ((service === 'sheets' || service === 'docs') && targetResourceId) {
+  if (kindForService(service) && targetResourceId) {
     try {
       const { verifyFileGrant, getOwnerGoogleToken } = await import("@/lib/driveFileGrantCheck");
       const { captureServerEvent } = await import("@/lib/posthogServer");
-      const kind = service === 'sheets' ? ('sheet' as const) : ('doc' as const);
+      const kind = kindForService(service)!;
+      const d = DRIVE_FILE_KINDS[kind];
       const token = await getOwnerGoogleToken(dbUser.clerkUserId);
       const grant = token
         ? await verifyFileGrant(kind, token, targetResourceId)
         : { state: 'missing' as const };
       captureServerEvent(
         dbUser.clerkUserId,
-        kind === 'sheet' ? "sheets_grant_verification" : "docs_grant_verification",
+        d.grantAnalytics.verificationEvent,
         {
           result: grant.state,
           via: "dashboard_manual",
-          [kind === 'sheet' ? "spreadsheet_id" : "document_id"]: targetResourceId,
+          [d.createdAnalytics.idProp]: targetResourceId,
         },
       );
     } catch (err) {
@@ -526,7 +528,7 @@ export async function updateRule(formData: FormData): Promise<RuleActionResult> 
   let finalRegexPattern: string | null = null;
   let targetResourceId: string | null = null;
 
-  if (service === 'sheets' || service === 'docs') {
+  if (kindForService(service)) {
     targetResourceId = rawPattern;
   } else {
     finalRegexPattern = rawPattern;
@@ -560,7 +562,7 @@ export async function updateRule(formData: FormData): Promise<RuleActionResult> 
     service,
     actionType,
     regexPattern: finalRegexPattern,
-    targetResourceId: (service === 'sheets' || service === 'docs') ? targetResourceId : rule.targetResourceId,
+    targetResourceId: kindForService(service) ? targetResourceId : rule.targetResourceId,
     targetEmail: targetEmail || null,
   }).where(eq(accessRules.id, ruleId));
 
@@ -610,18 +612,25 @@ const SHEET_ACTION_TYPES = ['sheet_read', 'sheet_read_write', 'sheet_block'] as 
  */
 /**
  * Persist files picked in the Google Picker as access rules (shared by the
- * sheets and docs exposure flows).
+ * sheets, docs, and slides exposure flows).
  *
  * With a profileId the exposure is scoped to that profile; without one it is
  * global. Existing rules are never narrowed: a global rule stays global, and a
  * profile-scoped rule gains the new assignment instead of replacing the set.
  */
-async function exposeFilesFromPicker(
-  kind: 'sheet' | 'doc',
+export async function exposeFilesOfKindFromPicker(
+  kind: DriveFileKind,
   picked: { id: string; name: string }[],
   profileId?: string,
 ) {
-  const { DRIVE_FILE_KINDS } = await import("@/lib/driveFileKinds");
+  return exposeFilesFromPicker(kind, picked, profileId);
+}
+
+async function exposeFilesFromPicker(
+  kind: DriveFileKind,
+  picked: { id: string; name: string }[],
+  profileId?: string,
+) {
   const d = DRIVE_FILE_KINDS[kind];
   const dbUser = await getDbUser();
 
@@ -708,14 +717,12 @@ export async function exposeDocsFromPicker(
   return exposeFilesFromPicker('doc', picked, profileId);
 }
 
-const DOC_ACTION_TYPES = ['doc_read', 'doc_read_write', 'doc_block'] as const;
-
 export async function setSheetRulePermission(ruleId: string, actionType: string) {
   const dbUser = await getDbUser();
 
-  const isSheetType = SHEET_ACTION_TYPES.includes(actionType as typeof SHEET_ACTION_TYPES[number]);
-  const isDocType = DOC_ACTION_TYPES.includes(actionType as typeof DOC_ACTION_TYPES[number]);
-  if (!isSheetType && !isDocType) {
+  // Any per-file kind's permission family (sheet_* / doc_* / slide_*).
+  const kind = kindForActionType(actionType);
+  if (!kind) {
     throw new Error(`Invalid file permission: ${actionType}`);
   }
 
@@ -724,8 +731,8 @@ export async function setSheetRulePermission(ruleId: string, actionType: string)
     throw new Error("Unauthorized or Rule not found");
   }
   // The action-type family must match the rule's service — a sheets rule can
-  // never end up with doc_* permissions or vice versa.
-  if (!(rule.service === 'sheets' && isSheetType) && !(rule.service === 'docs' && isDocType)) {
+  // never end up with doc_* or slide_* permissions or vice versa.
+  if (rule.service !== DRIVE_FILE_KINDS[kind].service) {
     throw new Error("Permission type does not match the rule's service");
   }
 
@@ -919,18 +926,15 @@ export type MagicApprovalResult =
       ok: true;
       description: string;
       /** Set when the FGAC rule was created but Google has no drive.file
-       * grant for the sheet yet — the approve page must route the user into
-       * the Picker recovery flow instead of claiming the agent can retry. */
-      needsSheetsGrant?: { spreadsheetId: string; resourceName?: string };
-      /** Docs twin of needsSheetsGrant (routes to /dashboard/docs-setup). */
-      needsDocsGrant?: { documentId: string; resourceName?: string };
-      /** Set on successful sheets approvals: the primary spreadsheet a rule
-       * was created for. The approve page's success card polls the Google
-       * grant for this id before telling the user "the agent can retry now"
-       * (drive.file grants are eventually consistent — see sheetsGrantCheck). */
-      grantedSpreadsheetId?: string;
-      /** Docs twin of grantedSpreadsheetId. */
-      grantedDocumentId?: string;
+       * grant for the file yet — the approve page must route the user into
+       * the kind's Picker recovery page (`DRIVE_FILE_KINDS[kind].setupPath`)
+       * instead of claiming the agent can retry. */
+      needsFileGrant?: { kind: DriveFileKind; fileId: string; resourceName?: string };
+      /** Set on successful per-file approvals: the primary file a rule was
+       * created for. The approve page's success card polls the Google grant
+       * for this id before telling the user "the agent can retry now"
+       * (drive.file grants are eventually consistent — see driveFileGrantCheck). */
+      grantedFile?: { kind: DriveFileKind; fileId: string };
     }
   | {
       ok: false;
@@ -955,7 +959,7 @@ export type MagicApprovalResult =
  * naming the grant, the same bar as re-adding the rule in the dashboard.
  */
 async function grantActiveForApproval(
-  p: { action: string; userId: string; recipient?: string; spreadsheetId?: string; documentId?: string },
+  p: { action: string; userId: string; recipient?: string; spreadsheetId?: string; documentId?: string; presentationId?: string },
   keyId: string,
 ): Promise<boolean> {
   const assignedOrGlobal = async (ruleId: string): Promise<boolean> => {
@@ -979,31 +983,21 @@ async function grantActiveForApproval(
     return false;
   }
 
-  if ((p.action === "sheets_expose" || p.action === "sheets_write") && p.spreadsheetId) {
-    const needed = p.action === "sheets_write"
-      ? ["sheet_read_write"]
-      : ["sheet_read", "sheet_read_write"];
+  // Per-file grants, any kind: the action name resolves the kind, the kind's
+  // id key names the file, and its action types say which levels satisfy it.
+  const fileKind = kindForApprovalAction(p.action);
+  const fileId = fileKind ? p[DRIVE_FILE_KINDS[fileKind].idKey] : undefined;
+  if (fileKind && fileId) {
+    const d = DRIVE_FILE_KINDS[fileKind];
+    const needed = p.action === d.approvalActions.write
+      ? [d.actionTypes.readWrite]
+      : [d.actionTypes.read, d.actionTypes.readWrite];
     const rules = await db.select().from(accessRules).where(and(
       eq(accessRules.userId, p.userId),
-      eq(accessRules.service, "sheets"),
+      eq(accessRules.service, d.service),
     ));
     for (const r of rules) {
-      if (r.targetResourceId !== p.spreadsheetId || !needed.includes(r.actionType)) continue;
-      if (await assignedOrGlobal(r.id)) return true;
-    }
-    return false;
-  }
-
-  if ((p.action === "docs_expose" || p.action === "docs_write") && p.documentId) {
-    const needed = p.action === "docs_write"
-      ? ["doc_read_write"]
-      : ["doc_read", "doc_read_write"];
-    const rules = await db.select().from(accessRules).where(and(
-      eq(accessRules.userId, p.userId),
-      eq(accessRules.service, "docs"),
-    ));
-    for (const r of rules) {
-      if (r.targetResourceId !== p.documentId || !needed.includes(r.actionType)) continue;
+      if (r.targetResourceId !== fileId || !needed.includes(r.actionType)) continue;
       if (await assignedOrGlobal(r.id)) return true;
     }
     return false;
@@ -1112,7 +1106,7 @@ export async function resolveApprovalLink(params: ApprovalSearchParams): Promise
  * failing the user's first approval (observed live 2026-08-19).
  */
 async function applyFileGrantApproval(opts: {
-  kind: "sheet" | "doc";
+  kind: DriveFileKind;
   dbUser: { id: string; clerkUserId: string };
   key: { id: string };
   p: { requestId: string; action: string; resourceName?: string };
@@ -1122,22 +1116,19 @@ async function applyFileGrantApproval(opts: {
   describe: () => string;
 }): Promise<MagicApprovalResult> {
   const { kind, dbUser, key, p, fileId, readWrite, picked, describe } = opts;
-  const { DRIVE_FILE_KINDS } = await import("@/lib/driveFileKinds");
   const { verifyFileGrant, getOwnerGoogleToken } = await import("@/lib/driveFileGrantCheck");
   const { markApprovalRequestApproved } = await import("@/lib/approvalRequests");
   const { captureServerEvent } = await import("@/lib/posthogServer");
   const d = DRIVE_FILE_KINDS[kind];
-  // Kind-specific analytics/copy: sheets keeps its historical event and prop
-  // names; the short noun matches the pre-docs sheets copy ("sheet(s)").
-  const verificationEvent = kind === "sheet" ? "sheets_grant_verification" : "docs_grant_verification";
-  const idProp = kind === "sheet" ? "spreadsheet_id" : "document_id";
-  const short = kind === "sheet" ? "sheet" : "document";
+  // Kind-specific analytics/copy from the descriptor: sheets keeps its
+  // historical event and prop names and its short noun ("sheet(s)").
+  const verificationEvent = d.grantAnalytics.verificationEvent;
+  const idProp = d.createdAnalytics.idProp;
+  const short = d.shortNoun;
   const googleToken = await getOwnerGoogleToken(dbUser.clerkUserId);
 
   const grantedResult = (grantedId: string, description: string): MagicApprovalResult =>
-    kind === "sheet"
-      ? { ok: true, description, grantedSpreadsheetId: grantedId }
-      : { ok: true, description, grantedDocumentId: grantedId };
+    ({ ok: true, description, grantedFile: { kind, fileId: grantedId } });
 
   const insertFileRule = async (id: string, name: string | null) => {
     const [rule] = await db.insert(accessRules).values({
@@ -1167,15 +1158,13 @@ async function applyFileGrantApproval(opts: {
     // one production link wrote 11 rules for one sheet in 12 s. Picks whose
     // grant is already live are settled here without a Google call; if that
     // is all of them, the submit is a replay and writes nothing.
-    const fileAction = kind === "sheet"
-      ? (readWrite ? "sheets_write" : "sheets_expose")
-      : (readWrite ? "docs_write" : "docs_expose");
+    const fileAction = readWrite ? d.approvalActions.write : d.approvalActions.expose;
     const alreadyActive: string[] = [];
     const toVerify: { id: string; name?: string }[] = [];
     for (const s of picked.slice(0, 10)) {
       if (typeof s?.id !== "string" || !s.id) continue;
       const active = await grantActiveForApproval(
-        { action: fileAction, userId: dbUser.id, ...(kind === "sheet" ? { spreadsheetId: s.id } : { documentId: s.id }) },
+        { action: fileAction, userId: dbUser.id, [d.idKey]: s.id },
         key.id,
       );
       if (active) alreadyActive.push(s.id); else toVerify.push(s);
@@ -1268,9 +1257,7 @@ async function applyFileGrantApproval(opts: {
     return {
       ok: true,
       description: describe(),
-      ...(kind === "sheet"
-        ? { needsSheetsGrant: { spreadsheetId: fileId, resourceName: p.resourceName || undefined } }
-        : { needsDocsGrant: { documentId: fileId, resourceName: p.resourceName || undefined } }),
+      needsFileGrant: { kind, fileId, resourceName: p.resourceName || undefined },
     };
   }
   await markApprovalRequestApproved(p.requestId);
@@ -1351,10 +1338,11 @@ export async function approveMagicLink(
   // read→write upgrade choice, so upgrading an existing read grant is NOT
   // short-circuited as "already approved".
   const wantsWrite = sheetsWriteChoice === true;
+  const linkKind = kindForApprovalAction(p.action);
   const effectiveAction =
-    p.action === "sheets_expose" && wantsWrite ? "sheets_write"
-      : p.action === "docs_expose" && wantsWrite ? "docs_write"
-        : p.action;
+    linkKind && wantsWrite && p.action === DRIVE_FILE_KINDS[linkKind].approvalActions.expose
+      ? DRIVE_FILE_KINDS[linkKind].approvalActions.write
+      : p.action;
   if (!pickedSheets?.length && await grantActiveForApproval({ ...p, action: effectiveAction }, key.id)) {
     // Replays are counted, not hidden: approval_link_approved fires only when a
     // grant is written, so per-link conversion stays a uniq(request_id) join
@@ -1380,21 +1368,12 @@ export async function approveMagicLink(
     await db.insert(keyRuleAssignments).values({ proxyKeyId: key.id, accessRuleId: rule.id });
   } else if (p.action === "send_all") {
     await grantSendToAnyone(dbUser.id, key.id);
-  } else if ((p.action === "sheets_expose" || p.action === "sheets_write") && p.spreadsheetId) {
+  } else if (linkKind && p[DRIVE_FILE_KINDS[linkKind].idKey]) {
     return applyFileGrantApproval({
-      kind: "sheet",
+      kind: linkKind,
       dbUser, key, p,
-      fileId: p.spreadsheetId,
-      readWrite: p.action === "sheets_write" || sheetsWriteChoice === true,
-      picked: pickedSheets,
-      describe: () => describeApproval(p),
-    });
-  } else if ((p.action === "docs_expose" || p.action === "docs_write") && p.documentId) {
-    return applyFileGrantApproval({
-      kind: "doc",
-      dbUser, key, p,
-      fileId: p.documentId,
-      readWrite: p.action === "docs_write" || sheetsWriteChoice === true,
+      fileId: p[DRIVE_FILE_KINDS[linkKind].idKey]!,
+      readWrite: p.action === DRIVE_FILE_KINDS[linkKind].approvalActions.write || sheetsWriteChoice === true,
       picked: pickedSheets,
       describe: () => describeApproval(p),
     });

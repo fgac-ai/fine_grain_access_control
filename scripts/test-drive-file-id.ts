@@ -68,6 +68,11 @@ expect('sheets URL as documentId → file_id_wrong_kind', parseDriveFileId(`http
 expect('wrong-kind reason names the sheets tools + the id', parseDriveFileId(`https://docs.google.com/spreadsheets/d/${SHEET}/edit`, 'doc'), (p: P) => !p.ok && p.reason.includes('sheets_') && p.reason.includes(SHEET));
 expect('docs URL as spreadsheetId → file_id_wrong_kind', parseDriveFileId(`https://docs.google.com/document/d/${DOC}/edit`, 'sheet'), refused('file_id_wrong_kind'));
 expect('wrong-kind reason names docs_read_document + the id', parseDriveFileId(`https://docs.google.com/document/d/${DOC}/edit`, 'sheet'), (p: P) => !p.ok && p.reason.includes('docs_read_document') && p.reason.includes(DOC));
+expect('slides URL as documentId → file_id_wrong_kind', parseDriveFileId(`https://docs.google.com/presentation/d/${SHEET}/edit#slide=id.p`, 'doc'), refused('file_id_wrong_kind'));
+expect('wrong-kind reason names slides_get_presentation + presentationId', parseDriveFileId(`https://docs.google.com/presentation/d/${SHEET}/edit`, 'doc'), (p: P) => !p.ok && p.reason.includes('slides_get_presentation') && p.reason.includes('presentationId') && p.reason.includes(SHEET));
+expect('docs URL as presentationId → file_id_wrong_kind', parseDriveFileId(`https://docs.google.com/document/d/${DOC}/edit`, 'slide'), refused('file_id_wrong_kind'));
+expect('slides URL as presentationId → slide id', parseDriveFileId(`https://docs.google.com/presentation/d/${DOC}/edit?usp=sharing`, 'slide'), ok(DOC, 'url'));
+expect('bare id as presentationId → bare', parseDriveFileId(DOC, 'slide'), ok(DOC, 'bare'));
 
 console.log('parseDriveFileId — malformed values are refused without a link:');
 expect('empty → file_id_malformed', parseDriveFileId('', 'doc'), refused('file_id_malformed'));

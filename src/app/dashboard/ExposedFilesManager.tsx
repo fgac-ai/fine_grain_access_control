@@ -47,9 +47,23 @@ const KIND_UI = {
     rulesKey: 'docsRules',
     noun: 'doc',
   },
+  slide: {
+    title: 'Google Slides Access Rules',
+    subject: 'Google Slides',
+    addLabel: 'Add Google Slides +',
+    idHeader: 'Presentation ID',
+    emptyTitle: 'No Google Slides exposed yet',
+    emptyBody: 'Click "Add Google Slides +" to pick presentations using Google Picker and define Read or Read/Write permissions.',
+    accent: 'amber',
+    iconPath: 'M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-1 13H6V8h12v8zm-9-6h6v4H9v-4z',
+    grantPath: '/api/rules/grant-slides-access',
+    verifyPath: '/api/rules/verify-slides-access',
+    rulesKey: 'slidesRules',
+    noun: 'presentation',
+  },
 } as const;
 
-export function ExposedFilesManager({ kind, activeKeys = [] }: { kind: 'sheet' | 'doc'; activeKeys?: ProxyKeyInfo[] }) {
+export function ExposedFilesManager({ kind, activeKeys = [] }: { kind: DriveFileKind; activeKeys?: ProxyKeyInfo[] }) {
   void activeKeys;
   const ui = KIND_UI[kind];
   const d = DRIVE_FILE_KINDS[kind];
@@ -137,14 +151,18 @@ export function ExposedFilesManager({ kind, activeKeys = [] }: { kind: 'sheet' |
     }
   };
 
-  const accentText = ui.accent === 'emerald' ? 'text-emerald-600' : 'text-blue-600';
+  const accentText = ui.accent === 'emerald' ? 'text-emerald-600' : ui.accent === 'amber' ? 'text-amber-600' : 'text-blue-600';
   const accentButton = ui.accent === 'emerald'
     ? 'bg-emerald-600 hover:bg-emerald-500'
-    : 'bg-blue-600 hover:bg-blue-500';
+    : ui.accent === 'amber'
+      ? 'bg-amber-600 hover:bg-amber-500'
+      : 'bg-blue-600 hover:bg-blue-500';
   const accentStatus = ui.accent === 'emerald'
     ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-    : 'bg-blue-50 border-blue-200 text-blue-800';
-  const accentDot = ui.accent === 'emerald' ? 'bg-emerald-500' : 'bg-blue-500';
+    : ui.accent === 'amber'
+      ? 'bg-amber-50 border-amber-200 text-amber-800'
+      : 'bg-blue-50 border-blue-200 text-blue-800';
+  const accentDot = ui.accent === 'emerald' ? 'bg-emerald-500' : ui.accent === 'amber' ? 'bg-amber-500' : 'bg-blue-500';
 
   return (
     <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm mb-6">

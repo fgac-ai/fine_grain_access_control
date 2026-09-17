@@ -32,6 +32,8 @@ const REQUIRED_FALLBACK_REF: Record<string, string> = {
   sheets_edit: 'google_api_modify',
   docs_read_document: 'docs_edit',
   docs_edit: 'google_api_modify',
+  slides_get_presentation: 'slides_edit',
+  slides_edit: 'google_api_modify',
 };
 
 const MAX_DESCRIPTION_CHARS = 1500;

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, type DriveFileKind } from '@/lib/driveFileKinds';
 import { db } from '@/db';
 import { users, proxyKeys, emailDelegations, keyEmailAccess, accessRules, keyRuleAssignments } from '@/db/schema';
 import { eq, and } from 'drizzle-orm';
@@ -183,8 +184,8 @@ async function trackedProxyRequest(request: NextRequest, params: { path: string[
   const response = await handleProxyRequest(request, params, telemetry);
 
   const fullPath = params.path.join('/');
-  const service = fullPath.includes('spreadsheets') ? 'sheets'
-    : fullPath.includes('documents') ? 'docs'
+  const service = proxyFileKind(fullPath)
+    ? DRIVE_FILE_KINDS[proxyFileKind(fullPath)!].service
     : /^drive\/v[23]\//.test(fullPath) ? 'drive'
     : 'gmail';
   // 504 is only ever minted by forwardToGoogle's timeout branch (Google's own
@@ -223,13 +224,20 @@ function extractGmailUserId(fullPath: string): string {
   return match ? decodeURIComponent(match[1]) : 'me';
 }
 
-function extractSheetsSpreadsheetId(fullPath: string): string | null {
-  const match = fullPath.match(/(?:v4\/spreadsheets|sheets\/v4\/spreadsheets)\/([^/?:#]+)/);
-  return match ? decodeURIComponent(match[1]) : null;
+/** The per-file kind a proxied path addresses (Sheets/Docs/Slides), if any. */
+function proxyFileKind(fullPath: string): DriveFileKind | null {
+  for (const kind of ACTIVE_DRIVE_FILE_KINDS) {
+    if (fullPath.includes(DRIVE_FILE_KINDS[kind].apiCollection)) return kind;
+  }
+  return null;
 }
 
-function extractDocsDocumentId(fullPath: string): string | null {
-  const match = fullPath.match(/(?:v1\/documents|docs\/v1\/documents)\/([^/?:#]+)/);
+/** File id after the kind's collection segment (`v4/spreadsheets/{id}`,
+ * `docs/v1/documents/{id}`, `slides/v1/presentations/{id}`), verb excluded. */
+function extractProxyFileId(kind: DriveFileKind, fullPath: string): string | null {
+  const d = DRIVE_FILE_KINDS[kind];
+  const re = new RegExp(`(?:v\\d+\\/${d.apiCollection}|${d.apiPathPrefix}\\/v\\d+\\/${d.apiCollection})\\/([^/?:#]+)`);
+  const match = fullPath.match(re);
   return match ? decodeURIComponent(match[1]) : null;
 }
 
@@ -326,25 +334,26 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
         const allAssignments = await db.select().from(keyRuleAssignments);
         const rulesWithAssignments = new Set(allAssignments.map(a => a.accessRuleId));
 
-        // A Drive file may be exposed as a spreadsheet OR a document — either
-        // kind's rule authorizes it; a block on either denies it.
-        const fileRules = [
-          ...applicableFileRules(allUserRules, rulesWithAssignments, assignedRuleIds, 'sheets', fileId),
-          ...applicableFileRules(allUserRules, rulesWithAssignments, assignedRuleIds, 'docs', fileId),
-        ];
+        // A Drive file may be exposed as a spreadsheet, a document, or a
+        // presentation — any kind's rule authorizes it; a block on any denies it.
+        const fileRules = ACTIVE_DRIVE_FILE_KINDS.flatMap(k =>
+          applicableFileRules(allUserRules, rulesWithAssignments, assignedRuleIds, DRIVE_FILE_KINDS[k].service, fileId),
+        );
+        const blockTypes = new Set(ACTIVE_DRIVE_FILE_KINDS.map(k => DRIVE_FILE_KINDS[k].actionTypes.block));
+        const readWriteTypes = new Set(ACTIVE_DRIVE_FILE_KINDS.map(k => DRIVE_FILE_KINDS[k].actionTypes.readWrite));
 
         if (fileRules.length === 0) {
           return NextResponse.json({
             error: `Access Denied: File '${fileId}' is not exposed in FGAC rules for this API key.`
           }, { status: 403 });
         }
-        if (fileRules.some(r => r.actionType === 'sheet_block' || r.actionType === 'doc_block')) {
+        if (fileRules.some(r => blockTypes.has(r.actionType))) {
           return NextResponse.json({
             error: `Access Denied: Access to file '${fileId}' has been explicitly blocked.`
           }, { status: 403 });
         }
         const isMutating = request.method !== 'GET' && request.method !== 'HEAD';
-        if (isMutating && !fileRules.some(r => r.actionType === 'sheet_read_write' || r.actionType === 'doc_read_write')) {
+        if (isMutating && !fileRules.some(r => readWriteTypes.has(r.actionType))) {
           return NextResponse.json({
             error: `Access Denied: Write operations on file '${fileId}' are restricted to Read-Only.`
           }, { status: 403 });
@@ -353,15 +362,18 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
       }
     }
 
-    // ─── GOOGLE SHEETS PROXY HANDLER ─────────────────────────────────────────
-    if (fullPath.includes('spreadsheets')) {
-      // Sheets calls always use the key owner's own Google token — no
-      // delegated-mailbox path exists here.
+    // ─── PER-FILE PROXY HANDLER (Sheets / Docs / Slides) ─────────────────────
+    // One handler for every per-file kind, driven by the kind descriptor:
+    // deny-by-default per-file rules on the key owner's own Google token (no
+    // delegated-mailbox path exists here), then forward to the kind's API host.
+    const fileKind = proxyFileKind(fullPath);
+    if (fileKind) {
+      const d = DRIVE_FILE_KINDS[fileKind];
       telemetry.targetEmail = dbUser.email;
       telemetry.accountDelegated = false;
-      const spreadsheetId = extractSheetsSpreadsheetId(fullPath);
-      if (!spreadsheetId) {
-        return NextResponse.json({ error: 'Invalid Google Sheets API path' }, { status: 400 });
+      const fileId = extractProxyFileId(fileKind, fullPath);
+      if (!fileId) {
+        return NextResponse.json({ error: `Invalid ${d.productName} API path` }, { status: 400 });
       }
 
       const allUserRules = await db
@@ -378,31 +390,30 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
       const allAssignments = await db.select().from(keyRuleAssignments);
       const rulesWithAssignments = new Set(allAssignments.map(a => a.accessRuleId));
 
-      const applicableSheetsRules = applicableFileRules(
-        allUserRules, rulesWithAssignments, assignedRuleIds, 'sheets', spreadsheetId,
+      const applicableRules = applicableFileRules(
+        allUserRules, rulesWithAssignments, assignedRuleIds, d.service, fileId,
       );
+      const nounCap = d.noun.charAt(0).toUpperCase() + d.noun.slice(1);
 
-      if (applicableSheetsRules.length === 0) {
+      if (applicableRules.length === 0) {
         return NextResponse.json({
-          error: `Access Denied: Spreadsheet '${spreadsheetId}' is not exposed in FGAC rules for this API key.`
+          error: `Access Denied: ${nounCap} '${fileId}' is not exposed in FGAC rules for this API key.`
         }, { status: 403 });
       }
 
       // Check explicit block
-      const hasBlockRule = applicableSheetsRules.some(r => r.actionType === 'sheet_block');
-      if (hasBlockRule) {
+      if (applicableRules.some(r => r.actionType === d.actionTypes.block)) {
         return NextResponse.json({
-          error: `Access Denied: Access to spreadsheet '${spreadsheetId}' has been explicitly blocked.`
+          error: `Access Denied: Access to ${d.noun} '${fileId}' has been explicitly blocked.`
         }, { status: 403 });
       }
 
       // Check write restrictions
       const isMutatingRequest = request.method !== 'GET' && request.method !== 'HEAD';
       if (isMutatingRequest) {
-        const hasReadWritePermission = applicableSheetsRules.some(r => r.actionType === 'sheet_read_write');
-        if (!hasReadWritePermission) {
+        if (!applicableRules.some(r => r.actionType === d.actionTypes.readWrite)) {
           return NextResponse.json({
-            error: `Access Denied: Write operations on spreadsheet '${spreadsheetId}' are restricted to Read-Only.`
+            error: `Access Denied: Write operations on ${d.noun} '${fileId}' are restricted to Read-Only.`
           }, { status: 403 });
         }
       }
@@ -416,87 +427,9 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
         }, { status: 403 });
       }
 
-      // Forward to Google Sheets API
-      const cleanPath = fullPath.replace(/^sheets\//, '');
-      const googleUrl = `https://sheets.googleapis.com/${cleanPath}${request.nextUrl.search}`;
-      const headers = new Headers(request.headers);
-      headers.set('Authorization', `Bearer ${realGoogleToken.token}`);
-      headers.delete('host');
-
-      let requestBody: ArrayBuffer | undefined = undefined;
-      if (isMutatingRequest) {
-        requestBody = await request.clone().arrayBuffer();
-      }
-
-      const forward = await forwardToGoogle(googleUrl, {
-        method: request.method,
-        headers,
-        body: requestBody,
-      }, telemetry);
-      if (!forward.ok) return forward.response;
-      return passthroughResponse(forward);
-    }
-
-    // ─── GOOGLE DOCS PROXY HANDLER ───────────────────────────────────────────
-    // Mirrors the Sheets handler: per-document deny-by-default rules on the
-    // key owner's own Google token (no delegated-mailbox path).
-    if (fullPath.includes('documents')) {
-      telemetry.targetEmail = dbUser.email;
-      telemetry.accountDelegated = false;
-      const documentId = extractDocsDocumentId(fullPath);
-      if (!documentId) {
-        return NextResponse.json({ error: 'Invalid Google Docs API path' }, { status: 400 });
-      }
-
-      const allUserRules = await db
-        .select()
-        .from(accessRules)
-        .where(eq(accessRules.userId, dbUser.id));
-
-      const keyAssignments = await db
-        .select()
-        .from(keyRuleAssignments)
-        .where(eq(keyRuleAssignments.proxyKeyId, dbKey.id));
-
-      const assignedRuleIds = new Set(keyAssignments.map(a => a.accessRuleId));
-      const allAssignments = await db.select().from(keyRuleAssignments);
-      const rulesWithAssignments = new Set(allAssignments.map(a => a.accessRuleId));
-
-      const applicableDocsRules = applicableFileRules(
-        allUserRules, rulesWithAssignments, assignedRuleIds, 'docs', documentId,
-      );
-
-      if (applicableDocsRules.length === 0) {
-        return NextResponse.json({
-          error: `Access Denied: Document '${documentId}' is not exposed in FGAC rules for this API key.`
-        }, { status: 403 });
-      }
-
-      if (applicableDocsRules.some(r => r.actionType === 'doc_block')) {
-        return NextResponse.json({
-          error: `Access Denied: Access to document '${documentId}' has been explicitly blocked.`
-        }, { status: 403 });
-      }
-
-      const isMutatingRequest = request.method !== 'GET' && request.method !== 'HEAD';
-      if (isMutatingRequest) {
-        if (!applicableDocsRules.some(r => r.actionType === 'doc_read_write')) {
-          return NextResponse.json({
-            error: `Access Denied: Write operations on document '${documentId}' are restricted to Read-Only.`
-          }, { status: 403 });
-        }
-      }
-
-      const realGoogleToken = await fetchClerkGoogleToken(dbUser.clerkUserId, dbUser.clerkUserId, telemetry);
-
-      if (!realGoogleToken) {
-        return NextResponse.json({
-          error: `Could not fetch Google access token for user '${dbUser.email}'. Please reconnect your Google account.`
-        }, { status: 403 });
-      }
-
-      const cleanPath = fullPath.replace(/^docs\//, '');
-      const googleUrl = `https://docs.googleapis.com/${cleanPath}${request.nextUrl.search}`;
+      // Forward to the kind's API host (sheets/docs/slides.googleapis.com)
+      const cleanPath = fullPath.replace(new RegExp(`^${d.apiPathPrefix}/`), '');
+      const googleUrl = `https://${d.apiHost}/${cleanPath}${request.nextUrl.search}`;
       const headers = new Headers(request.headers);
       headers.set('Authorization', `Bearer ${realGoogleToken.token}`);
       headers.delete('host');

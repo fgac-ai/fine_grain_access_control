@@ -11,21 +11,23 @@ import { captureServerEvent } from '@/lib/posthogServer';
  * Shared implementations behind the per-kind rule routes:
  *   /api/rules/verify-sheets-access  /api/rules/grant-sheets-access
  *   /api/rules/verify-docs-access    /api/rules/grant-docs-access
+ *   /api/rules/verify-slides-access  /api/rules/grant-slides-access
  * Extracted from the sheets routes when Docs support landed — sheets request
  * and response shapes (param names, response keys, analytics event names)
- * are unchanged; docs mirrors them with its own nouns.
+ * are unchanged; docs and slides mirror them with their own nouns, all read
+ * from the kind descriptor.
  */
 
 const kindNames = (kind: DriveFileKind) => {
   const d = DRIVE_FILE_KINDS[kind];
   return {
     d,
-    idParam: d.setupIdParam,                                     // sid | did
-    idKey: kind === 'sheet' ? 'spreadsheetId' : 'documentId',    // response key
-    idProp: kind === 'sheet' ? 'spreadsheet_id' : 'document_id', // analytics prop
-    recoveredEvent: kind === 'sheet' ? 'sheets_grant_recovered' : 'docs_grant_recovered',
-    verificationEvent: kind === 'sheet' ? 'sheets_grant_verification' : 'docs_grant_verification',
-    rulesKey: kind === 'sheet' ? 'sheetsRules' : 'docsRules',
+    idParam: d.setupIdParam,                          // sid | did | pid
+    idKey: d.idKey,                                   // response key
+    idProp: d.createdAnalytics.idProp,                // analytics prop
+    recoveredEvent: d.grantAnalytics.recoveredEvent,
+    verificationEvent: d.grantAnalytics.verificationEvent,
+    rulesKey: d.rulesKey,
     fallbackNoun: d.noun.charAt(0).toUpperCase() + d.noun.slice(1),
   };
 };

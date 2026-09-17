@@ -51,6 +51,8 @@ async function main() {
     { action: 'sheets_write', spreadsheetId: 'ss-2' },
     { action: 'docs_expose', documentId: 'doc-1' },
     { action: 'docs_write', documentId: 'doc-2' },
+    { action: 'slides_expose', presentationId: 'pres-1' },
+    { action: 'slides_write', presentationId: 'pres-2' },
   ];
   check('sample covers every declared action', samples.length === APPROVAL_ACTIONS.length);
   for (const a of samples) {
@@ -61,7 +63,7 @@ async function main() {
     // read-level grant is the 2026-08-15 approve→retry→fail regression.
     check(`${a.action} round-trips its action`, v.payload.action === a.action);
     const target = actionTarget(a);
-    const recovered = v.payload.recipient ?? v.payload.spreadsheetId ?? v.payload.documentId ?? '';
+    const recovered = v.payload.recipient ?? v.payload.spreadsheetId ?? v.payload.documentId ?? v.payload.presentationId ?? '';
     check(`${a.action} round-trips its target`, recovered === target);
     check(`${a.action} describes without throwing`, describeApproval(v.payload).length > 0);
   }

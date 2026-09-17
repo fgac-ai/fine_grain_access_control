@@ -4,7 +4,7 @@
  */
 import {
   classifyGoogleApiCall, canonicalizeGoogleApiPath, extractSendRecipients, extractDraftSendInfo,
-  collectLabelIds, sheetsApprovalAction, docsApprovalAction, extractDocsDocumentId,
+  collectLabelIds, sheetsApprovalAction, docsApprovalAction, fileApprovalAction, extractDocsDocumentId, extractDriveFileKindId,
   templateGoogleApiPath, rawApiFamily, extractGoogleErrorReason,
 } from '../src/app/api/mcp/googleApiPolicy';
 
@@ -92,14 +92,14 @@ expect('upload-variant drafts create → gmail_write',
   (c: { kind: string }) => c.kind === 'gmail_write');
 expect('sheets GET values → sheets read',
   classifyGoogleApiCall('v4/spreadsheets/1BxiM/values/Sheet1', 'GET'),
-  (c: { kind: string; spreadsheetId?: string; isMutating?: boolean }) =>
-    c.kind === 'sheets' && c.spreadsheetId === '1BxiM' && c.isMutating === false);
+  (c: { kind: string; fileKind?: string; fileId?: string; isMutating?: boolean }) =>
+    c.kind === 'file' && c.fileKind === 'sheet' && c.fileId === '1BxiM' && c.isMutating === false);
 expect('sheets append POST → sheets write',
   classifyGoogleApiCall('sheets/v4/spreadsheets/1BxiM/values/Sheet1:append', 'POST'),
-  (c: { kind: string; isMutating?: boolean }) => c.kind === 'sheets' && c.isMutating === true);
+  (c: { kind: string; fileKind?: string; isMutating?: boolean }) => c.kind === 'file' && c.fileKind === 'sheet' && c.isMutating === true);
 expect('sheets create (no id) POST → sheets_create (2026-08-19: creation allowed, auto-granted)',
   classifyGoogleApiCall('v4/spreadsheets', 'POST'),
-  (c: { kind: string }) => c.kind === 'sheets_create');
+  (c: { kind: string; fileKind?: string }) => c.kind === 'file_create' && c.fileKind === 'sheet');
 expect('sheets no-id GET → passthrough (Google rejects it, not us)',
   classifyGoogleApiCall('v4/spreadsheets', 'GET'),
   (c: { kind: string; family?: string }) => c.kind === 'passthrough' && c.family === 'spreadsheets');
@@ -108,18 +108,18 @@ expect('batch endpoint → denied',
   (c: { kind: string }) => c.kind === 'denied');
 expect('docs GET document → docs read',
   classifyGoogleApiCall('v1/documents/1AbCdoc', 'GET'),
-  (c: { kind: string; documentId?: string; isMutating?: boolean }) =>
-    c.kind === 'docs' && c.documentId === '1AbCdoc' && c.isMutating === false);
+  (c: { kind: string; fileKind?: string; fileId?: string; isMutating?: boolean }) =>
+    c.kind === 'file' && c.fileKind === 'doc' && c.fileId === '1AbCdoc' && c.isMutating === false);
 expect('docs GET with docs/ prefix → docs read',
   classifyGoogleApiCall('docs/v1/documents/1AbCdoc?fields=title', 'GET'),
-  (c: { kind: string; documentId?: string }) => c.kind === 'docs' && c.documentId === '1AbCdoc');
+  (c: { kind: string; fileKind?: string; fileId?: string }) => c.kind === 'file' && c.fileKind === 'doc' && c.fileId === '1AbCdoc');
 expect('docs batchUpdate POST → docs write (verb suffix not part of id)',
   classifyGoogleApiCall('v1/documents/1AbCdoc:batchUpdate', 'POST'),
-  (c: { kind: string; documentId?: string; isMutating?: boolean }) =>
-    c.kind === 'docs' && c.documentId === '1AbCdoc' && c.isMutating === true);
+  (c: { kind: string; fileKind?: string; fileId?: string; isMutating?: boolean }) =>
+    c.kind === 'file' && c.fileKind === 'doc' && c.fileId === '1AbCdoc' && c.isMutating === true);
 expect('docs create (no id) POST → docs_create (auto-granted, mirrors sheets_create)',
   classifyGoogleApiCall('v1/documents', 'POST'),
-  (c: { kind: string }) => c.kind === 'docs_create');
+  (c: { kind: string; fileKind?: string }) => c.kind === 'file_create' && c.fileKind === 'doc');
 expect('docs no-id GET → passthrough (Google rejects it, not us)',
   classifyGoogleApiCall('v1/documents', 'GET'),
   (c: { kind: string; family?: string }) => c.kind === 'passthrough' && c.family === 'documents');
@@ -260,20 +260,29 @@ expect('unsupported denial reason names the grant surface and says stop',
   (c: { kind: string; reason?: string }) =>
     c.kind === 'denied' && !!c.reason && c.reason.startsWith('🚫') &&
     c.reason.includes('Gmail') && c.reason.includes('Drive') && c.reason.includes('STOP'));
-expect('slides create → passthrough family slides (routed to slides.googleapis.com)',
+// Slides became an enforced per-file kind on 2026-09-17 (it was scope-backstop
+// passthrough before, and every call 403ed SERVICE_DISABLED at Google).
+expect('slides create → file_create slide (auto-granted, mirrors sheets/docs)',
   classifyGoogleApiCall('slides/v1/presentations', 'POST'),
-  (c: { kind: string; family?: string; isMutating?: boolean }) =>
-    c.kind === 'passthrough' && c.family === 'slides' && c.isMutating === true);
+  (c: { kind: string; fileKind?: string }) => c.kind === 'file_create' && c.fileKind === 'slide');
 expect('slides bare-version retry spelling (v1/presentations) → same classification',
   classifyGoogleApiCall('v1/presentations', 'POST'),
-  (c: { kind: string; family?: string }) => c.kind === 'passthrough' && c.family === 'slides');
-expect('slides read with id → passthrough family slides',
+  (c: { kind: string; fileKind?: string }) => c.kind === 'file_create' && c.fileKind === 'slide');
+expect('slides read with id → enforced slide read',
   classifyGoogleApiCall('slides/v1/presentations/1AbCpres?fields=title', 'GET'),
-  (c: { kind: string; family?: string; isMutating?: boolean }) =>
-    c.kind === 'passthrough' && c.family === 'slides' && c.isMutating === false);
-expect('slides batchUpdate verb suffix → passthrough family slides',
+  (c: { kind: string; fileKind?: string; fileId?: string; isMutating?: boolean }) =>
+    c.kind === 'file' && c.fileKind === 'slide' && c.fileId === '1AbCpres' && c.isMutating === false);
+expect('slides batchUpdate verb suffix → enforced slide write (verb not part of id)',
   classifyGoogleApiCall('v1/presentations/1AbCpres:batchUpdate', 'POST'),
-  (c: { kind: string; family?: string }) => c.kind === 'passthrough' && c.family === 'slides');
+  (c: { kind: string; fileKind?: string; fileId?: string; isMutating?: boolean }) =>
+    c.kind === 'file' && c.fileKind === 'slide' && c.fileId === '1AbCpres' && c.isMutating === true);
+expect('slides no-id GET → passthrough (Google rejects it, not us)',
+  classifyGoogleApiCall('v1/presentations', 'GET'),
+  (c: { kind: string; family?: string }) => c.kind === 'passthrough' && c.family === 'presentations');
+console.log('extractDriveFileKindId (slides):');
+expect('slides plain path', extractDriveFileKindId('slide', 'slides/v1/presentations/1AbC_x-9'), (id: string | null) => id === '1AbC_x-9');
+expect('slides batchUpdate verb excluded', extractDriveFileKindId('slide', 'v1/presentations/1AbC:batchUpdate'), (id: string | null) => id === '1AbC');
+expect('slides no id → null', extractDriveFileKindId('slide', 'v1/presentations'), (id: string | null) => id === null);
 
 console.log('extractSendRecipients:');
 const raw = Buffer.from(
@@ -361,6 +370,23 @@ expect('blocked mints nothing (write)',
 expect('documentId carried through',
   docsApprovalAction('not_exposed', 'doc-42', true),
   (a: { documentId?: string } | null) => a?.documentId === 'doc-42');
+
+console.log('fileApprovalAction — slides (same matrix, descriptor-driven):');
+expect('slides read on unexposed -> slides_expose with presentationId',
+  fileApprovalAction('slide', 'not_exposed', 'pres1', false),
+  (a: { action: string; presentationId?: string } | null) => a?.action === 'slides_expose' && a?.presentationId === 'pres1');
+expect('slides WRITE on unexposed -> slides_write',
+  fileApprovalAction('slide', 'not_exposed', 'pres1', true),
+  (a: { action: string } | null) => a?.action === 'slides_write');
+expect('slides write on read-only -> slides_write',
+  fileApprovalAction('slide', 'read_only', 'pres1', true),
+  (a: { action: string } | null) => a?.action === 'slides_write');
+expect('slides blocked -> no action',
+  fileApprovalAction('slide', 'blocked', 'pres1', true),
+  (a: unknown) => a === null);
+expect('sheets wrapper is the generic helper',
+  sheetsApprovalAction('not_exposed', 'ss1', true),
+  (a: { action: string; spreadsheetId?: string } | null) => a?.action === 'sheets_write' && a?.spreadsheetId === 'ss1');
 
 console.log('templateGoogleApiPath:');
 expect('gmail message id → {id}',
@@ -501,9 +527,12 @@ expect('file_comments family → drive_comments',
 expect('passthrough carries classifier family',
   rawApiFamily(classifyGoogleApiCall('drive/v3/about', 'GET')),
   (f: string | null) => f === 'drive/v3');
-expect('slides passthrough → slides',
+expect('slides create → presentations (enforced family, like spreadsheets/documents)',
   rawApiFamily(classifyGoogleApiCall('slides/v1/presentations', 'POST')),
-  (f: string | null) => f === 'slides');
+  (f: string | null) => f === 'presentations');
+expect('slides read → presentations',
+  rawApiFamily(classifyGoogleApiCall('v1/presentations/1AbCpres', 'GET')),
+  (f: string | null) => f === 'presentations');
 expect('batch denied → null (denial_code identifies it)',
   rawApiFamily(classifyGoogleApiCall('batch/gmail/v1', 'POST')),
   (f: string | null) => f === null);

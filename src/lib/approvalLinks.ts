@@ -36,19 +36,55 @@
  * be provisioned. Rotating the Clerk secret invalidates outstanding links.
  */
 
+import { DRIVE_FILE_KINDS, kindForApprovalAction, type DriveFileKind } from './driveFileKinds';
+
 export type ApprovalAction =
   | { action: 'send_whitelist'; recipient: string }
   | { action: 'send_all' }
   | { action: 'sheets_expose'; spreadsheetId: string; resourceName?: string }
   | { action: 'sheets_write'; spreadsheetId: string; resourceName?: string }
   | { action: 'docs_expose'; documentId: string; resourceName?: string }
-  | { action: 'docs_write'; documentId: string; resourceName?: string };
+  | { action: 'docs_write'; documentId: string; resourceName?: string }
+  | { action: 'slides_expose'; presentationId: string; resourceName?: string }
+  | { action: 'slides_write'; presentationId: string; resourceName?: string };
 
 export type ApprovalActionName = ApprovalAction['action'];
 
 export const APPROVAL_ACTIONS: readonly ApprovalActionName[] = [
   'send_whitelist', 'send_all', 'sheets_expose', 'sheets_write', 'docs_expose', 'docs_write',
+  'slides_expose', 'slides_write',
 ] as const;
+
+/**
+ * Build the per-file approval action for a kind at a level, typed as the
+ * union member the kind owns. Every per-file action is `{action, <idKey>}`
+ * with the kind's own id key, so this is the one place that spells the key.
+ */
+export function fileApprovalActionFor(
+  kind: DriveFileKind,
+  level: 'expose' | 'write',
+  fileId: string,
+  resourceName?: string,
+): ApprovalAction {
+  const d = DRIVE_FILE_KINDS[kind];
+  const name = level === 'write' ? d.approvalActions.write : d.approvalActions.expose;
+  return {
+    action: name,
+    [d.idKey]: fileId,
+    ...(resourceName ? { resourceName } : {}),
+  } as unknown as ApprovalAction;
+}
+
+/** The per-file kind an approval payload or action targets, if any. */
+export function approvalFileKind(action: string): DriveFileKind | null {
+  return kindForApprovalAction(action);
+}
+
+/** The file id a per-file approval payload carries (under the kind's id key). */
+export function approvalFileId(p: Pick<ApprovalPayload, 'action' | 'spreadsheetId' | 'documentId' | 'presentationId'>): string | undefined {
+  const kind = kindForApprovalAction(p.action);
+  return kind ? p[DRIVE_FILE_KINDS[kind].idKey] : undefined;
+}
 
 /** URL query parameter names — short, because the URL is shown to humans. */
 export const APPROVAL_PARAMS = { action: 'a', key: 'k', target: 'r', signature: 's' } as const;
@@ -60,13 +96,14 @@ export interface ApprovalPayload {
   recipient?: string;
   spreadsheetId?: string;
   documentId?: string;
+  presentationId?: string;
   /** Display name, when a caller knows it. Never carried in the URL. */
   resourceName?: string;
   /** Deterministic analytics id joining minted → opened → approved. */
   requestId: string;
 }
 
-/** The single field an action targets: recipient, spreadsheet, or document. */
+/** The single field an action targets: recipient, or the per-file id. */
 export function actionTarget(action: ApprovalAction): string {
   switch (action.action) {
     case 'send_whitelist': return action.recipient;
@@ -75,6 +112,8 @@ export function actionTarget(action: ApprovalAction): string {
     case 'sheets_write': return action.spreadsheetId;
     case 'docs_expose':
     case 'docs_write': return action.documentId;
+    case 'slides_expose':
+    case 'slides_write': return action.presentationId;
   }
 }
 
@@ -224,10 +263,15 @@ export async function verifyApprovalParams(
       action: name,
       requestId,
       recipient: name === 'send_whitelist' ? target : undefined,
-      spreadsheetId: name === 'sheets_expose' || name === 'sheets_write' ? target : undefined,
-      documentId: name === 'docs_expose' || name === 'docs_write' ? target : undefined,
+      ...fileIdFields(name, target),
     },
   };
+}
+
+/** `{ <idKey>: target }` for a per-file action, `{}` otherwise. */
+function fileIdFields(action: string, target: string): Partial<ApprovalPayload> {
+  const kind = kindForApprovalAction(action);
+  return kind ? { [DRIVE_FILE_KINDS[kind].idKey]: target } : {};
 }
 
 /**
@@ -248,13 +292,12 @@ export function describeApproval(p: ApprovalPayload): string {
       return `Allow this agent to send email to ${p.recipient}`;
     case 'send_all':
       return 'Allow this agent to send email to ANY recipient, from every mailbox on its profile';
-    case 'sheets_expose':
-      return `Give this agent read-only access to spreadsheet ${p.resourceName || p.spreadsheetId}`;
-    case 'sheets_write':
-      return `Give this agent read & write access to spreadsheet ${p.resourceName || p.spreadsheetId}`;
-    case 'docs_expose':
-      return `Give this agent read-only access to document ${p.resourceName || p.documentId}`;
-    case 'docs_write':
-      return `Give this agent read & write access to document ${p.resourceName || p.documentId}`;
+    default: {
+      const kind = kindForApprovalAction(p.action);
+      if (!kind) return `Grant this agent ${p.action}`;
+      const d = DRIVE_FILE_KINDS[kind];
+      const level = p.action === d.approvalActions.write ? 'read & write' : 'read-only';
+      return `Give this agent ${level} access to ${d.noun} ${p.resourceName || approvalFileId(p)}`;
+    }
   }
 }

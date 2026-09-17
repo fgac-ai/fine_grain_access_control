@@ -4,11 +4,12 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Card, CardHeader, Badge, EmptyState, buttonPrimary, buttonSecondary, buttonDanger } from '@/components/ui';
-import { assignRulesToKey, unassignRuleFromKey, revokeProxyKey, setSheetRulePermission, exposeSheetsFromPicker, exposeDocsFromPicker, applyRecommendedSecurityRules, enableSendToAnyone } from './actions';
+import { assignRulesToKey, unassignRuleFromKey, revokeProxyKey, setSheetRulePermission, exposeFilesOfKindFromPicker, applyRecommendedSecurityRules, enableSendToAnyone } from './actions';
+import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, kindForService, type DriveFileKind } from '@/lib/driveFileKinds';
 import { useGooglePicker, PickedSheet } from './useGooglePicker';
 
 /** access_rules.service values that are per-file grants (not Gmail rules). */
-const FILE_SERVICES = ['sheets', 'docs'];
+const FILE_SERVICES: string[] = ACTIVE_DRIVE_FILE_KINDS.map(k => DRIVE_FILE_KINDS[k].service);
 import { EditRuleButton } from './EditRuleButton';
 import { DeleteRuleButton } from './DeleteRuleButton';
 import { RuleControls } from './RuleControls';
@@ -124,7 +125,7 @@ export function AgentProfilesView({
   // failing entirely degrades to no chips, never a broken card. `title` is
   // the LIVE Drive filename, fetched by the same verification call — render
   // it ahead of the stored (grant-time) resourceName so Drive renames show.
-  const [grantStates, setGrantStates] = useState<{ sheet: Record<string, GrantState>; doc: Record<string, GrantState> }>({ sheet: {}, doc: {} });
+  const [grantStates, setGrantStates] = useState<Partial<Record<DriveFileKind, Record<string, GrantState>>>>({});
   useEffect(() => {
     let cancelled = false;
     const load = async (path: string): Promise<Record<string, GrantState>> => {
@@ -136,10 +137,11 @@ export function AgentProfilesView({
         return {};
       }
     };
-    Promise.all([
-      load('/api/rules/verify-sheets-access'),
-      load('/api/rules/verify-docs-access'),
-    ]).then(([sheet, doc]) => { if (!cancelled) setGrantStates({ sheet, doc }); });
+    Promise.all(ACTIVE_DRIVE_FILE_KINDS.map(k => load(DRIVE_FILE_KINDS[k].verifyPath)))
+      .then(states => {
+        if (cancelled) return;
+        setGrantStates(Object.fromEntries(ACTIVE_DRIVE_FILE_KINDS.map((k, i) => [k, states[i]])));
+      });
     return () => { cancelled = true; };
   }, [rules]);
 
@@ -148,34 +150,21 @@ export function AgentProfilesView({
   const active = activeProfiles.find(p => p.id === activeId) ?? null;
   const pending = connections.filter(c => c.status === 'pending');
 
-  // Google Pickers for "+ Expose a sheet" / "+ Expose a doc". One hook
-  // instance per kind for the whole view: each also consumes the
-  // ?autoOpenPicker= return leg of the first-time consent redirect for its
-  // own kind (pickerKind), with the profile id carried through as context.
-  const handleSheetsPicked = useCallback(async (sheets: PickedSheet[], context?: string) => {
-    try {
-      await exposeSheetsFromPicker(sheets, context || undefined);
-    } catch (e) {
-      console.error('Failed to save exposed sheets:', e);
-    }
-  }, []);
-  const { triggerAddSheets, isLoading: pickerLoading, pickerError } = useGooglePicker(handleSheetsPicked);
-
-  const handleDocsPicked = useCallback(async (docs: PickedSheet[], context?: string) => {
-    try {
-      await exposeDocsFromPicker(docs, context || undefined);
-    } catch (e) {
-      console.error('Failed to save exposed docs:', e);
-    }
-  }, []);
-  const { triggerAddSheets: triggerAddDocs, isLoading: docsPickerLoading, pickerError: docsPickerError } = useGooglePicker(handleDocsPicked, 'doc');
-
-  const { sheetRules, docRules, gmailRules } = useMemo(() => {
-    if (!active) return { sheetRules: [], docRules: [], gmailRules: [] };
+  // Per-kind file rules (sheets / docs / slides) and the Gmail remainder.
+  // Each FilesRulesCard owns its own Google Picker hook for its kind (the
+  // hook also consumes the ?autoOpenPicker= return leg of the first-time
+  // consent redirect for that kind, with the profile id carried as context).
+  const { fileRulesByKind, gmailRules } = useMemo(() => {
+    const empty = Object.fromEntries(ACTIVE_DRIVE_FILE_KINDS.map(k => [k, [] as Rule[]])) as Record<DriveFileKind, Rule[]>;
+    if (!active) return { fileRulesByKind: empty, gmailRules: [] as Rule[] };
     const forProfile = rules.filter(r => isGlobal(r) || r.assignedKeyIds.includes(active.id));
+    const byKind = { ...empty };
+    for (const r of forProfile) {
+      const k = kindForService(r.service);
+      if (k) byKind[k] = [...byKind[k], r];
+    }
     return {
-      sheetRules: forProfile.filter(r => r.service === 'sheets'),
-      docRules: forProfile.filter(r => r.service === 'docs'),
+      fileRulesByKind: byKind,
       gmailRules: forProfile.filter(r => !FILE_SERVICES.includes(r.service)),
     };
   }, [rules, active]);
@@ -215,25 +204,15 @@ export function AgentProfilesView({
 
           <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-6 items-start">
             <div className="space-y-6 min-w-0">
-              <FilesRulesCard
-                kind="sheet"
-                profileId={active.id}
-                rules={sheetRules}
-                grantStates={grantStates.sheet}
-                onExpose={() => triggerAddSheets(active.id)}
-                exposing={pickerLoading}
-                pickerError={pickerError}
-              />
-
-              <FilesRulesCard
-                kind="doc"
-                profileId={active.id}
-                rules={docRules}
-                grantStates={grantStates.doc}
-                onExpose={() => triggerAddDocs(active.id)}
-                exposing={docsPickerLoading}
-                pickerError={docsPickerError}
-              />
+              {ACTIVE_DRIVE_FILE_KINDS.map(kind => (
+                <FilesRulesCard
+                  key={kind}
+                  kind={kind}
+                  profileId={active.id}
+                  rules={fileRulesByKind[kind]}
+                  grantStates={grantStates[kind] ?? {}}
+                />
+              ))}
 
               <GmailRulesCard
                 profileId={active.id}
@@ -490,22 +469,18 @@ function ProfileHeader({ profile }: { profile: Profile }) {
 
 // ─── Per-file (Sheets / Docs) rules ─────────────────────────────────────────
 
-const FILE_PERMISSIONS = {
-  sheet: [
-    { value: 'sheet_read', label: 'Read Only', tone: 'info' as const },
-    { value: 'sheet_read_write', label: 'Read & Write', tone: 'success' as const },
-    { value: 'sheet_block', label: 'Blocked', tone: 'error' as const },
-  ],
-  doc: [
-    { value: 'doc_read', label: 'Read Only', tone: 'info' as const },
-    { value: 'doc_read_write', label: 'Read & Write', tone: 'success' as const },
-    { value: 'doc_block', label: 'Blocked', tone: 'error' as const },
-  ],
-};
+// Permission options per kind, from the descriptor's action types.
+const FILE_PERMISSIONS = Object.fromEntries(ACTIVE_DRIVE_FILE_KINDS.map(k => {
+  const t = DRIVE_FILE_KINDS[k].actionTypes;
+  return [k, [
+    { value: t.read, label: 'Read Only', tone: 'info' as const },
+    { value: t.readWrite, label: 'Read & Write', tone: 'success' as const },
+    { value: t.block, label: 'Blocked', tone: 'error' as const },
+  ]];
+})) as Record<DriveFileKind, { value: string; label: string; tone: 'info' | 'success' | 'error' }[]>;
 
-const FILE_CARD_COPY = {
+const FILE_CARD_COPY: Record<DriveFileKind, { title: string; subtitle: string; expose: string; empty: React.ReactNode }> = {
   sheet: {
-    tone: 'sheets' as const,
     title: 'Google Sheets Rules',
     subtitle: 'Spreadsheets this profile can reach',
     expose: '+ Expose a sheet',
@@ -513,12 +488,18 @@ const FILE_CARD_COPY = {
       spreadsheets from Google Drive.</>,
   },
   doc: {
-    tone: 'docs' as const,
     title: 'Google Docs Rules',
     subtitle: 'Documents this profile can reach',
     expose: '+ Expose a doc',
     empty: <>No docs exposed to this profile. Click &quot;+ Expose a doc&quot; to pick
       documents from Google Drive.</>,
+  },
+  slide: {
+    title: 'Google Slides Rules',
+    subtitle: 'Presentations this profile can reach',
+    expose: '+ Expose a presentation',
+    empty: <>No presentations exposed to this profile. Click &quot;+ Expose a presentation&quot; to pick
+      Google Slides decks from Google Drive.</>,
   },
 };
 
@@ -527,30 +508,32 @@ function FilesRulesCard({
   profileId,
   rules,
   grantStates,
-  onExpose,
-  pickerError,
-  exposing,
 }: {
-  kind: 'sheet' | 'doc';
+  kind: DriveFileKind;
   profileId: string;
   rules: Rule[];
   /** fileId → Google-side grant state; missing entries mean "unknown" (no chip). */
   grantStates: Record<string, GrantState>;
-  onExpose: () => void;
-  pickerError: string | null;
-  exposing: boolean;
 }) {
-  const setup = kind === 'sheet'
-    ? { path: '/dashboard/sheets-setup', idParam: 'sid', noun: 'sheet' }
-    : { path: '/dashboard/docs-setup', idParam: 'did', noun: 'doc' };
+  const d = DRIVE_FILE_KINDS[kind];
+  const setup = { path: d.setupPath, idParam: d.setupIdParam, noun: d.shortNoun };
   // "+ Expose a …" opens the Google Picker directly — picking a file is
   // the whole flow, whether or not it was already exposed elsewhere (the
   // server action merges assignments instead of narrowing them). No detour
-  // through the Accounts page.
+  // through the Accounts page. The picker hook is per card = per kind.
+  const handlePicked = useCallback(async (files: PickedSheet[], context?: string) => {
+    try {
+      await exposeFilesOfKindFromPicker(kind, files, context || undefined);
+    } catch (e) {
+      console.error(`Failed to save exposed ${d.noun}s:`, e);
+    }
+  }, [kind, d.noun]);
+  const { triggerAddSheets: onExposeKind, isLoading: exposing, pickerError } = useGooglePicker(handlePicked, kind);
+  const onExpose = () => onExposeKind(profileId);
   const copy = FILE_CARD_COPY[kind];
 
   return (
-    <Card tone={copy.tone}>
+    <Card tone={d.tone}>
       <CardHeader
         title={copy.title}
         subtitle={copy.subtitle}
@@ -621,7 +604,7 @@ function FilesRulesCard({
  * Saves on change. The select is recolored to match the permission so the
  * access level of every file is legible at a glance without reading labels.
  */
-function FilePermissionSelect({ kind, rule, displayName }: { kind: 'sheet' | 'doc'; rule: Rule; displayName?: string }) {
+function FilePermissionSelect({ kind, rule, displayName }: { kind: DriveFileKind; rule: Rule; displayName?: string }) {
   const [value, setValue] = useState(rule.actionType);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
