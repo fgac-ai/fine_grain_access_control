@@ -23,7 +23,7 @@ Listing copy source of truth: `docs/connector_submission/listing_copy.md`
 | awesome-mcp-servers (mcpservers.org) | — | optional, not submitted | https://mcpservers.org/submit |
 | xAI plugin marketplace (Grok Build) | 2026-09-17 | **submitted** — PR https://github.com/xai-org/plugin-marketplace/pull/766 from the `fgac-ai/plugin-marketplace` fork, pinned to main `952a187`; Socket scan green, Semgrep + catalog validation awaiting first-contributor workflow approval; third-party merges took 3–19 days in Sep 2026 | https://github.com/xai-org/plugin-marketplace |
 | cursor.directory (Cursor community marketplace) | 2026-09-17 | **submitted** — listing created from the repo scan (root `.mcp.json` dev PostHog entry removed by hand before publishing; scanner ignores subdirectory URLs), hidden until their security agent finishes | https://cursor.directory/plugins/fgacai-gmail-google-sheets-docs |
-| Cursor Marketplace (first-party; also Grok Bot's Plugins pane) | — | publisher application at https://cursor.com/marketplace/publish (Cursor account, manual review, email follow-up) | https://cursor.com/marketplace |
+| Cursor Marketplace (first-party; also Grok Bot's Plugins pane) | 2026-09-17 | **application submitted** — publisher application (org name FGAC.ai, handle `fgac-ai`, contact support@fgac.ai, repo + logo + website) accepted with "Thanks for applying"; manual review, no status page, follow-up comes by email from Cursor's marketplace-publishing mailbox. Watch item: cursor.directory's scanner reads the repo root, so a re-scan would re-add the dev-only PostHog server from the root `.mcp.json` | https://cursor.com/marketplace |
 
 Update the *submitted* and *status* columns as each step lands.
 
