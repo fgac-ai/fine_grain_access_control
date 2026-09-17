@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, type DriveFileKind } from '@/lib/driveFileKinds';
+import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS } from '@/lib/driveFileKinds';
+import { driveFileKindForPath, extractDriveFileKindId, hasDotSegment } from '@/app/api/mcp/googleApiPolicy';
 import { db } from '@/db';
 import { users, proxyKeys, emailDelegations, keyEmailAccess, accessRules, keyRuleAssignments } from '@/db/schema';
 import { eq, and } from 'drizzle-orm';
@@ -184,8 +185,9 @@ async function trackedProxyRequest(request: NextRequest, params: { path: string[
   const response = await handleProxyRequest(request, params, telemetry);
 
   const fullPath = params.path.join('/');
-  const service = proxyFileKind(fullPath)
-    ? DRIVE_FILE_KINDS[proxyFileKind(fullPath)!].service
+  const fileKind = driveFileKindForPath(fullPath);
+  const service = fileKind
+    ? DRIVE_FILE_KINDS[fileKind].service
     : /^drive\/v[23]\//.test(fullPath) ? 'drive'
     : 'gmail';
   // 504 is only ever minted by forwardToGoogle's timeout branch (Google's own
@@ -224,23 +226,6 @@ function extractGmailUserId(fullPath: string): string {
   return match ? decodeURIComponent(match[1]) : 'me';
 }
 
-/** The per-file kind a proxied path addresses (Sheets/Docs/Slides), if any. */
-function proxyFileKind(fullPath: string): DriveFileKind | null {
-  for (const kind of ACTIVE_DRIVE_FILE_KINDS) {
-    if (fullPath.includes(DRIVE_FILE_KINDS[kind].apiCollection)) return kind;
-  }
-  return null;
-}
-
-/** File id after the kind's collection segment (`v4/spreadsheets/{id}`,
- * `docs/v1/documents/{id}`, `slides/v1/presentations/{id}`), verb excluded. */
-function extractProxyFileId(kind: DriveFileKind, fullPath: string): string | null {
-  const d = DRIVE_FILE_KINDS[kind];
-  const re = new RegExp(`(?:v\\d+\\/${d.apiCollection}|${d.apiPathPrefix}\\/v\\d+\\/${d.apiCollection})\\/([^/?:#]+)`);
-  const match = fullPath.match(re);
-  return match ? decodeURIComponent(match[1]) : null;
-}
-
 /**
  * Per-file rule check shared by the Sheets, Docs, and Drive-file guards.
  * Returns the rules for `service` that apply to this key and match `fileId`.
@@ -270,6 +255,11 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
 
     const keyValue = authHeader.split(' ')[1];
     const fullPath = params.path.join('/');
+    // Same guard as the MCP classifier: a `..` segment would let the per-file
+    // check authorize one id while Google serves another.
+    if (hasDotSegment(fullPath)) {
+      return NextResponse.json({ error: 'Invalid path: "." and ".." segments are not forwarded.' }, { status: 400 });
+    }
 
     // ─── 1. Authenticate Proxy Key ──────────────────────────────────────────
     const dbKey = await db
@@ -366,12 +356,16 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     // One handler for every per-file kind, driven by the kind descriptor:
     // deny-by-default per-file rules on the key owner's own Google token (no
     // delegated-mailbox path exists here), then forward to the kind's API host.
-    const fileKind = proxyFileKind(fullPath);
+    // Kind detection and id extraction are the MCP classifier's own helpers,
+    // so the REST proxy and google_api_get/modify accept exactly the same
+    // spellings (`v4/spreadsheets/{id}`, `docs/v1/documents/{id}`, bare
+    // `presentations/{id}`) and disagree on none.
+    const fileKind = driveFileKindForPath(fullPath);
     if (fileKind) {
       const d = DRIVE_FILE_KINDS[fileKind];
       telemetry.targetEmail = dbUser.email;
       telemetry.accountDelegated = false;
-      const fileId = extractProxyFileId(fileKind, fullPath);
+      const fileId = extractDriveFileKindId(fileKind, fullPath);
       if (!fileId) {
         return NextResponse.json({ error: `Invalid ${d.productName} API path` }, { status: 400 });
       }
@@ -393,11 +387,10 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
       const applicableRules = applicableFileRules(
         allUserRules, rulesWithAssignments, assignedRuleIds, d.service, fileId,
       );
-      const nounCap = d.noun.charAt(0).toUpperCase() + d.noun.slice(1);
 
       if (applicableRules.length === 0) {
         return NextResponse.json({
-          error: `Access Denied: ${nounCap} '${fileId}' is not exposed in FGAC rules for this API key.`
+          error: `Access Denied: ${d.nounCap} '${fileId}' is not exposed in FGAC rules for this API key.`
         }, { status: 403 });
       }
 
@@ -428,7 +421,8 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
       }
 
       // Forward to the kind's API host (sheets/docs/slides.googleapis.com)
-      const cleanPath = fullPath.replace(new RegExp(`^${d.apiPathPrefix}/`), '');
+      const prefix = `${d.apiPathPrefix}/`;
+      const cleanPath = fullPath.startsWith(prefix) ? fullPath.slice(prefix.length) : fullPath;
       const googleUrl = `https://${d.apiHost}/${cleanPath}${request.nextUrl.search}`;
       const headers = new Headers(request.headers);
       headers.set('Authorization', `Bearer ${realGoogleToken.token}`);

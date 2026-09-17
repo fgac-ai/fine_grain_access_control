@@ -44,6 +44,8 @@ export interface DriveFileKindDescriptor {
   /** Optional leading path segment agents prepend (`sheets/v4/…`,
    * `docs/v1/…`, `slides/v1/…`) that is stripped before routing to apiHost. */
   apiPathPrefix: string;
+  /** The API version segment that precedes the collection (`v4` / `v1`). */
+  apiVersion: string;
   /** docs.google.com URL path segment identifying this kind in a pasted
    * link (`/spreadsheets/d/…`, `/document/d/…`, `/presentation/d/…`). */
   urlPathSegment: string;
@@ -52,7 +54,7 @@ export interface DriveFileKindDescriptor {
   /** Dashboard grant-recovery page (Picker walkthrough) for this kind. */
   setupPath: string;
   /** Query param carrying the file id on the setup page (sheets shipped as `sid`). */
-  setupIdParam: string;
+  setupIdParam: 'sid' | 'did' | 'pid';
   /** Whether the setup/approval pages embed the demo video (sheets only —
    * error copy must not promise a video that isn't there). */
   hasSetupVideo: boolean;
@@ -67,6 +69,8 @@ export interface DriveFileKindDescriptor {
   idKey: 'spreadsheetId' | 'documentId' | 'presentationId';
   /** Human noun for copy: "spreadsheet" / "document" / "presentation". */
   noun: string;
+  /** Sentence-initial form of `noun` ("Spreadsheet"). */
+  nounCap: string;
   /** Shorter noun the shipped sheets copy uses ("sheet"); docs/slides keep
    * the full noun. */
   shortNoun: string;
@@ -108,6 +112,7 @@ export const DRIVE_FILE_KINDS: Record<DriveFileKind, DriveFileKindDescriptor> = 
     apiHost: 'sheets.googleapis.com',
     apiCollection: 'spreadsheets',
     apiPathPrefix: 'sheets',
+    apiVersion: 'v4',
     urlPathSegment: 'spreadsheets',
     verifyUrl: (id: string) =>
       `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(id)}?fields=properties.title`,
@@ -119,6 +124,7 @@ export const DRIVE_FILE_KINDS: Record<DriveFileKind, DriveFileKindDescriptor> = 
     rulesKey: 'sheetsRules',
     idKey: 'spreadsheetId',
     noun: 'spreadsheet',
+    nounCap: 'Spreadsheet',
     shortNoun: 'sheet',
     productName: 'Google Sheets',
     tools: { read: 'sheets_get_spreadsheet', edit: 'sheets_edit' },
@@ -145,6 +151,7 @@ export const DRIVE_FILE_KINDS: Record<DriveFileKind, DriveFileKindDescriptor> = 
     apiHost: 'docs.googleapis.com',
     apiCollection: 'documents',
     apiPathPrefix: 'docs',
+    apiVersion: 'v1',
     urlPathSegment: 'document',
     verifyUrl: (id: string) =>
       `https://docs.googleapis.com/v1/documents/${encodeURIComponent(id)}?fields=title`,
@@ -156,6 +163,7 @@ export const DRIVE_FILE_KINDS: Record<DriveFileKind, DriveFileKindDescriptor> = 
     rulesKey: 'docsRules',
     idKey: 'documentId',
     noun: 'document',
+    nounCap: 'Document',
     shortNoun: 'document',
     productName: 'Google Docs',
     tools: { read: 'docs_read_document', edit: 'docs_edit' },
@@ -176,6 +184,7 @@ export const DRIVE_FILE_KINDS: Record<DriveFileKind, DriveFileKindDescriptor> = 
     apiHost: 'slides.googleapis.com',
     apiCollection: 'presentations',
     apiPathPrefix: 'slides',
+    apiVersion: 'v1',
     urlPathSegment: 'presentation',
     verifyUrl: (id: string) =>
       `https://slides.googleapis.com/v1/presentations/${encodeURIComponent(id)}?fields=title`,
@@ -187,6 +196,7 @@ export const DRIVE_FILE_KINDS: Record<DriveFileKind, DriveFileKindDescriptor> = 
     rulesKey: 'slidesRules',
     idKey: 'presentationId',
     noun: 'presentation',
+    nounCap: 'Presentation',
     shortNoun: 'presentation',
     productName: 'Google Slides',
     tools: { read: 'slides_get_presentation', edit: 'slides_edit' },

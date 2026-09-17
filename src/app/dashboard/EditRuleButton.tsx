@@ -208,7 +208,7 @@ export function EditRuleButton({
               {selectedFileKind ? (
                 <div>
                   <label className="block text-sm font-semibold text-slate-700 mb-1.5">
-                    {DRIVE_FILE_KINDS[selectedFileKind].noun.charAt(0).toUpperCase() + DRIVE_FILE_KINDS[selectedFileKind].noun.slice(1)} ID
+                    {DRIVE_FILE_KINDS[selectedFileKind].nounCap} ID
                   </label>
                   <input
                     type="text"

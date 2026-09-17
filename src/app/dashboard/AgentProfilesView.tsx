@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Card, CardHeader, Badge, EmptyState, buttonPrimary, buttonSecondary, buttonDanger } from '@/components/ui';
-import { assignRulesToKey, unassignRuleFromKey, revokeProxyKey, setSheetRulePermission, exposeFilesOfKindFromPicker, applyRecommendedSecurityRules, enableSendToAnyone } from './actions';
+import { assignRulesToKey, unassignRuleFromKey, revokeProxyKey, setSheetRulePermission, exposeFilesFromPicker, applyRecommendedSecurityRules, enableSendToAnyone } from './actions';
 import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, kindForService, type DriveFileKind } from '@/lib/driveFileKinds';
 import { useGooglePicker, PickedSheet } from './useGooglePicker';
 
@@ -470,7 +470,9 @@ function ProfileHeader({ profile }: { profile: Profile }) {
 // ─── Per-file (Sheets / Docs) rules ─────────────────────────────────────────
 
 // Permission options per kind, from the descriptor's action types.
-const FILE_PERMISSIONS = Object.fromEntries(ACTIVE_DRIVE_FILE_KINDS.map(k => {
+// Built over EVERY kind in the descriptor (not just the active ones) so the
+// Record type below is honest — a stub kind's rule can never index undefined.
+const FILE_PERMISSIONS = Object.fromEntries((Object.keys(DRIVE_FILE_KINDS) as DriveFileKind[]).map(k => {
   const t = DRIVE_FILE_KINDS[k].actionTypes;
   return [k, [
     { value: t.read, label: 'Read Only', tone: 'info' as const },
@@ -523,7 +525,7 @@ function FilesRulesCard({
   // through the Accounts page. The picker hook is per card = per kind.
   const handlePicked = useCallback(async (files: PickedSheet[], context?: string) => {
     try {
-      await exposeFilesOfKindFromPicker(kind, files, context || undefined);
+      await exposeFilesFromPicker(kind, files, context || undefined);
     } catch (e) {
       console.error(`Failed to save exposed ${d.noun}s:`, e);
     }

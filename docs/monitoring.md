@@ -915,10 +915,10 @@ stuck user, check:
 -- Gate-hit persons: denied ids vs ids they later used successfully, 7 d.
 SELECT cityHash64(person.properties.email) % 100000 AS u,
        groupUniqArrayIf(cityHash64(toString(properties.file_id)) % 10000,
-         event = '$mcp_tool_call' AND properties.denial_code IN ('sheets_not_exposed','docs_not_exposed')) AS denied_ids,
+         event = '$mcp_tool_call' AND properties.denial_code IN ('sheets_not_exposed','docs_not_exposed','slides_not_exposed')) AS denied_ids,
        groupUniqArrayIf(cityHash64(toString(properties.file_id)) % 10000,
          event = '$mcp_tool_call' AND properties.outcome = 'success'
-         AND (properties.$mcp_tool_name LIKE 'sheets%' OR properties.$mcp_tool_name LIKE 'docs%')) AS ok_ids,
+         AND (properties.$mcp_tool_name LIKE 'sheets%' OR properties.$mcp_tool_name LIKE 'docs%' OR properties.$mcp_tool_name LIKE 'slides%')) AS ok_ids,
        countIf(event IN ('agent_sheet_created','agent_doc_created')) AS agent_created,
        countIf(event = 'approval_link_opened')   AS opened,
        countIf(event = 'approval_link_approved') AS approved
@@ -927,7 +927,7 @@ WHERE properties.environment = 'production'
   AND person.properties.email NOT IN (/* internal + QA accounts */)
   AND timestamp > now() - INTERVAL 7 DAY
   AND (event IN ('approval_link_opened','approval_link_approved','agent_sheet_created','agent_doc_created')
-       OR (event = '$mcp_tool_call' AND (properties.$mcp_tool_name LIKE 'sheets%' OR properties.$mcp_tool_name LIKE 'docs%')))
+       OR (event = '$mcp_tool_call' AND (properties.$mcp_tool_name LIKE 'sheets%' OR properties.$mcp_tool_name LIKE 'docs%' OR properties.$mcp_tool_name LIKE 'slides%')))
 GROUP BY u HAVING length(denied_ids) > 0
 ORDER BY approved, agent_created DESC
 ```
@@ -1108,12 +1108,12 @@ WITH per AS (
          countIf(event = 'google_scope_missing' AND properties.scope = 'gmail') AS gmail_scope_denied,
          countIf(event = '$mcp_tool_call' AND properties.$mcp_tool_name LIKE 'gmail_%') AS gmail_tried,
          countIf(event = '$mcp_tool_call' AND properties.$mcp_tool_name LIKE 'gmail_%' AND properties.outcome = 'success') AS gmail_ok,
-         countIf(event = '$mcp_tool_call' AND (properties.$mcp_tool_name LIKE 'sheets_%' OR properties.$mcp_tool_name LIKE 'docs_%')) AS sd_tried,
-         countIf(event = '$mcp_tool_call' AND properties.denial_code IN ('sheets_not_exposed', 'docs_not_exposed')) AS sd_not_exposed,
+         countIf(event = '$mcp_tool_call' AND (properties.$mcp_tool_name LIKE 'sheets_%' OR properties.$mcp_tool_name LIKE 'docs_%' OR properties.$mcp_tool_name LIKE 'slides_%')) AS sd_tried,
+         countIf(event = '$mcp_tool_call' AND properties.denial_code IN ('sheets_not_exposed', 'docs_not_exposed', 'slides_not_exposed')) AS sd_not_exposed,
          countIf(event = 'approval_link_opened')   AS link_opened,
          countIf(event = 'approval_link_approved') AS link_approved,
          countIf(event = 'picker_picked')          AS picked,
-         countIf(event = '$mcp_tool_call' AND (properties.$mcp_tool_name LIKE 'sheets_%' OR properties.$mcp_tool_name LIKE 'docs_%') AND properties.outcome = 'success') AS sd_ok,
+         countIf(event = '$mcp_tool_call' AND (properties.$mcp_tool_name LIKE 'sheets_%' OR properties.$mcp_tool_name LIKE 'docs_%' OR properties.$mcp_tool_name LIKE 'slides_%') AND properties.outcome = 'success') AS sd_ok,
          countIf(event = '$mcp_tool_call' AND properties.outcome = 'success') AS any_ok
   FROM events
   WHERE properties.environment = 'production'

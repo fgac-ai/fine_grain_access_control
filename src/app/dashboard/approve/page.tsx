@@ -97,13 +97,13 @@ export default async function ApprovePage({
     // side — verify the grant is live before claiming the agent can retry
     // (grant-race fix).
     // The settle param is the kind's own setup id param (sid / did / pid).
-    const settleKind = ACTIVE_DRIVE_FILE_KINDS.find(k => params[DRIVE_FILE_KINDS[k].setupIdParam as "sid" | "did" | "pid"]);
+    const settleKind = ACTIVE_DRIVE_FILE_KINDS.find(k => params[DRIVE_FILE_KINDS[k].setupIdParam]);
     if (settleKind) {
       return (
         <Card>
           <ApprovedSettling
             kind={settleKind}
-            fileId={params[DRIVE_FILE_KINDS[settleKind].setupIdParam as "sid" | "did" | "pid"]!}
+            fileId={params[DRIVE_FILE_KINDS[settleKind].setupIdParam]!}
             message={params.message || "The permission has been granted."}
           />
         </Card>

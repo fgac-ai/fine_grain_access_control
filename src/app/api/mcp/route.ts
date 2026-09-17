@@ -41,7 +41,7 @@ import { accountRefusalDenialLine, notifyDenialLine } from '@/lib/approvalNotify
 import { normalizeRequestedEmail } from '@/lib/accountRefusals';
 import { inSuccessSample, AUTH_SUCCESS_SAMPLE } from '@/lib/authSampling';
 import { ensureDefaultProfile } from '@/db/defaultProfile';
-import { mintApprovalLink, describeApproval, actionTarget, fileApprovalActionFor, type ApprovalAction, type ApprovalPayload } from '@/lib/approvalLinks';
+import { mintApprovalLink, describeApproval, actionTarget, fileApprovalActionFor, fileIdFields, type ApprovalAction, type ApprovalPayload } from '@/lib/approvalLinks';
 import { connectionsDeepLink } from '@/lib/dashboardAgentLinks';
 import { recordApprovalMint, getApprovalRequestResourceName } from '@/lib/approvalRequests';
 import {
@@ -51,12 +51,12 @@ import {
 import { TOOL_DEFS, toolAnnotations, type FgacToolDef } from './toolDefs';
 import {
   classifyGoogleApiCall, canonicalizeGoogleApiPath, extractSendRecipients, extractDraftSendInfo,
-  fileApprovalAction, parseDriveFileId,
+  fileApprovalAction, parseDriveFileId, driveFileKindForPath,
   templateGoogleApiPath, rawApiFamily, extractGoogleErrorReason,
   RAW_MODIFY_METHODS, isForwardableGoogleMethod, methodDenial,
   type RawCallClass, type GoogleErrorReason,
 } from './googleApiPolicy';
-import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, kindForMimeType, kindForService, kindForApprovalAction, kindForRequestType, type DriveFileKind } from '@/lib/driveFileKinds';
+import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, kindForMimeType, kindForService, kindForRequestType, type DriveFileKind } from '@/lib/driveFileKinds';
 import { clerkPrimaryEmail } from '@/lib/clerkPrimaryEmail';
 import { ownClerkEmailMatch } from '@/lib/identityDrift';
 import { slugifyProfileLabel } from '@/lib/profileSlugs';
@@ -729,10 +729,9 @@ function approvalPayloadFor(userId: string, proxyKeyId: string, action: Approval
     userId, proxyKeyId, action: action.action, requestId,
     recipient: action.action === 'send_whitelist' ? action.recipient : undefined,
     // Per-file actions carry their id under the kind's own key
-    // (spreadsheetId / documentId / presentationId).
-    ...(kindForApprovalAction(action.action)
-      ? { [DRIVE_FILE_KINDS[kindForApprovalAction(action.action)!].idKey]: actionTarget(action) }
-      : {}),
+    // (spreadsheetId / documentId / presentationId) — same helper the link
+    // verifier uses, so the two payloads cannot disagree.
+    ...fileIdFields(action.action, actionTarget(action)),
     resourceName: 'resourceName' in action ? action.resourceName : undefined,
   };
 }
@@ -814,7 +813,9 @@ async function sendDenialWithLinks(
 
 type GoogleFetchResult =
   | { ok: true; data: unknown }
-  | { ok: false; error: string; status?: number };
+  /** `reason` is Google's error reason enum when the body carried one
+   * (`SERVICE_DISABLED`, `insufficientPermissions`, …). */
+  | { ok: false; error: string; status?: number; reason?: string };
 
 // GoogleErrorReason / extractGoogleErrorReason moved to googleApiPolicy.ts
 // (pure parsing, now unit-tested — it also reads the gRPC-style
@@ -962,7 +963,7 @@ async function googleFetch(
       ...(r.reason || r.status ? { error_reason: r.reason ?? r.status } : {}),
       ...(r.domain ? { error_domain: r.domain } : {}),
     });
-    return { ok: false, error: describeGoogleError(res.status, data, targetEmail), status: res.status };
+    return { ok: false, error: describeGoogleError(res.status, data, targetEmail), status: res.status, reason: r.reason ?? r.status };
   }
   return { ok: true, data };
 }
@@ -986,7 +987,21 @@ async function googleFetch(
  * layer, so internal observability is unaffected. Other statuses stay
  * errorResult.
  */
-function fileGrantErrorResult(kind: DriveFileKind, result: { error: string; status?: number }, fileId: string) {
+function fileGrantErrorResult(kind: DriveFileKind, result: { error: string; status?: number; reason?: string }, fileId: string) {
+  if (result.status === 403 && result.reason === 'SERVICE_DISABLED') {
+    // The product's API is not enabled on the GCP project behind this
+    // environment's OAuth client (Slides on production until the console
+    // step is done). No grant, rule, or Picker pass can fix that — sending
+    // the user to the setup page would loop forever, so name the real cause
+    // and stop the agent. `api_disabled` keeps it separable from grant gaps.
+    const d = DRIVE_FILE_KINDS[kind];
+    addToolCallProps({ denial_code: 'api_disabled' });
+    return textResult(
+      `🚫 Not available: the ${d.productName} API is not enabled for FGAC's Google project, so Google refused this call (403 SERVICE_DISABLED). ` +
+      `This is a configuration step on FGAC's side — not a permission the user can grant, and no retry, re-approval, or Picker step will help. ` +
+      `Tell the user that ${d.productName} access is not yet available in FGAC and to contact support@fgac.ai; Gmail and the other file types are unaffected.`,
+    );
+  }
   if (result.status === 403 || result.status === 404) {
     const d = DRIVE_FILE_KINDS[kind];
     const short = d.shortNoun;
@@ -1311,7 +1326,7 @@ async function checkFilePermission(kind: DriveFileKind, userId: string, proxyKey
     return (isGlobal || isAssigned) && matchesId;
   });
 
-  const nounCap = d.noun.charAt(0).toUpperCase() + d.noun.slice(1);
+  const nounCap = d.nounCap;
   if (fileRules.length === 0) {
     addToolCallProps({ denial_code: `${d.service}_not_exposed` });
     return { allowed: false as const, denial: 'not_exposed' as const, reason: `🚫 Access Denied: ${nounCap} '${fileId}' is not exposed in your FGAC rules.` };
@@ -1360,13 +1375,13 @@ const checkDocsPermission = (userId: string, proxyKeyId: string, documentId: str
  * (`url` / `suffixed` on extraction, `malformed` on refusal; absent for a
  * bare id) so URL-pasting agents stay countable.
  */
-function resolveDriveFileId(kind: DriveFileKind | 'file', raw: string): { id: string } | { denial: ReturnType<typeof textResult> } {
+function resolveDriveFileId(kind: DriveFileKind | null, raw: string): { id: string } | { denial: ReturnType<typeof textResult> } {
   const parsed = parseDriveFileId(raw, kind);
   if (!parsed.ok) {
     addToolCallProps({
       denial_code: parsed.code,
       file_id_input: parsed.code === 'file_id_wrong_kind' ? 'url' : 'malformed',
-      ...(kind === 'file' ? {} : { file_service: DRIVE_FILE_KINDS[kind].service }),
+      ...(kind ? { file_service: DRIVE_FILE_KINDS[kind].service } : {}),
     });
     return { denial: textResult(parsed.reason) };
   }
@@ -1379,7 +1394,7 @@ function resolveDriveFileId(kind: DriveFileKind | 'file', raw: string): { id: st
  * for any kind — the action's id key follows the kind's descriptor. */
 function fileDenialAction(kind: DriveFileKind, perm: FilePermission, fileId: string, isMutating: boolean): ApprovalAction | null {
   if (perm.allowed) return null;
-  return fileApprovalAction(kind, perm.denial, fileId, isMutating) as ApprovalAction | null;
+  return fileApprovalAction(kind, perm.denial, fileId, isMutating);
 }
 const sheetsDenialAction = (perm: SheetsPermission, spreadsheetId: string, isMutating: boolean) =>
   fileDenialAction('sheet', perm, spreadsheetId, isMutating);
@@ -1411,7 +1426,7 @@ async function checkResolvedDriveFile(
 ): Promise<{ denial: Awaited<ReturnType<typeof policyDenialWithLink>> } | { kind: DriveFileKind; perm: FilePermission }> {
   const perm = await checkFilePermission(kind, conn.user.id, proxyKeyId, fileId, isMutating);
   if (!perm.allowed) {
-    const action = fileApprovalAction(kind, perm.denial, fileId, isMutating) as ApprovalAction | null;
+    const action = fileApprovalAction(kind, perm.denial, fileId, isMutating);
     return { denial: await policyDenialWithLink(conn, proxyKeyId, perm.reason, action) };
   }
   return { kind, perm };
@@ -2165,11 +2180,11 @@ async function executeRawGoogleCall(
   // NOT serve the latter two — routing them there returned bare 404s that
   // read as missing resources); everything else rides www.googleapis.com.
   const rawUrl = (p: string) => {
-    for (const k of ACTIVE_DRIVE_FILE_KINDS) {
+    const k = driveFileKindForPath(p);
+    if (k) {
       const d = DRIVE_FILE_KINDS[k];
-      if (p.includes(d.apiCollection)) {
-        return `https://${d.apiHost}/${p.replace(new RegExp(`^${d.apiPathPrefix}\\/`), '')}`;
-      }
+      const prefix = `${d.apiPathPrefix}/`;
+      return `https://${d.apiHost}/${p.startsWith(prefix) ? p.slice(prefix.length) : p}`;
     }
     return /(^|\/)forms(\/|$)/.test(p)
       ? `https://forms.googleapis.com/${p.replace(/^forms\//, '')}`
@@ -2200,7 +2215,7 @@ async function executeRawGoogleCall(
     // this branch the copy was scope-only passthrough: Google allowed it, no
     // rule was written, and the agent could rename/share/trash the copy
     // through Drive while every Sheets write on it denied (2026-09-16).
-    const fid = resolveDriveFileId('file', cls.fileId);
+    const fid = resolveDriveFileId(null, cls.fileId);
     if ('denial' in fid) return fid.denial;
     const check = await checkDriveFilePermission(conn, resolved.proxyKeyId, fid.id, false);
     if ('denial' in check) return check.denial;
@@ -2225,7 +2240,7 @@ async function executeRawGoogleCall(
     // rule (comment writes need Read & Write) instead of scope-only
     // passthrough. Same enforcement as the comments_read / comments_add
     // typed tools.
-    const fid = resolveDriveFileId('file', cls.fileId);
+    const fid = resolveDriveFileId(null, cls.fileId);
     if ('denial' in fid) return fid.denial;
     const check = await checkDriveFilePermission(conn, resolved.proxyKeyId, cls.fileId, cls.isMutating);
     if ('denial' in check) return check.denial;
@@ -2245,7 +2260,7 @@ async function executeRawGoogleCall(
     // REST proxy's Drive guard — see checkDriveFileAccess for the no-rule
     // policy. Before 2026-09-16 this was scope-only passthrough and a Blocked
     // spreadsheet could still be trashed via PATCH {trashed:true}.
-    const fid = resolveDriveFileId('file', cls.fileId);
+    const fid = resolveDriveFileId(null, cls.fileId);
     if ('denial' in fid) return fid.denial;
     const access = await checkDriveFileAccess(conn, resolved, fid.id, cls.isMutating);
     if ('denial' in access) return access.denial;
@@ -3132,7 +3147,7 @@ const handler = createMcpHandler(
     server.registerTool(
       TOOL_DEFS.comments_read.name,
       toolConfig(TOOL_DEFS.comments_read, {
-        fileId: z.string().describe('Google Docs document ID or Google Sheets spreadsheet ID'),
+        fileId: z.string().describe('Google Docs document ID, Google Sheets spreadsheet ID, or Google Slides presentation ID'),
         pageToken: z.string().optional().describe('nextPageToken from a previous page of results'),
         account: z.string().optional().describe('Email account to use.'),
       }),
@@ -3145,7 +3160,7 @@ const handler = createMcpHandler(
         const scopeDenial = driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
-        const fid = resolveDriveFileId('file', fileId);
+        const fid = resolveDriveFileId(null, fileId);
         if ('denial' in fid) return fid.denial;
         fileId = fid.id;
         const check = await checkDriveFilePermission(conn, resolved.proxyKeyId, fileId, false);
@@ -3162,7 +3177,7 @@ const handler = createMcpHandler(
     server.registerTool(
       TOOL_DEFS.comments_add.name,
       toolConfig(TOOL_DEFS.comments_add, {
-        fileId: z.string().describe('Google Docs document ID or Google Sheets spreadsheet ID'),
+        fileId: z.string().describe('Google Docs document ID, Google Sheets spreadsheet ID, or Google Slides presentation ID'),
         content: z.string().describe('Comment or reply text'),
         commentId: z.string().optional().describe('Existing comment ID to reply to (from comments_read). Omit to create a new file-level comment.'),
         resolve: z.boolean().optional().describe('With commentId: also mark the comment resolved (Drive reply action "resolve")'),
@@ -3180,7 +3195,7 @@ const handler = createMcpHandler(
         const scopeDenial = driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
-        const fid = resolveDriveFileId('file', fileId);
+        const fid = resolveDriveFileId(null, fileId);
         if ('denial' in fid) return fid.denial;
         fileId = fid.id;
         const check = await checkDriveFilePermission(conn, resolved.proxyKeyId, fileId, true);
@@ -3398,7 +3413,9 @@ const handler = createMcpHandler(
             deletion: 'NEVER available through any tool — DELETE is rejected by the tool schema and again server-side, and Gmail messages/batchDelete is refused; trash (reversible) is allowed where the file or message rule permits writes',
             rawApi: 'google_api_get / google_api_modify expose the Google API surface the grant covers under these same rules; Drive calls addressed to a file by id (drive/v3/files/{id} metadata, rename/trash, permissions, revisions, export) follow that file\'s rule — a Sheet, Doc, or Slides presentation needs a rule (Read & Write for changes), other file kinds ride the per-file drive.file scope the user granted; Drive listing is never gated; POST v4/spreadsheets, POST v1/documents, POST v1/presentations, POST drive/v3/files and POST drive/v3/files/{id}/copy create new files auto-granted Read & Write to this key (a copy requires the source file to be exposed); APIs outside the grant (People/Contacts, Calendar, Tasks, …) are refused with a clear denial',
           },
-          rules: applicableRules.map(r => ({
+          rules: applicableRules.map(r => {
+            const fileKind = kindForService(r.service);
+            return {
             name: r.ruleName,
             type: r.actionType,
             pattern: r.regexPattern,
@@ -3407,10 +3424,10 @@ const handler = createMcpHandler(
             // Per-file rules: without the file id an agent cannot locate
             // the file it was granted access to. The key is the kind's own
             // (spreadsheetId / documentId / presentationId).
-            ...(kindForService(r.service)
-              ? { [DRIVE_FILE_KINDS[kindForService(r.service)!].idKey]: r.targetResourceId, resourceName: r.resourceName }
+            ...(fileKind
+              ? { [DRIVE_FILE_KINDS[fileKind].idKey]: r.targetResourceId, resourceName: r.resourceName }
               : {}),
-          })),
+          }; }),
         });
       }
     );

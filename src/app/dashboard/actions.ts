@@ -601,15 +601,6 @@ export async function deleteRule(id: string) {
   revalidateDashboard();
 }
 
-const SHEET_ACTION_TYPES = ['sheet_read', 'sheet_read_write', 'sheet_block'] as const;
-
-/**
- * Change the permission level on a Google Sheets rule in place.
- *
- * 'sheet_block' intentionally keeps the underlying file grant while denying
- * access, so a sheet can be suspended and restored without re-running the
- * Google Picker flow.
- */
 /**
  * Persist files picked in the Google Picker as access rules (shared by the
  * sheets, docs, and slides exposure flows).
@@ -618,15 +609,7 @@ const SHEET_ACTION_TYPES = ['sheet_read', 'sheet_read_write', 'sheet_block'] as 
  * global. Existing rules are never narrowed: a global rule stays global, and a
  * profile-scoped rule gains the new assignment instead of replacing the set.
  */
-export async function exposeFilesOfKindFromPicker(
-  kind: DriveFileKind,
-  picked: { id: string; name: string }[],
-  profileId?: string,
-) {
-  return exposeFilesFromPicker(kind, picked, profileId);
-}
-
-async function exposeFilesFromPicker(
+export async function exposeFilesFromPicker(
   kind: DriveFileKind,
   picked: { id: string; name: string }[],
   profileId?: string,
@@ -641,7 +624,7 @@ async function exposeFilesFromPicker(
     if (!key) throw new Error("Unauthorized or profile not found");
   }
 
-  const fallbackNoun = d.noun.charAt(0).toUpperCase() + d.noun.slice(1);
+  const fallbackNoun = d.nounCap;
   for (const file of picked) {
     if (!file?.id) continue;
     const name = file.name || `${fallbackNoun} (${file.id.slice(0, 8)})`;
@@ -703,20 +686,12 @@ async function exposeFilesFromPicker(
   revalidatePath("/dashboard/accounts");
 }
 
-export async function exposeSheetsFromPicker(
-  picked: { id: string; name: string }[],
-  profileId?: string,
-) {
-  return exposeFilesFromPicker('sheet', picked, profileId);
-}
-
-export async function exposeDocsFromPicker(
-  picked: { id: string; name: string }[],
-  profileId?: string,
-) {
-  return exposeFilesFromPicker('doc', picked, profileId);
-}
-
+/**
+ * Change the permission level on a per-file rule (sheet / doc / slide) in
+ * place. The block level intentionally keeps the underlying Google grant
+ * while denying access, so a file can be suspended and restored without
+ * re-running the Google Picker flow.
+ */
 export async function setSheetRulePermission(ruleId: string, actionType: string) {
   const dbUser = await getDbUser();
 

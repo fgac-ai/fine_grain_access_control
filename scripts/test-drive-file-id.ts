@@ -44,7 +44,7 @@ console.log('parseDriveFileId — bare ids pass through:');
 expect('bare doc id → bare', parseDriveFileId(DOC, 'doc'), ok(DOC, 'bare'));
 expect('bare sheet id → bare', parseDriveFileId(SHEET, 'sheet'), ok(SHEET, 'bare'));
 expect('surrounding whitespace trimmed', parseDriveFileId(`  ${DOC}\n`, 'doc'), ok(DOC, 'bare'));
-expect('kind "file" (comments) accepts any bare id', parseDriveFileId(SHEET, 'file'), ok(SHEET, 'bare'));
+expect('kind "file" (comments) accepts any bare id', parseDriveFileId(SHEET, null), ok(SHEET, 'bare'));
 
 console.log('parseDriveFileId — URL residue is stripped (the 2026-09-08 repro):');
 expect('<id>/edit → id', parseDriveFileId(`${DOC}/edit`, 'doc'), ok(DOC, 'suffixed'));
@@ -61,7 +61,7 @@ expect('sheets URL records urlKind', parseDriveFileId(`https://docs.google.com/s
 expect('drive open?id= URL → id', parseDriveFileId(`https://drive.google.com/open?id=${DOC}`, 'doc'), ok(DOC, 'url'));
 expect('drive file/d/<id>/view → id (kind other, accepted)', parseDriveFileId(`https://drive.google.com/file/d/${DOC}/view`, 'doc'), ok(DOC, 'url'));
 expect('http scheme accepted', parseDriveFileId(`http://docs.google.com/document/d/${DOC}/edit`, 'doc'), ok(DOC, 'url'));
-expect('comments kind accepts either product URL', parseDriveFileId(`https://docs.google.com/spreadsheets/d/${SHEET}/edit`, 'file'), ok(SHEET, 'url'));
+expect('comments kind accepts either product URL', parseDriveFileId(`https://docs.google.com/spreadsheets/d/${SHEET}/edit`, null), ok(SHEET, 'url'));
 
 console.log('parseDriveFileId — wrong product URL is refused without a link:');
 expect('sheets URL as documentId → file_id_wrong_kind', parseDriveFileId(`https://docs.google.com/spreadsheets/d/${SHEET}/edit`, 'doc'), refused('file_id_wrong_kind'));

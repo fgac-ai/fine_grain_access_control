@@ -56,9 +56,13 @@ export const APPROVAL_ACTIONS: readonly ApprovalActionName[] = [
 ] as const;
 
 /**
- * Build the per-file approval action for a kind at a level, typed as the
- * union member the kind owns. Every per-file action is `{action, <idKey>}`
- * with the kind's own id key, so this is the one place that spells the key.
+ * Build the per-file approval action for a kind at a level. This is the ONE
+ * construction site for per-file actions, and it is a switch on the kind on
+ * purpose: the union above pairs each action name with its own id key, and
+ * only an explicit per-member literal lets the compiler verify that pairing
+ * (a descriptor-driven `{ [d.idKey]: id }` would need a cast and could pair
+ * `slides_write` with `documentId` without a type error). Adding a kind means
+ * adding its two union members and its case here — nowhere else.
  */
 export function fileApprovalActionFor(
   kind: DriveFileKind,
@@ -66,19 +70,23 @@ export function fileApprovalActionFor(
   fileId: string,
   resourceName?: string,
 ): ApprovalAction {
-  const d = DRIVE_FILE_KINDS[kind];
-  const name = level === 'write' ? d.approvalActions.write : d.approvalActions.expose;
-  return {
-    action: name,
-    [d.idKey]: fileId,
-    ...(resourceName ? { resourceName } : {}),
-  } as unknown as ApprovalAction;
+  const write = level === 'write';
+  const named = resourceName ? { resourceName } : {};
+  switch (kind) {
+    case 'sheet': return write
+      ? { action: 'sheets_write', spreadsheetId: fileId, ...named }
+      : { action: 'sheets_expose', spreadsheetId: fileId, ...named };
+    case 'doc': return write
+      ? { action: 'docs_write', documentId: fileId, ...named }
+      : { action: 'docs_expose', documentId: fileId, ...named };
+    case 'slide': return write
+      ? { action: 'slides_write', presentationId: fileId, ...named }
+      : { action: 'slides_expose', presentationId: fileId, ...named };
+  }
 }
 
 /** The per-file kind an approval payload or action targets, if any. */
-export function approvalFileKind(action: string): DriveFileKind | null {
-  return kindForApprovalAction(action);
-}
+export const approvalFileKind = kindForApprovalAction;
 
 /** The file id a per-file approval payload carries (under the kind's id key). */
 export function approvalFileId(p: Pick<ApprovalPayload, 'action' | 'spreadsheetId' | 'documentId' | 'presentationId'>): string | undefined {
@@ -269,7 +277,7 @@ export async function verifyApprovalParams(
 }
 
 /** `{ <idKey>: target }` for a per-file action, `{}` otherwise. */
-function fileIdFields(action: string, target: string): Partial<ApprovalPayload> {
+export function fileIdFields(action: string, target: string): Partial<ApprovalPayload> {
   const kind = kindForApprovalAction(action);
   return kind ? { [DRIVE_FILE_KINDS[kind].idKey]: target } : {};
 }
@@ -292,10 +300,16 @@ export function describeApproval(p: ApprovalPayload): string {
       return `Allow this agent to send email to ${p.recipient}`;
     case 'send_all':
       return 'Allow this agent to send email to ANY recipient, from every mailbox on its profile';
-    default: {
-      const kind = kindForApprovalAction(p.action);
-      if (!kind) return `Grant this agent ${p.action}`;
-      const d = DRIVE_FILE_KINDS[kind];
+    // Every per-file action is listed so the switch stays exhaustive: a new
+    // action without copy is a compile error, never a raw slug on the
+    // consent page. The copy itself comes from the kind descriptor.
+    case 'sheets_expose':
+    case 'sheets_write':
+    case 'docs_expose':
+    case 'docs_write':
+    case 'slides_expose':
+    case 'slides_write': {
+      const d = DRIVE_FILE_KINDS[kindForApprovalAction(p.action)!];
       const level = p.action === d.approvalActions.write ? 'read & write' : 'read-only';
       return `Give this agent ${level} access to ${d.noun} ${p.resourceName || approvalFileId(p)}`;
     }

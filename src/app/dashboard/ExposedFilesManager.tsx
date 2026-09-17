@@ -26,12 +26,8 @@ const KIND_UI = {
     idHeader: 'Spreadsheet ID',
     emptyTitle: 'No Google Sheets exposed yet',
     emptyBody: 'Click "Add Google Sheet +" to pick spreadsheets using Google Picker and define Read or Read/Write permissions.',
-    accent: 'emerald',
+    accent: { text: 'text-emerald-600', button: 'bg-emerald-600 hover:bg-emerald-500', status: 'bg-emerald-50 border-emerald-200 text-emerald-800', dot: 'bg-emerald-500' },
     iconPath: 'M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 10h-4v4h-2v-4H7v-2h4V7h2v4h4v2z',
-    grantPath: '/api/rules/grant-sheets-access',
-    verifyPath: '/api/rules/verify-sheets-access',
-    rulesKey: 'sheetsRules',
-    noun: 'sheet',
   },
   doc: {
     title: 'Google Docs Access Rules',
@@ -40,12 +36,8 @@ const KIND_UI = {
     idHeader: 'Document ID',
     emptyTitle: 'No Google Docs exposed yet',
     emptyBody: 'Click "Add Google Doc +" to pick documents using Google Picker and define Read or Read/Write permissions.',
-    accent: 'blue',
+    accent: { text: 'text-blue-600', button: 'bg-blue-600 hover:bg-blue-500', status: 'bg-blue-50 border-blue-200 text-blue-800', dot: 'bg-blue-500' },
     iconPath: 'M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z',
-    grantPath: '/api/rules/grant-docs-access',
-    verifyPath: '/api/rules/verify-docs-access',
-    rulesKey: 'docsRules',
-    noun: 'doc',
   },
   slide: {
     title: 'Google Slides Access Rules',
@@ -54,12 +46,8 @@ const KIND_UI = {
     idHeader: 'Presentation ID',
     emptyTitle: 'No Google Slides exposed yet',
     emptyBody: 'Click "Add Google Slides +" to pick presentations using Google Picker and define Read or Read/Write permissions.',
-    accent: 'amber',
+    accent: { text: 'text-amber-600', button: 'bg-amber-600 hover:bg-amber-500', status: 'bg-amber-50 border-amber-200 text-amber-800', dot: 'bg-amber-500' },
     iconPath: 'M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-1 13H6V8h12v8zm-9-6h6v4H9v-4z',
-    grantPath: '/api/rules/grant-slides-access',
-    verifyPath: '/api/rules/verify-slides-access',
-    rulesKey: 'slidesRules',
-    noun: 'presentation',
   },
 } as const;
 
@@ -80,33 +68,33 @@ export function ExposedFilesManager({ kind, activeKeys = [] }: { kind: DriveFile
 
   const fetchFileRules = useCallback(async () => {
     try {
-      const res = await fetch(ui.grantPath);
+      const res = await fetch(d.grantPath);
       const data = await res.json();
-      if (data[ui.rulesKey]) {
-        setFileRules(data[ui.rulesKey]);
+      if (data[d.rulesKey]) {
+        setFileRules(data[d.rulesKey]);
       }
     } catch (err) {
-      console.error(`Failed to load ${ui.noun} rules:`, err);
+      console.error(`Failed to load ${d.shortNoun} rules:`, err);
     } finally {
       setIsLoading(false);
     }
     try {
-      const res = await fetch(ui.verifyPath);
+      const res = await fetch(d.verifyPath);
       const data = await res.json();
       setGrantStates(data.grants ?? {});
     } catch {
       setGrantStates({});
     }
-  }, [ui.grantPath, ui.verifyPath, ui.rulesKey, ui.noun]);
+  }, [d.grantPath, d.verifyPath, d.rulesKey, d.shortNoun]);
 
   useEffect(() => {
     fetchFileRules();
   }, [fetchFileRules]);
 
   const handleFilesPicked = async (picked: PickedFile[]) => {
-    setStatusMessage(`Saving exposed ${ui.noun}s to FGAC...`);
+    setStatusMessage(`Saving exposed ${d.shortNoun}s to FGAC...`);
     for (const file of picked) {
-      await fetch(ui.grantPath, {
+      await fetch(d.grantPath, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -117,7 +105,7 @@ export function ExposedFilesManager({ kind, activeKeys = [] }: { kind: DriveFile
       });
     }
     await fetchFileRules();
-    setStatusMessage(`Successfully added ${picked.length} ${ui.noun}(s)!`);
+    setStatusMessage(`Successfully added ${picked.length} ${d.shortNoun}(s)!`);
     setTimeout(() => setStatusMessage(null), 4000);
   };
 
@@ -125,7 +113,7 @@ export function ExposedFilesManager({ kind, activeKeys = [] }: { kind: DriveFile
 
   const handlePermissionChange = async (targetResourceId: string, resourceName: string | null, newActionType: string) => {
     try {
-      await fetch(ui.grantPath, {
+      await fetch(d.grantPath, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -142,27 +130,17 @@ export function ExposedFilesManager({ kind, activeKeys = [] }: { kind: DriveFile
 
   const handleDeleteRule = async (ruleId: string) => {
     try {
-      await fetch(`${ui.grantPath}?ruleId=${ruleId}`, {
+      await fetch(`${d.grantPath}?ruleId=${ruleId}`, {
         method: 'DELETE'
       });
       await fetchFileRules();
     } catch (err) {
-      console.error(`Failed to remove ${ui.noun} rule:`, err);
+      console.error(`Failed to remove ${d.shortNoun} rule:`, err);
     }
   };
 
-  const accentText = ui.accent === 'emerald' ? 'text-emerald-600' : ui.accent === 'amber' ? 'text-amber-600' : 'text-blue-600';
-  const accentButton = ui.accent === 'emerald'
-    ? 'bg-emerald-600 hover:bg-emerald-500'
-    : ui.accent === 'amber'
-      ? 'bg-amber-600 hover:bg-amber-500'
-      : 'bg-blue-600 hover:bg-blue-500';
-  const accentStatus = ui.accent === 'emerald'
-    ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-    : ui.accent === 'amber'
-      ? 'bg-amber-50 border-amber-200 text-amber-800'
-      : 'bg-blue-50 border-blue-200 text-blue-800';
-  const accentDot = ui.accent === 'emerald' ? 'bg-emerald-500' : ui.accent === 'amber' ? 'bg-amber-500' : 'bg-blue-500';
+  // Per-kind class names live in KIND_UI as one row each (no ternary chains).
+  const { text: accentText, button: accentButton, status: accentStatus, dot: accentDot } = ui.accent;
 
   return (
     <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm mb-6">
@@ -204,7 +182,7 @@ export function ExposedFilesManager({ kind, activeKeys = [] }: { kind: DriveFile
       )}
 
       {isLoading ? (
-        <div className="py-8 text-center text-slate-400 text-sm">Loading {ui.noun}s access rules...</div>
+        <div className="py-8 text-center text-slate-400 text-sm">Loading {d.shortNoun}s access rules...</div>
       ) : fileRules.length === 0 ? (
         <div className="py-8 border-2 border-dashed border-slate-200 rounded-lg text-center p-6 bg-slate-50/50">
           <svg className="w-10 h-10 text-slate-400 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -241,7 +219,7 @@ export function ExposedFilesManager({ kind, activeKeys = [] }: { kind: DriveFile
                       <a
                         href={`${d.setupPath}?${d.setupIdParam}=${encodeURIComponent(rule.targetResourceId)}${displayName !== rule.ruleName ? `&name=${encodeURIComponent(displayName)}` : ''}`}
                         className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-800 hover:bg-amber-100 transition-colors flex-shrink-0"
-                        title={`FGAC has this rule, but Google hasn't shared the ${ui.noun} with FGAC yet — agents get errors until you pick it in the Google Picker.`}
+                        title={`FGAC has this rule, but Google hasn't shared the ${d.shortNoun} with FGAC yet — agents get errors until you pick it in the Google Picker.`}
                       >
                         ⚠ Needs Google access — finish setup
                       </a>

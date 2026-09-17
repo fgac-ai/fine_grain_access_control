@@ -279,6 +279,15 @@ expect('slides batchUpdate verb suffix → enforced slide write (verb not part o
 expect('slides no-id GET → passthrough (Google rejects it, not us)',
   classifyGoogleApiCall('v1/presentations', 'GET'),
   (c: { kind: string; family?: string }) => c.kind === 'passthrough' && c.family === 'presentations');
+expect('dot-segment traversal is refused before classification',
+  classifyGoogleApiCall('v4/spreadsheets/1AllowedId/../1SecretId/values/A1', 'GET'),
+  (c: { kind: string; code?: string }) => c.kind === 'denied' && c.code === 'raw_api_path_malformed');
+expect('percent-encoded dot segment is refused too',
+  classifyGoogleApiCall('v1/documents/1AllowedId/%2e%2e/1SecretId', 'GET'),
+  (c: { kind: string; code?: string }) => c.kind === 'denied' && c.code === 'raw_api_path_malformed');
+expect('a query value containing a collection name does not change the family',
+  classifyGoogleApiCall("drive/v3/files?q=name contains 'presentations'", 'GET'),
+  (c: { kind: string; family?: string }) => c.kind === 'passthrough' && c.family === 'drive/v3');
 console.log('extractDriveFileKindId (slides):');
 expect('slides plain path', extractDriveFileKindId('slide', 'slides/v1/presentations/1AbC_x-9'), (id: string | null) => id === '1AbC_x-9');
 expect('slides batchUpdate verb excluded', extractDriveFileKindId('slide', 'v1/presentations/1AbC:batchUpdate'), (id: string | null) => id === '1AbC');

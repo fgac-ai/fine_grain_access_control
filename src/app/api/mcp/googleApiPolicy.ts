@@ -19,6 +19,7 @@
  */
 
 import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, type DriveFileKind } from '../../../lib/driveFileKinds';
+import { fileApprovalActionFor, type ApprovalAction } from '../../../lib/approvalLinks';
 
 export type RawCallClass =
   /** A call addressed to one Sheets/Docs/Slides file by id: enforced per-file. */
@@ -45,7 +46,8 @@ export type DenialCode =
   | 'gmail_write_unsupported'
   | 'gmail_settings_unsupported'
   | 'file_id_malformed'
-  | 'file_id_wrong_kind';
+  | 'file_id_wrong_kind'
+  | 'raw_api_path_malformed';
 
 /**
  * The HTTP methods the raw tools forward, and nothing else. "Deletion is
@@ -122,22 +124,58 @@ const UNSUPPORTED_GOOGLE_APIS: Record<string, string> = {
  */
 const DRIVE_BARE_PATH = /^v[23]\/(files|drives|about|changes)([/?#:]|$)/i;
 
+/** True when any path segment is `.` / `..` in plain or percent-encoded form. */
+export function hasDotSegment(path: string): boolean {
+  return path.split(/[?#]/)[0].split('/').some(seg => {
+    let s = seg;
+    try { s = decodeURIComponent(seg); } catch { /* keep raw */ }
+    return s === '.' || s === '..';
+  });
+}
+
 export function canonicalizeGoogleApiPath(rawPath: string): string {
   const path = rawPath.replace(/^\/+/, '');
   return DRIVE_BARE_PATH.test(path) ? `drive/${path}` : path;
 }
 
 /**
- * The file id after a kind's collection segment (`v4/spreadsheets/{id}`,
- * `docs/v1/documents/{id}`, bare `presentations/{id}`), with any `:verb`
- * suffix excluded. Null when the path names the collection without an id
- * (a create, or nonsense Google will reject itself).
+ * Per-kind id regexes, compiled once at module load from the descriptor:
+ * `v4/spreadsheets/{id}`, `sheets/v4/spreadsheets/{id}`, or the bare
+ * `spreadsheets/{id}` spelling, with any `:verb` suffix excluded. The API
+ * version is pinned (a `v1/spreadsheets/…` path is not a Sheets call).
+ */
+const FILE_ID_RE: Record<DriveFileKind, RegExp> = Object.fromEntries(
+  (Object.keys(DRIVE_FILE_KINDS) as DriveFileKind[]).map(kind => {
+    const d = DRIVE_FILE_KINDS[kind];
+    return [kind, new RegExp(
+      `(?:${d.apiVersion}\\/${d.apiCollection}|${d.apiPathPrefix}\\/${d.apiVersion}\\/${d.apiCollection}|${d.apiCollection})\\/([^/?:#]+)`,
+    )];
+  }),
+) as Record<DriveFileKind, RegExp>;
+
+/**
+ * The file id after a kind's collection segment, or null when the path names
+ * the collection without an id (a create, or nonsense Google will reject
+ * itself).
  */
 export function extractDriveFileKindId(kind: DriveFileKind, path: string): string | null {
-  const d = DRIVE_FILE_KINDS[kind];
-  const re = new RegExp(`(?:v\\d+\\/${d.apiCollection}|${d.apiPathPrefix}\\/v\\d+\\/${d.apiCollection}|${d.apiCollection})\\/([^/?:#]+)`);
-  const match = path.match(re);
+  const match = path.match(FILE_ID_RE[kind]);
   return match ? decodeURIComponent(match[1]) : null;
+}
+
+/**
+ * The per-file kind a raw path addresses, by exact collection segment
+ * (`spreadsheets` / `documents` / `presentations`, with any `:verb`
+ * stripped) — shared by the MCP classifier and the REST proxy so both
+ * surfaces agree on which paths are Sheets/Docs/Slides calls.
+ */
+export function driveFileKindForPath(path: string): DriveFileKind | null {
+  const segments = path.split(/[?#]/)[0].split('/').filter(Boolean);
+  for (const kind of ACTIVE_DRIVE_FILE_KINDS) {
+    const coll = DRIVE_FILE_KINDS[kind].apiCollection;
+    if (segments.some(s => s.split(':')[0] === coll)) return kind;
+  }
+  return null;
 }
 
 export function extractSheetsSpreadsheetId(path: string): string | null {
@@ -158,6 +196,14 @@ export function classifyGoogleApiCall(rawPath: string, method: string): RawCallC
   if (!isForwardableGoogleMethod(method)) return methodDenial(method);
 
   const path = canonicalizeGoogleApiPath(rawPath).split(/[?#]/)[0];
+  // Dot segments are refused before anything else looks at the path: the
+  // per-file check authorizes the id after the collection segment, but the
+  // URL parser would collapse `<allowed>/../<other>` before the request
+  // leaves, so policy and Google would see different files. `%2e` spellings
+  // count too (WHATWG treats them as dots).
+  if (hasDotSegment(path)) {
+    return { kind: 'denied', code: 'raw_api_path_malformed', reason: '🚫 Access Denied: the path contains a "." or ".." segment, which FGAC never forwards — spell the full path to the resource instead.' };
+  }
   let segments = path.split('/').filter(Boolean).map(s => s.toLowerCase());
 
   // Media-upload variants (`upload/gmail/v1/…`, `upload/drive/v3/…`) are the
@@ -207,13 +253,12 @@ export function classifyGoogleApiCall(rawPath: string, method: string): RawCallC
   // auto-granted to the calling key by the route so the agent can keep
   // working on what it made. Anything else id-less is nonsense Google will
   // reject itself — forward it rather than inventing a denial.
-  for (const fileKind of ACTIVE_DRIVE_FILE_KINDS) {
-    const d = DRIVE_FILE_KINDS[fileKind];
-    if (!segments.some(s => s.split(':')[0] === d.apiCollection)) continue;
+  const fileKind = driveFileKindForPath(path);
+  if (fileKind) {
     const fileId = extractDriveFileKindId(fileKind, path);
     if (!fileId) {
       if (isMutating) return { kind: 'file_create', fileKind };
-      return { kind: 'passthrough', family: d.apiCollection, isMutating };
+      return { kind: 'passthrough', family: DRIVE_FILE_KINDS[fileKind].apiCollection, isMutating };
     }
     return { kind: 'file', fileKind, fileId, isMutating };
   }
@@ -534,42 +579,26 @@ function fileApprovalLevel(denial: FileDenialKind, isMutating: boolean): 'expose
 }
 
 /**
- * The approval action a per-file denial should mint, for any kind:
- * `{ action: <kind's expose|write action>, <kind's idKey>: fileId }`, or null
- * for explicit blocks. The shape matches approvalLinks' ApprovalAction union
- * member for the kind (fileApprovalActionFor there builds the same object
- * with the resourceName); it is spelled here so this module stays free of
- * anything but the descriptor.
+ * The approval action a per-file denial should mint, for any kind, or null
+ * for explicit blocks. The policy decision (which LEVEL the denied operation
+ * needs) lives here; the typed action object is built by approvalLinks'
+ * fileApprovalActionFor, the one construction site for the union.
  */
 export function fileApprovalAction(
   kind: DriveFileKind,
   denial: FileDenialKind,
   fileId: string,
   isMutating: boolean,
-): { action: string; [idKey: string]: string } | null {
+): ApprovalAction | null {
   const level = fileApprovalLevel(denial, isMutating);
-  if (!level) return null;
-  const d = DRIVE_FILE_KINDS[kind];
-  return { action: level === 'write' ? d.approvalActions.write : d.approvalActions.expose, [d.idKey]: fileId };
+  return level ? fileApprovalActionFor(kind, level, fileId) : null;
 }
 
-export function sheetsApprovalAction(
-  denial: SheetsDenialKind,
-  spreadsheetId: string,
-  isMutating: boolean,
-): { action: 'sheets_expose' | 'sheets_write'; spreadsheetId: string } | null {
-  return fileApprovalAction('sheet', denial, spreadsheetId, isMutating) as
-    { action: 'sheets_expose' | 'sheets_write'; spreadsheetId: string } | null;
-}
+export const sheetsApprovalAction = (denial: SheetsDenialKind, spreadsheetId: string, isMutating: boolean) =>
+  fileApprovalAction('sheet', denial, spreadsheetId, isMutating);
 
-export function docsApprovalAction(
-  denial: FileDenialKind,
-  documentId: string,
-  isMutating: boolean,
-): { action: 'docs_expose' | 'docs_write'; documentId: string } | null {
-  return fileApprovalAction('doc', denial, documentId, isMutating) as
-    { action: 'docs_expose' | 'docs_write'; documentId: string } | null;
-}
+export const docsApprovalAction = (denial: FileDenialKind, documentId: string, isMutating: boolean) =>
+  fileApprovalAction('doc', denial, documentId, isMutating);
 
 // ── Drive file id shape ───────────────────────────────────────────────
 
@@ -596,8 +625,9 @@ export type DriveFileIdParse =
   | { ok: true; id: string; input: 'bare' | 'url' | 'suffixed'; urlKind?: DriveUrlKind }
   | { ok: false; code: 'file_id_malformed' | 'file_id_wrong_kind'; reason: string };
 
-const kindNoun = (expected: DriveFileKind | 'file'): string =>
-  expected === 'file' ? 'file' : DRIVE_FILE_KINDS[expected].noun;
+/** `expected === null` means a kind-agnostic file id (Drive comments, copies). */
+const kindNoun = (expected: DriveFileKind | null): string =>
+  expected ? DRIVE_FILE_KINDS[expected].noun : 'file';
 
 function urlKindFromPath(pathname: string): DriveUrlKind {
   for (const kind of ACTIVE_DRIVE_FILE_KINDS) {
@@ -636,7 +666,7 @@ function clip(raw: string): string {
  * Anything else is `file_id_malformed` and the reason names the shape. Neither
  * refusal mints an approval link.
  */
-export function parseDriveFileId(raw: string, expected: DriveFileKind | 'file'): DriveFileIdParse {
+export function parseDriveFileId(raw: string, expected: DriveFileKind | null): DriveFileIdParse {
   const s = raw.trim();
   if (DRIVE_FILE_ID_RE.test(s)) return { ok: true, id: s, input: 'bare' };
 
@@ -654,7 +684,7 @@ export function parseDriveFileId(raw: string, expected: DriveFileKind | 'file'):
     const id = fromPath?.[1] ?? url.searchParams.get('id') ?? '';
     if (!DRIVE_FILE_ID_RE.test(id)) return malformed();
     const urlKind = urlKindFromPath(url.pathname);
-    if (expected !== 'file' && urlKind !== 'other' && urlKind !== expected) {
+    if (expected && urlKind !== 'other' && urlKind !== expected) {
       const u = DRIVE_FILE_KINDS[urlKind];
       return {
         ok: false,

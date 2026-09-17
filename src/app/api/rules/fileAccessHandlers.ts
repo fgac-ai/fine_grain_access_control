@@ -28,7 +28,7 @@ const kindNames = (kind: DriveFileKind) => {
     recoveredEvent: d.grantAnalytics.recoveredEvent,
     verificationEvent: d.grantAnalytics.verificationEvent,
     rulesKey: d.rulesKey,
-    fallbackNoun: d.noun.charAt(0).toUpperCase() + d.noun.slice(1),
+    fallbackNoun: d.nounCap,
   };
 };
 
