@@ -114,6 +114,9 @@ check('docs fields-mask render carries the hidden cause and the Docs example', /
 const unknownRendered = renderBadRequest(classifyGoogleBadRequest('Something new.'), 'other');
 check('unknown kind renders message + STOP only', unknownRendered === `❌ Google API error (400): Something new. ${BAD_REQUEST_STOP}`);
 
+const protoRendered = renderBadRequest(classifyGoogleBadRequest('Invalid values[0][0]: list_value \t {\n  values {\n    string_value: "x"\n  }\n}\n'), 'sheets');
+check('protobuf dump is collapsed onto one line', !/[\t\n]/.test(protoRendered) && protoRendered.includes('list_value { values { string_value: "x" } }. `values` must be'));
+
 console.log('googleApiFamilyForUrl:');
 check('sheets', googleApiFamilyForUrl('https://sheets.googleapis.com/v4/spreadsheets/x/values/A1') === 'sheets');
 check('docs', googleApiFamilyForUrl('https://docs.googleapis.com/v1/documents/x:batchUpdate') === 'docs');

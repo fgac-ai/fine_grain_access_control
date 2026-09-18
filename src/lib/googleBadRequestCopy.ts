@@ -81,9 +81,14 @@ export function extractFieldViolations(data: unknown): string[] {
   return out;
 }
 
-/** Google's message plus any violation it does not already state, period-stripped. */
+/**
+ * Google's message plus any violation it does not already state,
+ * period-stripped and whitespace-collapsed (the values-shape message embeds
+ * a multi-line protobuf dump — `list_value \t {\n values {…} }` — that
+ * otherwise splits the agent-facing sentence across lines).
+ */
 export function badRequestDetail(message: string, violations: string[]): string {
-  const strip = (s: string) => s.trim().replace(/\s*\.\s*$/, '');
+  const strip = (s: string) => s.replace(/\s+/g, ' ').trim().replace(/\s*\.\s*$/, '');
   const base = strip(message);
   const extra = violations.map(strip).filter(v => v && !base.includes(v) && !v.includes(base));
   return [base, ...extra].filter(Boolean).join(' — ');
