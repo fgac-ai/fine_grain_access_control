@@ -66,6 +66,10 @@ import {
   type GoogleTokenFailureReason,
 } from '@/lib/googleTokenFailure';
 import { liveTokenScopes, reconcileScopes } from '@/lib/googleTokenScopes';
+import {
+  classifyGoogleBadRequest, extractFieldViolations, renderBadRequest, googleApiFamilyForUrl,
+  type GoogleBadRequest, type GoogleApiFamily, type SheetTab,
+} from '@/lib/googleBadRequestCopy';
 
 /** Env URL values have shipped with trailing whitespace/newlines (pasted
  * Vercel vars); a whitespace-only value must also not win the fallback chain.
@@ -815,7 +819,12 @@ type GoogleFetchResult =
   | { ok: true; data: unknown }
   /** `reason` is Google's error reason enum when the body carried one
    * (`SERVICE_DISABLED`, `insufficientPermissions`, …). */
-  | { ok: false; error: string; status?: number; reason?: string };
+  | {
+    ok: false; error: string; status?: number; reason?: string;
+    /** Set on 400 INVALID_ARGUMENT: what Google objected to, so per-tool
+     * result sites can add remedies the fetch layer cannot (sheet tabs). */
+    badRequest?: GoogleBadRequest;
+  };
 
 // GoogleErrorReason / extractGoogleErrorReason moved to googleApiPolicy.ts
 // (pure parsing, now unit-tested — it also reads the gRPC-style
@@ -873,13 +882,24 @@ function describe403(detail: string, targetEmail: string, r: GoogleErrorReason):
     `Retry ONCE after a short pause — if it fails again it is the grant, not throttling, and reconnecting is the fix: ${reconnectLink(targetEmail)}`;
 }
 
-function describeGoogleError(status: number, data: unknown, targetEmail: string): string {
+function describeGoogleError(
+  status: number, data: unknown, targetEmail: string,
+  family: GoogleApiFamily = 'other', badRequest?: GoogleBadRequest,
+): string {
   // Google's `message` usually ends in a period and every call site appends
   // its own, producing "…scopes.." in agent-facing text.
   const detail = ((data as { error?: { message?: string } })?.error?.message
     || (typeof data === 'string' ? data.slice(0, 300) : '')).replace(/\s*\.\s*$/, '');
   const r = extractGoogleErrorReason(data);
   switch (status) {
+    case 400: {
+      // Largest tool-error class (7 d to 2026-09-18) and, until now, the only
+      // 4xx with no remedy and no stop line. Google's cause can sit in
+      // fieldViolations under a generic message, so the detail merges it;
+      // the guidance is per kind (src/lib/googleBadRequestCopy.ts) and the
+      // sheets result site appends the tab list on range errors.
+      return renderBadRequest(badRequest ?? classifyGoogleBadRequest(detail, extractFieldViolations(data)), family);
+    }
     case 401:
       return `❌ Google authorization expired for '${targetEmail}'. STOP — do not retry; it will keep failing. ` +
         `Ask the user to reconnect this Google account with this one-click link (it opens Google's consent screen directly): ` +
@@ -954,6 +974,15 @@ async function googleFetch(
     // from a revoked grant. See extractGoogleErrorReason for why these are
     // safe to put on an event.
     const r = extractGoogleErrorReason(data);
+    // 400s: which argument Google objected to (range, values shape, request
+    // index, fields mask). Kind strings are FGAC's own enum, never customer
+    // data; `bad_request_index` is a position in the caller's array.
+    const badRequest = res.status === 400
+      ? classifyGoogleBadRequest(
+        (data as { error?: { message?: string } })?.error?.message ?? (typeof data === 'string' ? data : ''),
+        extractFieldViolations(data),
+      )
+      : undefined;
     addToolCallProps({
       error_status: res.status,
       // Fall back to Google's canonical status string (PERMISSION_DENIED,
@@ -962,8 +991,16 @@ async function googleFetch(
       // triaged by cause at all.
       ...(r.reason || r.status ? { error_reason: r.reason ?? r.status } : {}),
       ...(r.domain ? { error_domain: r.domain } : {}),
+      ...(badRequest ? { bad_request_kind: badRequest.kind } : {}),
+      ...(badRequest?.requestIndex !== undefined ? { bad_request_index: badRequest.requestIndex } : {}),
     });
-    return { ok: false, error: describeGoogleError(res.status, data, targetEmail), status: res.status, reason: r.reason ?? r.status };
+    return {
+      ok: false,
+      error: describeGoogleError(res.status, data, targetEmail, googleApiFamilyForUrl(url), badRequest),
+      status: res.status,
+      reason: r.reason ?? r.status,
+      badRequest,
+    };
   }
   return { ok: true, data };
 }
@@ -1128,8 +1165,51 @@ function gmailNotFoundResult(
   );
 }
 
-const sheetsErrorResult = (result: { error: string; status?: number }, spreadsheetId: string) =>
-  fileGrantErrorResult('sheet', result, spreadsheetId);
+/**
+ * Sheets typed-tool failure. On a 400 whose cause is the range (a tab that
+ * does not exist, or a range past the grid), one metadata GET lists the
+ * spreadsheet's tabs into the error — the rule exists and the token just
+ * worked (the 400 came from Google after FGAC's own check passed), so the
+ * call is permitted and costs the agent nothing. Measured before (7 d to
+ * 2026-09-18): the recovery agents performed on their own was exactly this
+ * read (`sheets_get_spreadsheet` within ~13 s of the 400), repeated in every
+ * new conversation because the guessed tab name ('Sheet1') never learns. The
+ * lookup is best-effort — a failure leaves the generic pointer at
+ * sheets_get_spreadsheet in place — and `sheet_tabs_listed` counts how often
+ * the list was actually shown (docs/monitoring.md 7.28).
+ */
+async function sheetsErrorResult(
+  result: { error: string; status?: number; reason?: string; badRequest?: GoogleBadRequest },
+  spreadsheetId: string,
+  ctx?: { token: string; targetEmail: string },
+) {
+  const kind = result.badRequest?.kind;
+  if (result.status === 400 && ctx && (kind === 'range_parse' || kind === 'grid_limits')) {
+    const tabs = await listSheetTabs(ctx.token, spreadsheetId, ctx.targetEmail);
+    addToolCallProps({ sheet_tabs_listed: tabs?.length ?? 0 });
+    // Same prefix and Google detail as the fetch layer rendered, with the
+    // tab list in place of the tab-less pointer at sheets_get_spreadsheet.
+    return errorResult(renderBadRequest(result.badRequest!, 'sheets', tabs ?? []));
+  }
+  return fileGrantErrorResult('sheet', result, spreadsheetId);
+}
+
+/** Tab titles and grid sizes, or null when the metadata read itself fails. */
+async function listSheetTabs(token: string, spreadsheetId: string, targetEmail: string): Promise<SheetTab[] | null> {
+  const meta = await sheetsFetch(
+    token, `${spreadsheetId}?fields=${encodeURIComponent('sheets.properties(title,gridProperties(rowCount,columnCount))')}`,
+    'GET', undefined, targetEmail,
+  );
+  if (!meta.ok) return null;
+  const sheets = (meta.data as { sheets?: Array<{ properties?: { title?: string; gridProperties?: { rowCount?: number; columnCount?: number } } }> })?.sheets;
+  if (!Array.isArray(sheets)) return null;
+  return sheets.flatMap(s => {
+    const p = s?.properties;
+    return p && typeof p.title === 'string'
+      ? [{ title: p.title, rowCount: p.gridProperties?.rowCount, columnCount: p.gridProperties?.columnCount }]
+      : [];
+  });
+}
 const docsErrorResult = (result: { error: string; status?: number }, documentId: string) =>
   fileGrantErrorResult('doc', result, documentId);
 
@@ -2863,7 +2943,7 @@ const handler = createMcpHandler(
       TOOL_DEFS.sheets_read_range.name,
       toolConfig(TOOL_DEFS.sheets_read_range, {
         spreadsheetId: z.string().describe('Google Spreadsheet ID'),
-        range: z.string().describe("Cell range (e.g. 'Sheet1'!A1:D20 or 'Sheet1')"),
+        range: z.string().describe("A1 range: 'Tab name'!A1:D20 (single quotes around a tab name with spaces), or a bare tab name for the whole tab. Tab names must match an existing tab exactly — take them from sheets_get_spreadsheet rather than assuming 'Sheet1'."),
         account: z.string().optional().describe('Email account to use.'),
         offset: z.number().int().min(0).optional().describe('Start position (chars into the serialized JSON response) for a windowed read of a large range. Prefer narrowing the range first. Use the next_offset from the previous response to continue; start at 0.'),
         limit: z.number().int().min(1).optional().describe('Max chars to return in this response (server caps at 200000). Size this to YOUR tool-result budget. Passing offset or limit switches to the windowed envelope.'),
@@ -2885,7 +2965,7 @@ const handler = createMcpHandler(
 
         const encodedRange = encodeURIComponent(range);
         const result = await withSheetsGrace(perm, () => sheetsFetch(resolved.token, `${spreadsheetId}/values/${encodedRange}`, 'GET', undefined, resolved.targetEmail));
-        if (!result.ok) return sheetsErrorResult(result, spreadsheetId);
+        if (!result.ok) return sheetsErrorResult(result, spreadsheetId, resolved);
         if (offset !== undefined || limit !== undefined) {
           return windowedResult(JSON.stringify(result.data, null, 2), offset, limit, { spreadsheetId, range });
         }
@@ -2898,7 +2978,7 @@ const handler = createMcpHandler(
       TOOL_DEFS.sheets_update_range.name,
       toolConfig(TOOL_DEFS.sheets_update_range, {
         spreadsheetId: z.string().describe('Google Spreadsheet ID'),
-        range: z.string().describe("Cell range (e.g. 'Sheet1'!A1:B2)"),
+        range: z.string().describe("A1 range to overwrite: 'Tab name'!A1:B2 (single quotes around a tab name with spaces). The range must cover every row and column in values. Tab names must match an existing tab exactly — take them from sheets_get_spreadsheet rather than assuming 'Sheet1'."),
         values: z.array(z.array(z.any())).describe('2D array of cell values'),
         account: z.string().optional().describe('Email account to use.'),
       }),
@@ -2920,7 +3000,7 @@ const handler = createMcpHandler(
         const encodedRange = encodeURIComponent(range);
         const body = JSON.stringify({ values, range });
         const result = await withSheetsGrace(perm, () => sheetsFetch(resolved.token, `${spreadsheetId}/values/${encodedRange}?valueInputOption=USER_ENTERED`, 'PUT', body, resolved.targetEmail));
-        if (!result.ok) return sheetsErrorResult(result, spreadsheetId);
+        if (!result.ok) return sheetsErrorResult(result, spreadsheetId, resolved);
         return jsonResult({
           ...(result.data as Record<string, unknown>),
           fgac_hint: 'Values written. Formatting, charts, and structural changes: sheets_edit (same rule authorizes both).',
@@ -2933,7 +3013,7 @@ const handler = createMcpHandler(
       TOOL_DEFS.sheets_append_rows.name,
       toolConfig(TOOL_DEFS.sheets_append_rows, {
         spreadsheetId: z.string().describe('Google Spreadsheet ID'),
-        range: z.string().describe("Sheet tab or range to append to (e.g. 'Sheet1')"),
+        range: z.string().describe("Tab to append to, as its exact name ('Q3 Budget') or a range on it ('Q3 Budget'!A:D). Tab names come from sheets_get_spreadsheet — do not assume a tab called 'Sheet1' exists."),
         values: z.array(z.array(z.any())).describe('2D array of rows to append'),
         account: z.string().optional().describe('Email account to use.'),
       }),
@@ -2955,7 +3035,7 @@ const handler = createMcpHandler(
         const encodedRange = encodeURIComponent(range);
         const body = JSON.stringify({ values });
         const result = await withSheetsGrace(perm, () => sheetsFetch(resolved.token, `${spreadsheetId}/values/${encodedRange}:append?valueInputOption=USER_ENTERED`, 'POST', body, resolved.targetEmail));
-        if (!result.ok) return sheetsErrorResult(result, spreadsheetId);
+        if (!result.ok) return sheetsErrorResult(result, spreadsheetId, resolved);
         return jsonResult({
           ...(result.data as Record<string, unknown>),
           fgac_hint: 'Rows appended as values. Formatting or structural changes: sheets_edit (same rule authorizes both).',
@@ -2988,7 +3068,7 @@ const handler = createMcpHandler(
 
         const body = JSON.stringify({ requests });
         const result = await withSheetsGrace(perm, () => sheetsFetch(resolved.token, `${spreadsheetId}:batchUpdate`, 'POST', body, resolved.targetEmail));
-        if (!result.ok) return sheetsErrorResult(result, spreadsheetId);
+        if (!result.ok) return sheetsErrorResult(result, spreadsheetId, resolved);
         return jsonResult(result.data);
       }
     );
