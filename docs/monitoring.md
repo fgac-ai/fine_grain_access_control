@@ -2072,3 +2072,90 @@ done (or was done on the wrong project — dev is 627660126377, prod is
 `slides_expose` / `slides_write` as the actions). Note the family rename in
 `docs/analytics.md`: pre-2026-09-17 Slides rows carry `raw_api_family='slides'`,
 enforced rows carry `'presentations'`.
+
+**7.28 — Google 400 INVALID_ARGUMENT per tool (wrong range / wrong body).**
+Added 2026-09-18 with the bad-request copy change
+(`src/lib/googleBadRequestCopy.ts`,
+`docs/implementation_plans/claude_sheets-400-invalid-argument_v1.md`). In the
+7 d to 2026-09-18 this was the largest tool-error class among external users:
+
+| tool | 400s | people |
+| --- | --- | --- |
+| `sheets_update_range` | 29 | 9 |
+| `sheets_read_range` | 27 | 11 |
+| `sheets_edit` | 9 | 8 |
+| `sheets_append_rows` | 7 | 2 |
+| `docs_read_document` | 7 | 1 |
+| `docs_edit` | 6 | 3 |
+| `google_api_modify` | 6 | 3 |
+
+Every one landed on a file the same person was otherwise using successfully
+(the approval had worked — the argument was wrong), and nearly every one was
+followed within seconds by a success on the same file, usually after the
+agent's own `sheets_get_spreadsheet` read to learn the tab names — repeated
+in every new conversation, because a guessed `'Sheet1'` never learns. The
+route's 400 text used to be Google's message and nothing else; it now merges
+the `fieldViolations` cause Google hides under "Request contains an invalid
+argument", adds a per-kind remedy (the tab list on range errors, the
+rejected `requests[N]` on batchUpdate errors, the `fields` example on mask
+errors) and a STOP line. Outcome stays `error` — a 400 is a real tool error
+and the directory rate must keep counting it.
+
+```sql
+-- 7.28a: the before/after measure — daily 400s per tool
+SELECT toDate(timestamp) AS day,
+       properties.$mcp_tool_name AS tool,
+       count() AS bad_requests,
+       uniq(person.properties.email) AS people,
+       countIf(toInt(properties.sheet_tabs_listed) > 0) AS tab_list_shown
+FROM events
+WHERE event = '$mcp_tool_call'
+  AND properties.environment = 'production'
+  AND toInt(properties.error_status) = 400
+  AND properties.error_reason = 'INVALID_ARGUMENT'
+  AND timestamp >= now() - INTERVAL 14 DAY
+  AND person.properties.email NOT IN (/* internal + QA accounts: the same list every query in §7 uses */)
+GROUP BY day, tool ORDER BY day, bad_requests DESC
+```
+
+```sql
+-- 7.28b: what the argument problem was (kinds are FGAC's enum, never customer data)
+SELECT properties.bad_request_kind AS kind,
+       properties.$mcp_tool_name AS tool,
+       count() AS n,
+       uniq(person.properties.email) AS people
+FROM events
+WHERE event = '$mcp_tool_call'
+  AND properties.environment = 'production'
+  AND toInt(properties.error_status) = 400
+  AND timestamp >= now() - INTERVAL 7 DAY
+GROUP BY kind, tool ORDER BY n DESC
+```
+
+```sql
+-- 7.28c: the unchanged-retry signature — same person, tool and file, 400s inside one minute
+SELECT person.properties.email AS who,
+       properties.$mcp_tool_name AS tool,
+       substring(properties.file_id, 1, 8) AS file8,
+       toStartOfMinute(timestamp) AS minute,
+       count() AS n
+FROM events
+WHERE event = '$mcp_tool_call'
+  AND properties.environment = 'production'
+  AND toInt(properties.error_status) = 400
+  AND properties.error_reason = 'INVALID_ARGUMENT'
+  AND timestamp >= now() - INTERVAL 7 DAY
+GROUP BY who, tool, file8, minute
+HAVING n >= 2 ORDER BY n DESC
+```
+
+Healthy: `bad_requests` per tool trends down from the table above with
+`tab_list_shown` tracking the `range_parse` + `grid_limits` share (a gap
+means the metadata read is failing — `sheet_tabs_listed = 0` rows say so);
+7.28c returns nothing (before the change it held 1-s bursts of three
+identical `sheets_update_range` payloads and a scripted 2-then-success
+cadence); `unknown` in 7.28b stays a small tail — a growing `unknown` is a
+Google message the classifier has not seen, and the fixture list in
+`scripts/test-google-bad-request-copy.ts` is where it gets added. The
+fetch layer stamps the props, so raw `google_api_get` / `google_api_modify`
+400s appear in 7.28b too; only the sheets typed tools list tabs.

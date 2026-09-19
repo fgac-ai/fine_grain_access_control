@@ -196,6 +196,27 @@ intentionally differs, the assertion says so.
   `replaceAllText`) returns `body end <after> (was <before>)` and stamps
   `docs_verify_outcome='reported'`.
 
+### A15: Google 400s on docs tools surface the hidden cause and the rejected request index (2026-09-18)
+- On the exposed doc at **Read & Write**: (a) `docs_read_document` with
+  `fields: "content"`; (b) `docs_edit` with requests
+  `[{"insertText":{"location":{"index":9999999},"text":"x"}}]`;
+  (c) `docs_edit` with two requests — a `replaceAllText` of a string the doc
+  does not contain, then `deleteContentRange` with `startIndex: 50,
+  endIndex: 10`.
+- **Expected**: all three are `isError` (`outcome=error`, `error_status=400`,
+  `error_reason=INVALID_ARGUMENT`, no `denial_code`) and start
+  `❌ Google API error (400): `. (a) carries `Cannot find matching fields for
+  path 'content'` — the cause Google puts only in `fieldViolations` under the
+  generic "Request contains an invalid argument" — plus the
+  `title,body.content` example; `bad_request_kind=fields_mask`. (b) names
+  `requests[0]`, says NONE of the requests were applied, and says to re-read
+  with `docs_read_document` before recomputing indexes;
+  `bad_request_kind=request_index`, `bad_request_index=0`. (c) names
+  `requests[1]` with `bad_request_index=1`, and the document is unchanged
+  (batchUpdate is atomic; no `docs_verify_outcome` is stamped because the
+  batch never applied). Every text ends with the STOP line
+  (`do not retry this call unchanged`). Sheets twin: capability 09 A12.
+
 ## Analytics hooks
 `docs_grant_verification`, `docs_grant_recovered`, `agent_doc_created`,
 `approval_link_minted` with `action=docs_expose|docs_write`, denial codes

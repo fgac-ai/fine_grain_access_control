@@ -171,6 +171,39 @@ environment's DB branch. Verified end to end on a Vercel preview 2026-08-30.
   link-free. A link minted for a value Google can never verify is the failure
   this guards against.
 
+### A12: Google 400s on sheets tools name the cause, list the tabs, and say STOP (2026-09-18)
+- On the exposed fixture sheet at **Read & Write**, five calls that Google
+  rejects as malformed (none of them writes anything — Google validates
+  before applying):
+  (a) `sheets_read_range` with range `'No Such Tab'!A1:C3`;
+  (b) `sheets_append_rows` with range `No Such Tab` and values `[["x"]]`;
+  (c) `sheets_update_range` with range `<real tab>!A1:B1` and values
+  `[[1,2,3]]` (values wider than the range);
+  (d) `sheets_edit` with requests
+  `[{"repeatCell":{"range":{"sheetId":0},"cell":{}}}]` (no `fields` mask);
+  (e) `sheets_update_range` with range `<real tab>!A1` and values
+  `[[["x"]]]` (a nested cell — passes the tool's `array of arrays` input
+  schema, so it reaches Google; a bare `["x"]` never does: the MCP SDK
+  rejects it with `-32602 Input validation error` before FGAC's handler
+  runs, no Google call and no `$mcp_tool_call` event — verified 2026-09-18).
+- **Expected**: every response is `isError` (event `outcome=error`,
+  `error_status=400`, `error_reason=INVALID_ARGUMENT`, no `denial_code`, no
+  approval link) and its text starts `❌ Google API error (400): ` followed by
+  Google's own message. Then, per case: (a) and (b) carry
+  `Tabs in this spreadsheet: '<real tab>' (N rows × M cols)`, the example
+  `'<real tab>'!A1:C10`, and the words `never assume a tab called 'Sheet1'`;
+  (c) says to widen the range or trim `values`; (d) names `requests[0]`,
+  says NONE of the requests were applied, and mentions the `fields` mask and
+  `sheetId`; (e) says `values` must be a 2-D array of scalar cells, with Google's
+  protobuf dump collapsed onto one line. Every
+  text ends with the STOP line (`do not retry this call unchanged`). Event
+  props: `bad_request_kind` = `range_parse`, `range_parse`,
+  `values_overflow`, `request_index` (with `bad_request_index=0`),
+  `values_shape` respectively; `sheet_tabs_listed=1` on (a) and (b) only
+  (the fixture has one tab). Read `<real tab>!A1:B1` back afterwards: unchanged.
+  The pre-change text was Google's message alone, with no remedy and no stop
+  (monitoring 7.28 has the production baseline).
+
 ### A7: Drive listing is Google-native; per-file Drive access respects sheet rules
 - `GET {proxy}/drive/v3/files` with the profile's bearer token, then
   `GET {proxy}/drive/v3/files/<id>` for (a) an exposed sheet, (b) a sheet with a
