@@ -1,35 +1,39 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import Link from 'next/link'
 import { useUser } from '@clerk/nextjs'
 import posthog from 'posthog-js'
 import { Check, X } from 'lucide-react'
 import { SignUpCta } from '../SignUpCta'
 
 /* ─── Pricing plans (fake door) ─────────────────────────────────────────────
-   Nothing here is enforced or billed. The page exists to measure whether
-   people will pay, so every interaction captures a PostHog event (catalog in
-   docs/analytics.md; strategy in
-   docs/implementation_plans/pricing-page-design-9dbc83_v2.md).
+   Nothing here is enforced or billed. During the launch period every account
+   has Pro-level access; the page exists to measure whether people will pay,
+   so every interaction captures a PostHog event (catalog in docs/analytics.md;
+   strategy in docs/implementation_plans/pricing-page-design-9dbc83_v3.md).
 
-   Mechanic (v2): one flat Personal plan after a 30-day trial, no meters, no
-   per-account maths; Team is per seat. Prices live in PLANS so a variant is
-   a one-place change; PRICING_VARIANT rides on every event so variants stay
-   comparable in one query. */
+   Mechanic (v3, Ken 2026-09-19): Free for occasional use, capped by
+   successful requests per month so "less than weekly" stays free; Pro is a
+   flat $5/month or $30/year per person with no cap; Enterprise is a sales
+   conversation. Prices live in PLANS so a variant is a one-place change;
+   PRICING_VARIANT rides on every event so variants stay comparable. */
 
-export const PRICING_VARIANT = 'v2-2026-09'
+export const PRICING_VARIANT = 'v3-2026-09'
+export const SALES_EMAIL = 'sales@fgac.ai'
+
+/* 50/month: in production the users active fewer than 4 days a month make a
+   median of 14 successful calls (p90 114), weekly-plus users start at ~58,
+   and the median active day is ~15 calls — so 50 ≈ three or four tasks. */
+export const FREE_REQUESTS_PER_MONTH = 50
 
 type Interval = 'monthly' | 'annual'
-type PlanId = 'personal' | 'team'
+type PlanId = 'free' | 'pro' | 'enterprise'
 
 type Plan = {
   id: PlanId
   name: string
   tagline: string
-  monthly: number
-  annual: number // per month, billed yearly
-  unit: string
-  trial?: string
   features: string[]
   highlight?: boolean
   badge?: string
@@ -37,51 +41,57 @@ type Plan = {
 
 const PLANS: Plan[] = [
   {
-    id: 'personal',
-    name: 'Personal',
-    tagline: 'Everything, for one person. No meters.',
-    monthly: 10,
-    annual: 8,
-    unit: '/ month',
-    trial: '30-day free trial · no card',
+    id: 'free',
+    name: 'Free',
+    tagline: 'For occasional use — about one task a week.',
     features: [
-      'All your own Google accounts — Gmail, Sheets, Docs',
+      `${FREE_REQUESTS_PER_MONTH} requests a month`,
+      'All your Google accounts — Gmail, Sheets, Docs',
       'Every rule type: send allowlists, read blacklists, labels, per-file access',
-      'Delegate to and from anyone, free for both of you',
-      'Unlimited agent profiles and requests',
+      'Delegate to and from anyone',
       'Claude, Cursor, Claude Code, any MCP client',
-      'One-click approval links and email reminders',
     ],
-    highlight: true,
-    badge: 'One plan',
   },
   {
-    id: 'team',
-    name: 'Team',
-    tagline: 'Shared rules for everyone’s agents.',
-    monthly: 15,
-    annual: 12,
-    unit: '/ user / month',
+    id: 'pro',
+    name: 'Pro',
+    tagline: 'For people whose agent works every week.',
     features: [
-      'Everything in Personal, for every seat',
-      'Shared rule templates across the team',
-      'Admin view of every profile and approval',
-      'Google Workspace domain',
-      'Commercial licence and invoicing',
+      'Unlimited requests',
+      'Everything in Free',
+      'Unlimited agent profiles',
+      'One-click approval links and email reminders',
+      'Priority support',
     ],
-    badge: 'Early access',
+    highlight: true,
+    badge: 'Most popular',
+  },
+  {
+    id: 'enterprise',
+    name: 'Enterprise',
+    tagline: 'For companies with vendor requirements.',
+    features: [
+      'BAA and SOC 2 for regulated teams',
+      'Vendor security review and DPA',
+      'SSO / SAML and admin controls',
+      'Self-hosted gateway in your VPC',
+      'Invoicing and procurement',
+    ],
   },
 ]
-
-const TEAM_SIZES = ['2–5', '6–20', '21–100', '100+'] as const
 
 function capture(event: string, props: Record<string, unknown>) {
   posthog.capture(event, { ...props, pricing_variant: PRICING_VARIANT })
 }
 
+const ctaClass = (primary: boolean) =>
+  primary
+    ? 'block w-full rounded-sm bg-primary px-5 py-3 text-center text-[15px] font-semibold text-primary-foreground hover:opacity-90'
+    : 'block w-full rounded-sm border border-border bg-card px-5 py-3 text-center text-[15px] font-semibold text-foreground hover:border-ring'
+
 export function PricingPlans({ signedIn }: { signedIn: boolean }) {
   const [interval, setInterval] = useState<Interval>('monthly')
-  const [door, setDoor] = useState<PlanId | null>(null)
+  const [door, setDoor] = useState(false)
 
   const toggle = (next: Interval) => {
     if (next === interval) return
@@ -90,16 +100,22 @@ export function PricingPlans({ signedIn }: { signedIn: boolean }) {
   }
 
   const clickPlan = (plan: PlanId) => {
-    capture('pricing_plan_clicked', { plan, interval, signed_in: signedIn })
+    capture('pricing_plan_clicked', {
+      plan,
+      interval: plan === 'enterprise' ? 'contract' : interval,
+      signed_in: signedIn,
+    })
   }
-
-  const ctaClass = (primary: boolean) =>
-    primary
-      ? 'block w-full rounded-sm bg-primary px-5 py-3 text-center text-[15px] font-semibold text-primary-foreground hover:opacity-90'
-      : 'block w-full rounded-sm border border-border bg-card px-5 py-3 text-center text-[15px] font-semibold text-foreground hover:border-ring'
 
   return (
     <>
+      {/* Launch-period notice — the honest half of the fake door */}
+      <p className="mx-auto mb-8 max-w-[760px] rounded-sm border border-border bg-primary-muted px-4 py-3 text-center text-sm text-foreground">
+        <span className="font-semibold text-primary">Launch period:</span> nothing is
+        billed yet. Every account has Pro-level access until billing starts, and we
+        will email you before it does.
+      </p>
+
       {/* Interval toggle */}
       <div className="mb-8 flex justify-center">
         <div
@@ -123,7 +139,7 @@ export function PricingPlans({ signedIn }: { signedIn: boolean }) {
                 <>
                   Annual{' '}
                   <span className={interval === opt ? 'opacity-80' : 'text-primary'}>
-                    · save 20%
+                    · save 50%
                   </span>
                 </>
               )}
@@ -133,119 +149,150 @@ export function PricingPlans({ signedIn }: { signedIn: boolean }) {
       </div>
 
       {/* Plan cards */}
-      <div className="mx-auto grid max-w-[880px] gap-5 md:grid-cols-2">
-        {PLANS.map((plan) => {
-          const price = interval === 'monthly' ? plan.monthly : plan.annual
-          return (
-            <article
-              key={plan.id}
-              data-plan={plan.id}
-              className={`relative flex flex-col gap-5 rounded-lg border bg-card p-7 ${
-                plan.highlight ? 'border-primary shadow-lg' : 'border-border'
-              }`}
-            >
-              {plan.badge && (
-                <span
-                  className={`absolute -top-3 left-6 rounded-full px-2.5 py-0.5 text-[11px] font-bold uppercase tracking-wide ${
-                    plan.highlight
-                      ? 'bg-primary text-primary-foreground'
-                      : 'border border-border bg-background text-muted-foreground'
-                  }`}
-                >
-                  {plan.badge}
-                </span>
-              )}
+      <div className="grid gap-5 md:grid-cols-3">
+        {PLANS.map((plan) => (
+          <article
+            key={plan.id}
+            data-plan={plan.id}
+            className={`relative flex flex-col gap-5 rounded-lg border bg-card p-7 ${
+              plan.highlight ? 'border-primary shadow-lg' : 'border-border'
+            }`}
+          >
+            {plan.badge && (
+              <span className="absolute -top-3 left-6 rounded-full bg-primary px-2.5 py-0.5 text-[11px] font-bold uppercase tracking-wide text-primary-foreground">
+                {plan.badge}
+              </span>
+            )}
 
-              <div>
-                <h2 className="text-[22px] font-extrabold tracking-[-0.02em] text-foreground">
-                  {plan.name}
-                </h2>
-                <p className="mt-1 text-sm text-muted-foreground">{plan.tagline}</p>
-              </div>
+            <div>
+              <h2 className="text-[22px] font-extrabold tracking-[-0.02em] text-foreground">
+                {plan.name}
+              </h2>
+              <p className="mt-1 text-sm text-muted-foreground">{plan.tagline}</p>
+            </div>
 
-              <div>
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-[40px] font-extrabold leading-none tracking-[-0.03em] text-foreground">
-                    ${price}
-                  </span>
-                  <span className="text-sm text-muted-foreground">{plan.unit}</span>
-                </div>
-                <p className="mt-1.5 text-xs text-muted-foreground">
-                  {interval === 'annual'
-                    ? `Billed yearly · $${plan.annual * 12}${plan.id === 'team' ? ' per user' : ''}`
-                    : 'Billed monthly · cancel any time'}
-                </p>
-              </div>
+            <Price plan={plan.id} interval={interval} />
 
-              {plan.trial && (
-                <p className="rounded-sm bg-primary-muted px-3 py-2 text-[13px] font-semibold text-primary">
-                  {plan.trial}
-                </p>
-              )}
+            <ul className="flex flex-col gap-2.5 text-sm text-foreground">
+              {plan.features.map((f) => (
+                <li key={f} className="flex items-start gap-2.5">
+                  <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden />
+                  <span className="leading-snug">{f}</span>
+                </li>
+              ))}
+            </ul>
 
-              <ul className="flex flex-col gap-2.5 text-sm text-foreground">
-                {plan.features.map((f) => (
-                  <li key={f} className="flex items-start gap-2.5">
-                    <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden />
-                    <span className="leading-snug">{f}</span>
-                  </li>
-                ))}
-              </ul>
-
-              <div className="mt-auto pt-2">
-                {plan.id === 'personal' && !signedIn ? (
-                  /* Signed-out: the trial IS today's product, so this is a real
-                     sign-up. Clicking captures pricing_plan_clicked, then the
-                     ordinary sign_up_started with cta_location pricing_personal. */
-                  <span onClickCapture={() => clickPlan('personal')} className="block">
-                    <SignUpCta location="pricing_personal" className={ctaClass(true)}>
-                      Start 30-day free trial
+            <div className="mt-auto pt-2">
+              {plan.id === 'free' &&
+                (signedIn ? (
+                  <Link
+                    href="/dashboard"
+                    onClick={() => clickPlan('free')}
+                    className={ctaClass(false)}
+                  >
+                    Go to Dashboard
+                  </Link>
+                ) : (
+                  /* A real sign-up: Free is today's product. Captures
+                     pricing_plan_clicked, then the ordinary sign_up_started. */
+                  <span onClickCapture={() => clickPlan('free')} className="block">
+                    <SignUpCta location="pricing_free" className={ctaClass(false)}>
+                      Start free
                     </SignUpCta>
                   </span>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      clickPlan(plan.id)
-                      setDoor(plan.id)
-                    }}
-                    className={ctaClass(Boolean(plan.highlight))}
-                  >
-                    {plan.id === 'personal' ? 'Subscribe' : 'Talk to us'}
-                  </button>
-                )}
-              </div>
-            </article>
-          )
-        })}
+                ))}
+
+              {plan.id === 'pro' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    clickPlan('pro')
+                    setDoor(true)
+                  }}
+                  className={ctaClass(true)}
+                >
+                  {signedIn ? 'Upgrade to Pro' : 'Get Pro'}
+                </button>
+              )}
+
+              {plan.id === 'enterprise' && (
+                /* No fake door — a real conversation is the product. */
+                <a
+                  href={`mailto:${SALES_EMAIL}?subject=${encodeURIComponent('FGAC.ai Enterprise')}`}
+                  onClick={() => clickPlan('enterprise')}
+                  className={ctaClass(false)}
+                >
+                  Contact sales
+                </a>
+              )}
+            </div>
+          </article>
+        ))}
       </div>
 
       {door && (
-        <InterestDialog
-          plan={door}
-          interval={interval}
-          signedIn={signedIn}
-          onClose={() => setDoor(null)}
-        />
+        <ProDoor interval={interval} signedIn={signedIn} onClose={() => setDoor(false)} />
       )}
     </>
   )
 }
 
-/* ─── Fake door ──────────────────────────────────────────────────────────────
-   Honest copy: billing is not live. A signed-in person pressing Subscribe is
-   the willingness-to-pay signal; they confirm with one click (their Clerk
-   email is already on the PostHog person). Signed-out visitors only reach
-   the Team door and leave an email, stored as a person property so the
-   launch list is a PostHog query. Nothing is written to our database. */
+function Price({ plan, interval }: { plan: PlanId; interval: Interval }) {
+  if (plan === 'enterprise') {
+    return (
+      <div>
+        <span className="text-[40px] font-extrabold leading-none tracking-[-0.03em] text-foreground">
+          Custom
+        </span>
+        <p className="mt-1.5 text-xs text-muted-foreground">Priced per contract</p>
+      </div>
+    )
+  }
+  if (plan === 'free') {
+    return (
+      <div>
+        <span className="text-[40px] font-extrabold leading-none tracking-[-0.03em] text-foreground">
+          $0
+        </span>
+        <p className="mt-1.5 text-xs text-muted-foreground">No card, no time limit</p>
+      </div>
+    )
+  }
+  return interval === 'monthly' ? (
+    <div>
+      <div className="flex items-baseline gap-1.5">
+        <span className="text-[40px] font-extrabold leading-none tracking-[-0.03em] text-foreground">
+          $5
+        </span>
+        <span className="text-sm text-muted-foreground">/ month</span>
+      </div>
+      <p className="mt-1.5 text-xs text-muted-foreground">Per person · cancel any time</p>
+    </div>
+  ) : (
+    <div>
+      <div className="flex items-baseline gap-1.5">
+        <span className="text-[40px] font-extrabold leading-none tracking-[-0.03em] text-foreground">
+          $30
+        </span>
+        <span className="text-sm text-muted-foreground">/ year</span>
+      </div>
+      <p className="mt-1.5 text-xs text-muted-foreground">Per person · $2.50 a month</p>
+    </div>
+  )
+}
 
-function InterestDialog({
-  plan,
+/* ─── Fake door ──────────────────────────────────────────────────────────────
+   Honest copy: Pro is not billed during the launch period. A signed-in person
+   pressing Upgrade and then "Count me in" is the willingness-to-pay signal;
+   their Clerk email is already on the PostHog person. Signed-out visitors
+   leave an email, stored as a person property so the launch list is a
+   PostHog query. Nothing is written to our database. */
+
+function ProDoor({
   interval,
   signedIn,
   onClose,
 }: {
-  plan: PlanId
   interval: Interval
   signedIn: boolean
   onClose: () => void
@@ -253,9 +300,8 @@ function InterestDialog({
   const { user } = useUser()
   const knownEmail = user?.primaryEmailAddress?.emailAddress ?? null
   const [email, setEmail] = useState('')
-  const [teamSize, setTeamSize] = useState<(typeof TEAM_SIZES)[number] | ''>('')
   const [done, setDone] = useState(false)
-  const firstField = useRef<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>(null)
+  const firstField = useRef<HTMLInputElement | HTMLButtonElement>(null)
 
   useEffect(() => {
     firstField.current?.focus()
@@ -266,24 +312,17 @@ function InterestDialog({
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  const planName = plan === 'personal' ? 'Personal' : 'Team'
-  const price = plan === 'personal' ? (interval === 'annual' ? '$8/month billed yearly' : '$10/month') : null
+  const price = interval === 'annual' ? '$30 a year' : '$5 a month'
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault()
     const submittedEmail = knownEmail ?? email.trim()
     if (!submittedEmail) return
-    capture('pricing_interest_submitted', {
-      plan,
-      interval,
-      signed_in: signedIn,
-      ...(plan === 'team' ? { team_size: teamSize || 'unspecified' } : {}),
-    })
+    capture('pricing_interest_submitted', { plan: 'pro', interval, signed_in: signedIn })
     posthog.setPersonProperties({
-      pricing_interest_plan: plan,
+      pricing_interest_plan: 'pro',
       pricing_interest_interval: interval,
       pricing_interest_at: new Date().toISOString(),
-      ...(plan === 'team' && teamSize ? { pricing_interest_team_size: teamSize } : {}),
       // Signed-in persons already carry `email` from sign_up_completed.
       ...(knownEmail ? {} : { email: submittedEmail }),
     })
@@ -305,11 +344,7 @@ function InterestDialog({
       >
         <div className="mb-4 flex items-start justify-between gap-4">
           <h2 id="pricing-door-title" className="text-lg font-bold text-foreground">
-            {done
-              ? 'Thanks — you’re on the list'
-              : plan === 'personal'
-                ? 'Billing isn’t live yet'
-                : 'Team isn’t available yet'}
+            {done ? 'Thanks — you’re on the list' : 'Pro isn’t billed yet'}
           </h2>
           <button
             type="button"
@@ -326,9 +361,8 @@ function InterestDialog({
             <p className="text-sm leading-relaxed text-muted-foreground">
               We’ll email{' '}
               <span className="font-semibold text-foreground">{knownEmail ?? email.trim()}</span>{' '}
-              {plan === 'personal'
-                ? 'before anything changes, and your first paid month is on us. Until then you keep full access, free.'
-                : `when ${planName} launches.`}
+              before billing starts, and your first month of Pro is on us. Until then you have
+              Pro-level access, free.
             </p>
             <div className="mt-5 flex justify-end">
               <button
@@ -343,29 +377,10 @@ function InterestDialog({
         ) : (
           <form onSubmit={submit} className="flex flex-col gap-4">
             <p className="text-sm leading-relaxed text-muted-foreground">
-              {plan === 'personal'
-                ? `You keep full access free until billing launches. Tell us you’d pay ${price} and we’ll email you before anything changes — with your first paid month free.`
-                : 'Team is in early access. Tell us roughly how big your team is and we’ll reach out to set it up with you.'}
+              During the launch period every account already has Pro-level access. Tell us
+              you’d pay {price} and we’ll email you before billing starts — with your first
+              month free.
             </p>
-
-            {plan === 'team' && (
-              <label className="flex flex-col gap-1.5 text-sm font-medium text-foreground">
-                Team size
-                <select
-                  ref={firstField as React.RefObject<HTMLSelectElement>}
-                  value={teamSize}
-                  onChange={(e) => setTeamSize(e.target.value as (typeof TEAM_SIZES)[number])}
-                  className="rounded-sm border border-input bg-background px-3 py-2 text-sm text-foreground"
-                >
-                  <option value="">Select…</option>
-                  {TEAM_SIZES.map((s) => (
-                    <option key={s} value={s}>
-                      {s} people
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
 
             {knownEmail ? (
               <p className="rounded-sm bg-muted px-3 py-2 text-sm text-muted-foreground">
@@ -375,7 +390,7 @@ function InterestDialog({
               <label className="flex flex-col gap-1.5 text-sm font-medium text-foreground">
                 Email
                 <input
-                  ref={plan === 'team' ? undefined : (firstField as React.RefObject<HTMLInputElement>)}
+                  ref={firstField as React.RefObject<HTMLInputElement>}
                   type="email"
                   required
                   autoComplete="email"
@@ -397,10 +412,10 @@ function InterestDialog({
               </button>
               <button
                 type="submit"
-                ref={knownEmail && plan === 'personal' ? (firstField as React.RefObject<HTMLButtonElement>) : undefined}
+                ref={knownEmail ? (firstField as React.RefObject<HTMLButtonElement>) : undefined}
                 className="rounded-sm bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90"
               >
-                {plan === 'personal' ? 'Count me in' : knownEmail ? 'Notify me' : 'Keep me posted'}
+                Count me in
               </button>
             </div>
           </form>

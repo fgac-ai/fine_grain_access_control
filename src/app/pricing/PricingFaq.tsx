@@ -3,7 +3,7 @@
 import { useRef } from 'react'
 import Link from 'next/link'
 import posthog from 'posthog-js'
-import { PRICING_VARIANT } from './PricingPlans'
+import { FREE_REQUESTS_PER_MONTH, PRICING_VARIANT, SALES_EMAIL } from './PricingPlans'
 
 /* Native <details> accordions. Each question captures `pricing_faq_opened`
    the first time it is opened, so the answer to "which objection do people
@@ -11,14 +11,44 @@ import { PRICING_VARIANT } from './PricingPlans'
 
 const FAQ: { q: string; a: React.ReactNode }[] = [
   {
-    q: 'Is there a free plan?',
+    q: 'What counts as a request?',
+    a: `One successful call your agent makes through FGAC to Google — reading a thread, appending rows to a sheet, sending an email. Denied calls never count. A typical task is a handful of requests, so ${FREE_REQUESTS_PER_MONTH} a month is roughly one task a week.`,
+  },
+  {
+    q: 'What happens when I reach the Free limit?',
+    a: 'During the launch period, nothing — every account has Pro-level access. Once billing starts, your agent gets a clear message that the monthly limit is reached and you can upgrade in one click; nothing is silently dropped.',
+  },
+  {
+    q: 'Is billing live?',
+    a: 'Not yet. Prices are published so you know what to expect. We will email every account before billing starts, and anyone who tells us they would upgrade gets their first month of Pro free.',
+  },
+  {
+    q: 'Is Pro per Google account or per person?',
+    a: 'Per person. One Pro subscription covers every Google account you connect and every agent you run. Delegating an inbox to someone else, or being delegated one, costs neither of you anything.',
+  },
+  {
+    q: 'Do you ever see my email or documents?',
+    a: 'No. Requests pass through and are checked against your rules; content is never stored, never used to train models, and no human reads it. That is true on every plan.',
+  },
+  {
+    q: 'Can I use this at work?',
     a: (
       <>
-        The hosted service is free for 30 days, then $10 a month. There is no
-        permanent free tier: FGAC has real fixed costs — an annual third-party
-        security assessment for Gmail access chief among them — and a plan
-        that covers them is what keeps the service running. The code is open
-        source and{' '}
+        Free and Pro cover your own accounts. Use by or for a company, school or agency
+        needs Enterprise, which carries the commercial licence and the paperwork vendors
+        are asked for — BAA, SOC 2, DPA, security review. Write to{' '}
+        <Link href={`mailto:${SALES_EMAIL}`} className="text-primary underline underline-offset-2">
+          {SALES_EMAIL}
+        </Link>
+        .
+      </>
+    ),
+  },
+  {
+    q: 'Can I run it myself?',
+    a: (
+      <>
+        Yes. The code is open source and{' '}
         <Link
           href="https://github.com/fgac-ai/fine_grain_access_control/blob/main/LICENSE"
           className="text-primary underline underline-offset-2"
@@ -28,26 +58,6 @@ const FAQ: { q: string; a: React.ReactNode }[] = [
         .
       </>
     ),
-  },
-  {
-    q: 'I signed up before pricing existed. What happens to me?',
-    a: 'Nothing yet. You keep full access, free, until billing launches, and we will email you before anything changes. When it does, your first paid month is free.',
-  },
-  {
-    q: 'Do you count requests, accounts, or seats?',
-    a: 'Personal is one flat price for one person: every Google account you own, unlimited agent profiles, unlimited requests. Delegating an inbox to someone else, or being delegated one, costs neither of you anything. Team is per seat, because a team is a number of people.',
-  },
-  {
-    q: 'What does the trial include?',
-    a: 'Everything. Every rule type, Sheets and Docs per-file access, multiple accounts, delegation, approval links. No card up front; the trial simply ends after 30 days.',
-  },
-  {
-    q: 'Do you ever see my email or documents?',
-    a: 'No. Requests pass through and are checked against your rules; content is never stored, never used to train models, and no human reads it. That is true on every plan.',
-  },
-  {
-    q: 'Can I use this at work?',
-    a: 'Personal covers your own accounts. Use by or for a company, school or agency needs the Team plan (or Enterprise), which also carries the commercial licence. If you are not sure which side you are on, ask us.',
   },
   {
     q: 'Which agents does it work with?',

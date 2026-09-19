@@ -15,7 +15,7 @@ export function SignUpCta({
   className,
   children,
 }: {
-  location: 'nav' | 'hero' | 'bottom_cta' | 'pricing_personal'
+  location: 'nav' | 'hero' | 'bottom_cta' | 'pricing_free'
   className: string
   children: React.ReactNode
 }) {

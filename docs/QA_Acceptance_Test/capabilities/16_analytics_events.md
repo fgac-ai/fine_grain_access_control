@@ -540,31 +540,31 @@ attributable to it.
 
 ### A26: The pricing fake door is measurable per plan
 - In the built-in browser, open `/pricing` on the environment under test
-  signed out. Toggle the interval to Annual, click **Talk to us**, pick a
-  team size, submit the dialog with a QA address, open one FAQ item. Then
-  sign in as `USER_A`, return to `/pricing`, click **Subscribe** and press
-  **Count me in**. (Signed out, the Personal button is a real Clerk sign-up
-  — do not complete it; a click on it is enough for the click event.)
+  signed out. Toggle the interval to Annual, click **Get Pro**, submit the
+  dialog with a QA address, open one FAQ item, click **Contact sales** (a
+  mailto link — the click is enough). Then sign in as `USER_A`, return to
+  `/pricing`, click **Upgrade to Pro** and press **Count me in**. (Signed
+  out, **Start free** is a real Clerk sign-up — do not complete it; its
+  click is enough for the click event.)
 - Query: `SELECT event, properties.plan, properties.interval,
-  properties.signed_in, properties.team_size, properties.question,
-  properties.pricing_variant, properties.cta_location FROM events WHERE
-  (event LIKE 'pricing_%' OR event = 'sign_up_started') AND
-  properties.environment = '<env>' AND timestamp >= now() - INTERVAL 1 HOUR
-  ORDER BY timestamp`
+  properties.signed_in, properties.question, properties.pricing_variant,
+  properties.cta_location FROM events WHERE (event LIKE 'pricing_%' OR
+  event = 'sign_up_started') AND properties.environment = '<env>' AND
+  timestamp >= now() - INTERVAL 1 HOUR ORDER BY timestamp`
 - **Expected**: one `pricing_interval_toggled {interval: 'annual'}`; a
-  `pricing_plan_clicked {plan: 'team', interval: 'annual', signed_in:
-  false}` followed by `pricing_interest_submitted {plan: 'team', team_size:
-  '<the bucket>', signed_in: false}`; one `pricing_faq_opened` whose
-  `question` is the FAQ heading text; then `pricing_plan_clicked {plan:
-  'personal', signed_in: true}` and `pricing_interest_submitted {plan:
-  'personal', signed_in: true}`. Every row carries `pricing_variant`
-  (`v2-2026-09` today). The signed-out submission's person carries
-  `properties.pricing_interest_plan = 'team'` and the submitted `email`; the
-  signed-in one carries `pricing_interest_plan = 'personal'` on `USER_A`'s
-  existing person. No new rows appear in any application table — the door
-  writes to PostHog only.
+  `pricing_plan_clicked {plan: 'pro', interval: 'annual', signed_in:
+  false}` followed by `pricing_interest_submitted {plan: 'pro', interval:
+  'annual', signed_in: false}`; one `pricing_faq_opened` whose `question`
+  is the FAQ heading text; one `pricing_plan_clicked {plan: 'enterprise',
+  interval: 'contract'}`; then `pricing_plan_clicked {plan: 'pro',
+  signed_in: true}` and `pricing_interest_submitted {plan: 'pro',
+  signed_in: true}`. Every row carries `pricing_variant` (`v3-2026-09`
+  today). The signed-out submission's person carries
+  `properties.pricing_interest_plan = 'pro'` and the submitted `email`; the
+  signed-in one sets the same on `USER_A`'s existing person. No new rows
+  appear in any application table — the door writes to PostHog only.
 - **Regression guard**: `pricing_plan_clicked` must fire BEFORE the dialog
   opens (it is the click-through measure; the dialog can be dismissed), and
-  a signed-out click on the Personal button must still emit `sign_up_started
-  {cta_location: 'pricing_personal'}` so the sign-up funnel keeps counting
+  a signed-out click on **Start free** must still emit `sign_up_started
+  {cta_location: 'pricing_free'}` so the sign-up funnel keeps counting
   pricing-page sign-ups
