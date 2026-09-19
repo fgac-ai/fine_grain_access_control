@@ -537,3 +537,31 @@ attributable to it.
   caller-chosen `account_not_permitted` refusal — it is the only record of
   what the task passes (`monitoring.md` 7.26d); before 2026-09-16 that value
   had to be inferred from `response_chars`
+
+### A26: SDK input-validation failures name the rejected argument
+- Through the environment's MCP client, call `gmail_read` with `{"id": "x"}`
+  (the key `id` in place of `messageId`), then `sheets_update_range` with
+  `values` passed as the STRING `"[[1]]"` (any spreadsheetId/range — the
+  SDK rejects the shape before FGAC's rule check runs), then a tool that
+  does not exist (`gmail_search` with `{"query": "is:unread"}`). Each call
+  returns an `isError` result whose text starts `MCP error -32602:`.
+- Query: `SELECT properties.tool, properties.kind, properties.first_issue_path,
+  properties.first_issue_code, properties.first_issue_expected,
+  properties.first_issue_received, properties.sent_keys, properties.issue_count,
+  properties.issues_parsed, properties.message FROM events WHERE event =
+  'mcp_input_validation_failed' AND properties.environment = '<tier>' AND
+  timestamp >= now() - INTERVAL 1 HOUR ORDER BY timestamp`
+- **Expected**: three rows. `gmail_read`: `kind: 'invalid_arguments'`,
+  `first_issue_path: 'messageId'`, `first_issue_code: 'invalid_type'`,
+  `first_issue_expected: 'string'`, `first_issue_received: 'undefined'`,
+  `sent_keys: ['id']`, `issues_parsed: true`, `issue_count: 1`.
+  `sheets_update_range`: `first_issue_path: 'values'`,
+  `first_issue_expected: 'array'`, `first_issue_received: 'string'`,
+  `sent_keys` containing `values`. `gmail_search`: `kind: 'unknown_tool'`,
+  `sent_keys: ['query']`, no `first_issue_*` props. Every `message` is a
+  single line, at most 300 characters, and contains the issue JSON (the
+  word `messageId` appears in the gmail_read row's message) — never the
+  argument VALUES (`x` and `[[1]]` appear nowhere in the properties).
+- **Regression guard**: a `message` ending in `Invalid arguments for tool
+  gmail_read: [` is the pre-2026-09-17 truncation returning — the capture
+  regex has replaced `parseValidationFailure` (`monitoring.md` 7.10a).

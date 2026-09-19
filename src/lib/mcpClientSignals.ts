@@ -20,6 +20,11 @@ const MAX_CLIENT_NAME = 128;
 const MAX_CLIENT_VERSION = 32;
 // initialize requests are a few hundred bytes; anything big is a tool call.
 const MAX_PARSE_BYTES = 100_000;
+const MAX_ARGUMENT_KEYS = 20;
+const MAX_ISSUES = 10;
+const MAX_ISSUE_PATH_CHARS = 64;
+const MAX_ISSUE_TEXT_CHARS = 200;
+const MAX_VALIDATION_MESSAGE_CHARS = 300;
 
 function clientIp(req: Request): string {
   const fwd = req.headers.get('x-forwarded-for');
@@ -58,6 +63,14 @@ export interface RpcEnvelope {
   methods: string[];
   /** `params.name` of the first tools/call in the body, if any. */
   toolName?: string;
+  /**
+   * Top-level KEYS of `params.arguments` on that tools/call — names only,
+   * never values. When the SDK rejects the call, this is the only record of
+   * what the agent actually sent (Zod strips unknown keys before reporting,
+   * so `{id}` in place of `{messageId}` surfaces only as "messageId
+   * undefined" in the issues; the sent keys say which name it used instead).
+   */
+  argumentKeys?: string[];
   /** True when the body could not be parsed as JSON at all. */
   parseError: boolean;
 }
@@ -79,15 +92,20 @@ export function parseRpcEnvelope(text: string): RpcEnvelope {
   const messages = Array.isArray(body) ? body : [body];
   const methods: string[] = [];
   let toolName: string | undefined;
+  let argumentKeys: string[] | undefined;
   for (const msg of messages) {
     const m = msg as { method?: unknown; params?: { name?: unknown } };
     if (typeof m?.method !== 'string') continue;
     methods.push(m.method.slice(0, 64));
     if (m.method === 'tools/call' && toolName === undefined && typeof m.params?.name === 'string') {
       toolName = m.params.name.slice(0, 64);
+      const args = (m.params as { arguments?: unknown }).arguments;
+      if (args && typeof args === 'object' && !Array.isArray(args)) {
+        argumentKeys = Object.keys(args).slice(0, MAX_ARGUMENT_KEYS).map(k => k.slice(0, MAX_ISSUE_PATH_CHARS));
+      }
     }
   }
-  return { methods, toolName, parseError: false };
+  return { methods, toolName, argumentKeys, parseError: false };
 }
 
 export type TransportRejectionReason =
@@ -425,4 +443,166 @@ export function classifyMcpClient(input: {
   }
 
   return { client_class: 'direct' };
+}
+
+// ─── SDK input-validation failures (`isError` -32602 tool results) ──────────
+
+export interface ValidationIssue {
+  /** Dotted argument path (`values.0`, `body`); '' for the argument root. */
+  path: string;
+  /** Zod issue code: invalid_type, invalid_value, invalid_union, too_small, … */
+  code: string;
+  /** What the schema wanted: a type, or the allowed literals joined by `|`. */
+  expected?: string;
+  /** What arrived, as Zod names it in the message (`undefined`, `string`, `array`). */
+  received?: string;
+  message?: string;
+}
+
+export interface ValidationFailure {
+  kind: 'invalid_arguments' | 'unknown_tool';
+  /** Tool name as the SDK's error text names it. */
+  tool: string;
+  /** The SDK's text with whitespace collapsed, capped — never the raw arguments. */
+  message: string;
+  /** invalid_arguments only: true when the text carried a parseable issue array. */
+  issues_parsed: boolean;
+  issues: ValidationIssue[];
+  issue_count: number;
+}
+
+const VALIDATION_TEXT =
+  /^MCP error -32602: (?:Input validation error: Invalid arguments for tool ([^\s:]{1,64}): ([\s\S]*)|Tool ([\s\S]{1,128}?) not found)$/;
+
+/**
+ * JSON-RPC messages carried by a streamable-HTTP POST response body — the
+ * SSE frames the SDK writes (`event: message\ndata: {...}`), or the plain
+ * JSON body of `enableJsonResponse` mode. Never throws; unparseable frames
+ * are skipped.
+ */
+function rpcMessagesFromBody(body: string): unknown[] {
+  const out: unknown[] = [];
+  if (/^data:/m.test(body)) {
+    for (const line of body.split('\n')) {
+      if (!line.startsWith('data:')) continue;
+      try { out.push(JSON.parse(line.slice(5).trim())); } catch { /* partial or non-JSON frame */ }
+    }
+    return out;
+  }
+  try {
+    const parsed: unknown = JSON.parse(body);
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    return out;
+  }
+}
+
+function issueText(v: unknown): string | undefined {
+  return typeof v === 'string' ? v.slice(0, MAX_ISSUE_TEXT_CHARS) : undefined;
+}
+
+function receivedFromMessage(message: unknown): string | undefined {
+  if (typeof message !== 'string') return undefined;
+  const m = message.match(/received ([A-Za-z_]+)/);
+  return m?.[1];
+}
+
+/**
+ * One Zod 4 issue → the flat shape the event carries. Zod 4 puts what was
+ * received only in the message text (there is no `received` field), and a
+ * union failure nests one issue list per branch — the branches' `expected`
+ * values are joined so `body: string|record ← array` reads as one line.
+ */
+function normalizeIssue(raw: unknown): ValidationIssue | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const i = raw as {
+    code?: unknown; path?: unknown; expected?: unknown; values?: unknown; message?: unknown; errors?: unknown;
+  };
+  const path = Array.isArray(i.path)
+    ? i.path.map(seg => String(seg)).join('.').slice(0, MAX_ISSUE_PATH_CHARS)
+    : '';
+  const code = typeof i.code === 'string' ? i.code.slice(0, 64) : 'unknown';
+  let expected = issueText(i.expected);
+  let received = receivedFromMessage(i.message);
+  if (code === 'invalid_value' && Array.isArray(i.values)) {
+    expected = i.values.map(v => String(v)).join('|').slice(0, MAX_ISSUE_TEXT_CHARS);
+  }
+  if (code === 'invalid_union' && Array.isArray(i.errors)) {
+    const branches = i.errors
+      .map(branch => (Array.isArray(branch) ? branch[0] : undefined) as { expected?: unknown; message?: unknown } | undefined)
+      .filter((b): b is { expected?: unknown; message?: unknown } => !!b);
+    const expecteds = branches.map(b => issueText(b.expected)).filter((e): e is string => !!e);
+    if (expecteds.length) expected = expecteds.join('|').slice(0, MAX_ISSUE_TEXT_CHARS);
+    received ??= branches.map(b => receivedFromMessage(b.message)).find(Boolean);
+  }
+  return { path, code, expected, received, message: issueText(i.message) };
+}
+
+/**
+ * The SDK's own -32602 `isError` tool result inside a 2xx POST response
+ * body, decoded into fields PostHog can GROUP BY.
+ *
+ * Why a parser and not a regex: the SDK formats invalid arguments as
+ * `MCP error -32602: Input validation error: Invalid arguments for tool
+ * <name>: <ZodError.message>`, and Zod 4's `ZodError.message` is the issue
+ * array pretty-printed as JSON. Inside the response body that text is
+ * itself JSON-encoded, so the first `\n` after the opening `[` is an escape
+ * sequence — the previous `[^"\\]{0,300}` capture ended there on every
+ * production row (137 events to 2026-09-17, all cut at `: [`), so the event
+ * could count failures but never say which argument was wrong.
+ *
+ * Returns undefined for anything that is not the SDK's validation/unknown-
+ * tool result — our own `isError` results, transport errors, successes.
+ */
+export function parseValidationFailure(body: string): ValidationFailure | undefined {
+  for (const msg of rpcMessagesFromBody(body)) {
+    const result = (msg as { result?: { isError?: unknown; content?: unknown } })?.result;
+    if (!result || result.isError !== true || !Array.isArray(result.content)) continue;
+    for (const item of result.content) {
+      const text = (item as { type?: unknown; text?: unknown })?.text;
+      if (typeof text !== 'string') continue;
+      const m = text.match(VALIDATION_TEXT);
+      if (!m) continue;
+      const message = text.replace(/\s+/g, ' ').slice(0, MAX_VALIDATION_MESSAGE_CHARS);
+      if (m[3] !== undefined) {
+        return { kind: 'unknown_tool', tool: m[3].slice(0, 64), message, issues_parsed: false, issues: [], issue_count: 0 };
+      }
+      let issues: ValidationIssue[] = [];
+      let issues_parsed = false;
+      let issue_count = 0;
+      try {
+        const parsed: unknown = JSON.parse(m[2]);
+        if (Array.isArray(parsed)) {
+          issues_parsed = true;
+          issue_count = parsed.length;
+          issues = parsed.slice(0, MAX_ISSUES).map(normalizeIssue).filter((i): i is ValidationIssue => !!i);
+        }
+      } catch { /* not Zod 4's JSON message (a custom or v3 message) — counted, not decoded */ }
+      return { kind: 'invalid_arguments', tool: m[1], message, issues_parsed, issues, issue_count };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Event properties for `mcp_input_validation_failed`. Scalars for the first
+ * issue (GROUP BY-able), arrays for the full set, never an argument value.
+ */
+export function validationFailureProps(f: ValidationFailure, sentKeys?: string[]): Record<string, unknown> {
+  const first = f.issues[0];
+  return {
+    kind: f.kind,
+    message: f.message,
+    issues_parsed: f.kind === 'invalid_arguments' ? f.issues_parsed : undefined,
+    issue_count: f.kind === 'invalid_arguments' ? f.issue_count : undefined,
+    issue_paths: f.issues.length ? f.issues.map(i => i.path) : undefined,
+    issue_codes: f.issues.length ? f.issues.map(i => i.code) : undefined,
+    first_issue_path: first?.path,
+    first_issue_code: first?.code,
+    first_issue_expected: first?.expected,
+    first_issue_received: first?.received,
+    first_issue_message: first?.message,
+    sent_keys: sentKeys,
+    sent_key_count: sentKeys?.length,
+  };
 }
