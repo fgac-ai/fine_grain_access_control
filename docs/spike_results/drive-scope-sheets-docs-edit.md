@@ -90,8 +90,10 @@ in place and clean.
 
 - Design C/D need only `drive` (or `drive.readonly` for read paths); the
   content-API scopes add nothing.
-- Slides in production fails on `SERVICE_DISABLED` because the production GCP
-  project has the API off, not because of scope (dev project has it on).
+- Slides is scope-agnostic in the same way. (An earlier draft of this doc said
+  the production GCP project had the Slides API disabled; that was true until
+  2026-09-16 and is stale — production Slides calls succeed since the Slides
+  release on 2026-09-17, per `$mcp_tool_call` data on 2026-09-18.)
 - Google enforces the user's own sharing permission underneath any FGAC rule;
   FGAC's rule engine would be the only gate *within* what the user can reach.
 - The incremental-consent mechanism works end to end on the dev client with
