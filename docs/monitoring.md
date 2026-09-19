@@ -616,10 +616,48 @@ WHERE event = 'mcp_input_validation_failed' AND timestamp > now() - INTERVAL 7 D
 GROUP BY tool, kind, client ORDER BY n DESC
 ```
 
+**7.10a — Validation failures by tool and field, 7 d.** Since 2026-09-17 the
+event decodes the Zod issue array the SDK embeds in its error text (rows
+before that carry a `message` cut at `: [` and no field — see
+`analytics.md`). `first_issue_path` is the argument the schema rejected;
+`first_issue_received = 'undefined'` on a required field means the agent
+sent the value under another name (Zod strips unknown keys), and
+`sent_keys` says which — `['id', 'account']` against `messageId` is the
+rename to make in the description, `['messageId', 'format']` with
+`invalid_value` on `format` is a casing miss, `values` received `string` is
+a JSON-encoded array. `invalid_union` on `google_api_modify.body` with
+`received = 'array'` is a batchUpdate requests array sent bare.
+
+```sql
+SELECT properties.tool AS tool, properties.first_issue_path AS field,
+       properties.first_issue_code AS code, properties.first_issue_expected AS expected,
+       properties.first_issue_received AS received,
+       any(properties.sent_keys) AS sent_keys_example,
+       uniq(distinct_id) AS users, count() AS n
+FROM events
+WHERE event = 'mcp_input_validation_failed' AND properties.kind = 'invalid_arguments'
+  AND properties.environment = 'production' AND timestamp > now() - INTERVAL 7 DAY
+GROUP BY tool, field, code, expected, received ORDER BY n DESC
+```
+
+`issues_parsed = false` rows are failures whose text carried no JSON issue
+array (a custom message or an SDK format change) — if they appear after an
+SDK bump, `scripts/test-validation-failure-capture.ts` is the first thing
+to re-run, since it drives the real SDK.
+
 Healthy: near zero. A single user repeating the same `invalid_arguments` on
 one tool is an agent stuck on a schema misunderstanding — the tool's
-description is the fix, not the user. `unknown_tool` bursts after a release
-mean a client cached an old tool list.
+description is the fix, not the user. Read it with the next-outcome
+sequence (does the same person's next call on that tool succeed?): in the 30
+days to 2026-09-17, `gmail_read` failures were followed by a success within
+~3 s for 10 of 10 people at least once (the SDK's own message got them
+there), while the `google_api_modify` and `sheets_update_range` runs were
+one person each repeating the same rejected shape 20+ times with no
+in-session success — the shape those two agents kept sending is what 7.10a
+now records. `unknown_tool` bursts after a release mean a client cached an
+old tool list; a steady trickle of one name (`gmail_search`, 2026-09) is a
+tool the agent expected to exist — the nearest tool's title/description
+should claim that word.
 
 **7.11 — Support lookup: "gmail_read fails on message X".** `$mcp_tool_call`
 now carries a request fingerprint (`message_id_hash` on `gmail_read` /

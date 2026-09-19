@@ -33,7 +33,7 @@ import { captureServerEvent } from '@/lib/posthogServer';
 import { runWithToolCallProps, addToolCallProps, getToolCallProps } from '@/lib/toolCallContext';
 import { cleanResourceName } from '@/lib/pickerRecoveryCopy';
 import { GOOGLE_FETCH_TIMEOUT_MS, CLERK_TOKEN_TIMEOUT_MS, withTimeout, isUpstreamTimeout } from '@/lib/upstreamTimeouts';
-import { classifyMcpClient, classifyTransportRejection, installFingerprint, parseInitializeClientInfo, parseRpcEnvelope, resourceIdHash, type McpClientInfo } from '@/lib/mcpClientSignals';
+import { classifyMcpClient, classifyTransportRejection, installFingerprint, parseInitializeClientInfo, parseRpcEnvelope, parseValidationFailure, resourceIdHash, validationFailureProps, type McpClientInfo } from '@/lib/mcpClientSignals';
 import { recordEagerResolve, shouldSkipEagerResolve } from '@/lib/connectionTouchMemo';
 import { after } from 'next/server';
 import { notifyOwnerOfAccountRefusal, notifyOwnerOfApprovalLinks, type NotifyLink } from '@/lib/approvalNotify';
@@ -2527,8 +2527,8 @@ const handler = createMcpHandler(
       TOOL_DEFS.gmail_read.name,
       toolConfig(TOOL_DEFS.gmail_read, {
         account: z.string().optional().describe('Email account to use (see list_accounts; defaults to the primary). Ids are mailbox-specific: an id obtained on one account must be read with that same account passed here.'),
-        messageId: z.string().describe('Gmail message ID'),
-        format: z.enum(['full', 'metadata', 'minimal']).optional().describe('Response format. "full" (default) returns parsed headers, body text, and attachment metadata.'),
+        messageId: z.string().describe('Gmail message ID — the "id" of an entry returned by gmail_list (not the threadId). The parameter is named messageId.'),
+        format: z.enum(['full', 'metadata', 'minimal']).optional().describe('Response format, lowercase: "full" (default) returns parsed headers, body text, and attachment metadata; "metadata" and "minimal" are the Gmail API equivalents.'),
         offset: z.number().int().min(0).optional().describe('Start position (chars into the serialized response, body UNtruncated) for a windowed read of a long message. Use the next_offset from the previous response to continue; start at 0.'),
         limit: z.number().int().min(1).optional().describe('Max chars to return in this response (server caps at 200000). Size this to YOUR tool-result budget. Passing offset or limit switches to the windowed envelope.'),
       }),
@@ -2899,7 +2899,7 @@ const handler = createMcpHandler(
       toolConfig(TOOL_DEFS.sheets_update_range, {
         spreadsheetId: z.string().describe('Google Spreadsheet ID'),
         range: z.string().describe("Cell range (e.g. 'Sheet1'!A1:B2)"),
-        values: z.array(z.array(z.any())).describe('2D array of cell values'),
+        values: z.array(z.array(z.any())).describe('2D array of cell values: an array of rows, each row an array of cells, e.g. [["Name","Qty"],["Apples",3]]. Pass a real JSON array — not a JSON-encoded string, not a flat list.'),
         account: z.string().optional().describe('Email account to use.'),
       }),
       async ({ spreadsheetId, range, values, account }, { authInfo }) => {
@@ -2934,7 +2934,7 @@ const handler = createMcpHandler(
       toolConfig(TOOL_DEFS.sheets_append_rows, {
         spreadsheetId: z.string().describe('Google Spreadsheet ID'),
         range: z.string().describe("Sheet tab or range to append to (e.g. 'Sheet1')"),
-        values: z.array(z.array(z.any())).describe('2D array of rows to append'),
+        values: z.array(z.array(z.any())).describe('2D array of rows to append: each row an array of cells, e.g. [["Apples",3],["Pears",5]] — one inner array per row, even for a single row. Pass a real JSON array, not a JSON-encoded string.'),
         account: z.string().optional().describe('Email account to use.'),
       }),
       async ({ spreadsheetId, range, values, account }, { authInfo }) => {
@@ -3264,8 +3264,8 @@ const handler = createMcpHandler(
         // Derived from RAW_MODIFY_METHODS so the schema, the catalog's
         // freeformMethods, the classifier and the executor cannot drift —
         // DELETE is refused at every one of them (test-raw-method-guard.ts).
-        method: z.enum(RAW_MODIFY_METHODS).optional().describe('HTTP method (default: POST)'),
-        body: z.union([z.string(), z.record(z.string(), z.any())]).optional().describe('Request body (JSON object or string)'),
+        method: z.enum(RAW_MODIFY_METHODS).optional().describe('HTTP method, uppercase: "POST" (default), "PUT", or "PATCH". Reads (GET) go through google_api_get; DELETE is never available.'),
+        body: z.union([z.string(), z.record(z.string(), z.any())]).optional().describe('Request body: a JSON object (preferred) or a pre-serialized JSON string — never a bare array. batchUpdate endpoints take {"requests":[...]}; Gmail messages/send takes {"raw":"<base64url RFC 2822>"}.'),
         account: z.string().optional().describe('Email account to use (see list_accounts; defaults to the primary). Ids are mailbox-specific: an id obtained on one account must be read with that same account passed here.'),
       }),
       async ({ path: rawPath, method = 'POST', body, account }, { authInfo }) => {
@@ -3860,7 +3860,8 @@ const MAX_REJECT_BODY_CHARS = 100_000;
  *   - mcp_input_validation_failed: SDK-emitted `isError` results for
  *     -32602 (invalid arguments / unknown tool), detected from a tee of the
  *     POST response body AFTER it has been returned, so the client is never
- *     delayed. GET (the long-lived SSE stream) is never buffered.
+ *     delayed, and decoded into per-argument props (parseValidationFailure).
+ *     GET (the long-lived SSE stream) is never buffered.
  */
 type AuthedRequest = Request & { auth?: { clientId?: string; extra?: { userId?: string } } };
 
@@ -3918,10 +3919,16 @@ const withTransportObservability =
         try {
           const body = await tee.text();
           if (!/"isError"\s*:\s*true/.test(body)) return;
-          const m = body.match(/MCP error -32602: (Input validation error|Tool [^"\\]{1,64} not found)[^"\\]{0,300}/);
-          if (!m) return;
+          // Decoded, not regex-matched: the SDK's text embeds Zod's JSON issue
+          // array, which the earlier `[^"\\]` capture cut at its first escape
+          // — every production row ended at `: [` (2026-09-17). The props now
+          // name the failing argument (first_issue_path / issue_paths), what
+          // the schema expected vs. what arrived, and the KEYS the agent sent
+          // (never values), so the runbook can rank fields per tool (7.10).
+          const failure = parseValidationFailure(body);
+          if (!failure) return;
           captureServerEvent(distinctId, 'mcp_input_validation_failed', {
-            ...base(), tool, kind: m[1].startsWith('Tool') ? 'unknown_tool' : 'invalid_arguments', message: m[0].slice(0, 300),
+            ...base(), tool, ...validationFailureProps(failure, envelope?.argumentKeys),
           });
         } catch { /* tee read failed — nothing to record */ }
       });
