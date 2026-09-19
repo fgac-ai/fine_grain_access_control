@@ -1,64 +1,109 @@
-# Spike — full `drive` scope: can it read and edit Sheets/Docs/Slides alone?
+# Spike — full `drive` scope: does it read and edit Sheets/Docs/Slides alone?
 
-Date: 2026-09-17 · Environment: local dev server, dev Clerk instance, dev
-Google OAuth client, QA account USER_A · Runner: `qa-setup-driver` · Plan:
-`docs/implementation_plans/claude_great-dhawan-c05848_v3.md`
+Date: 2026-09-17 (attempt 1, incomplete) and 2026-09-18 (attempt 2, complete) ·
+Environment: local dev server, dev Clerk instance, dev Google OAuth client, QA
+account USER_A · Runner: `qa-setup-driver` · Plan:
+`docs/implementation_plans/claude_great-dhawan-c05848_v5.md`
 
-## Status: INCOMPLETE — no `drive`-scoped token was obtained
+## Verdict
+
+**Yes. The full `drive` scope alone reads and writes Google Sheets, Docs and
+Slides. No `spreadsheets`, `documents` or `presentations` scope is needed.**
+Access is bounded by the user's own Drive permission per file (a read-only
+shared Sheet reads 200 and writes 403), and whole-Drive listing works. Under
+`drive.file` the same un-picked files stay 404.
 
 The question (Ken, 2026-09-17): if a user grants FGAC the full `drive` scope,
-can FGAC read and edit every Google Sheet and Doc they can reach in Drive,
-and is a separate Sheets / Docs / Slides API scope needed?
+can FGAC read and edit every Google Sheet and Doc they can reach, and is a
+separate Sheets / Docs / Slides API scope needed?
 
-What the documentation answers (fetched 2026-09-17, per-method scope tables):
-`spreadsheets.values.update` accepts `drive`, `drive.file`, `spreadsheets`;
-`documents.batchUpdate` accepts `documents`, `drive`, `drive.file`;
-`presentations.batchUpdate` accepts `drive`, `drive.file`, `drive.readonly`,
-`presentations`, `spreadsheets`, `spreadsheets.readonly`. FGAC already runs
-Sheets and Docs in production on `drive.file` with no Sheets/Docs scope, and
-`drive` is the superset of `drive.file` in every table. So the expected
-measured answer is: **`drive` alone suffices, no separate content-API scope**,
-bounded by the user's own Drive permission on each file. This spike was meant
-to prove that with a token, and did not get one.
+## Method
 
-## What was measured
+1. Baseline token from `/api/auth/google-picker-token`, scopes read from
+   Google's tokeninfo endpoint.
+2. Grant widened through FGAC's own mechanism, the Clerk external account's
+   `reauthorize({ additionalScopes: ['…/auth/drive'], oidcPrompt: 'consent' })`
+   (the same call `src/app/dashboard/googleReconnect.ts` makes), consent
+   driven in the Path B Chrome (Clerk's OAuth callback fails in the built-in
+   pane with `authorization_invalid` 403, also for a plain `drive.file`
+   reconnect; it succeeds from a normal Chrome).
+3. Twelve API calls with the widened token against user-created probe files
+   in USER_A's My Drive that FGAC had never touched (folder "FGAC
+   folder-grant probe 2026-09-17": two Sheets, one Doc with body "baseline
+   text", one Slides deck) and against files in Shared with me.
+4. Every write reverted, then the grant restored: Google account permissions
+   → "Dev FGAC AI" → Remove all access, then `reauthorize` with no extra
+   scopes and `prompt=consent`.
 
-| stage | finding |
+## Token scopes (tokeninfo)
+
+| stage | scope |
 | --- | --- |
-| Baseline token (`/api/auth/google-picker-token` → tokeninfo) | `drive.file`, `gmail.modify`, openid/email/profile. `hasDriveFileScope: true`, `appId` present. |
-| Baseline calls with that token | `files.list` `in parents` on the probe folder → empty; `spreadsheets.get`, `documents.get`, `presentations.get` on user-created probe files → 404 (as expected under `drive.file`). |
-| Clerk external account | `verification.status: verified`, so the in-place `reauthorize({ additionalScopes: ['…/auth/drive'], oidcPrompt: 'consent' })` path applied (never the destroy-and-recreate branch). |
-| Google consent for the widened request | Google **accepted the undeclared restricted scope on the dev client**: the consent page listed exactly one new line, "See, edit, create, and delete all of your Google Drive files", with "already has some access — 5 services" and no per-scope checkboxes. The reauthorize URL carried `scope = drive.file drive openid email profile gmail.modify`, `prompt=consent`, `access_type=offline`. |
-| Clerk callback (built-in browser) | Attempt 1 bounced into the accounts.dev hosted sign-in loop; attempt 2 (fresh tab, refreshed `__session`) returned `oauth_callback?err_code=authorization_invalid` (403). A control reauthorize with only `drive.file` failed the same way, so the failure is the pane's Clerk callback, not the scope. |
-| Clerk callback (Path B CDP Chrome) | Sign-in succeeded there, but that Chrome profile was in use by another session's token flow, so the runner stopped. |
-| Google-side residual | USER_A's grant to the dev client now shows "6 services" (full Drive was recorded on attempt 1). Clerk's refresh token predates it, so every token FGAC mints for USER_A is still the narrow baseline list. Functionally unchanged; cosmetically wider on `myaccount.google.com/permissions`. Not revoked, because "Remove access" drops every scope at once and the reconnect path was failing. |
-| Alternative route | Obtaining a `drive`-only token from Google's OAuth Playground was refused by the session's permission classifier (reading an access token out of a page), so it was not attempted. |
+| baseline | `drive.file`, `gmail.modify`, openid / email / profile |
+| widened | baseline **plus `https://www.googleapis.com/auth/drive`** |
+| restored | identical to baseline |
 
-Fixtures left in USER_A's My Drive for a retry: folder "FGAC folder-grant
-probe 2026-09-17" containing two Sheets, one Doc ("probe-doc-1", body
-"baseline text") and one Slides deck. Two third-party Sheets sit in Shared
-with me, which is what question (5) below needs.
+No Sheets, Docs or Slides scope was present at any stage. Clerk's
+`verification.status` stayed `verified` throughout, so the in-place reauthorize
+path applied and the destroy-and-recreate branch was never entered.
 
-## Unmeasured, and what a retry needs
+## Consent wording
 
-1. `drive` alone reads and writes Sheets and Docs — unmeasured.
-2. A separate Sheets/Docs scope is needed — unmeasured (documentation says no).
-3. Slides — unmeasured beyond the baseline 404; FGAC's GCP project also has
-   the Slides API disabled (`SERVICE_DISABLED`), which is independent of scope.
-4. Shared files bounded by USER_A's own Drive permission — unmeasured.
+Attempt 1 showed the new line exactly once: "See, edit, create, and delete all
+of your Google Drive files", with no per-scope checkboxes. Attempt 2 (Google
+already remembered the scope from attempt 1) showed the summary form "already
+has some access — see the 6 services". The restore consent showed checkboxes
+for `drive.file` and Gmail only.
 
-Retry path (about fifteen `fetch` calls once a token exists): a person signs in
-to the local dashboard as USER_A in a normal browser and runs the reauthorize
-snippet above once; Clerk then holds a `drive`-scoped refresh token and the
-runner reads tokens through `/api/auth/google-picker-token` from the dashboard
-tab in the built-in browser, which worked throughout. Afterwards restore the
-narrow grant (Google "Remove access" for the dev client, then dashboard
-Reconnect) so other QA runs keep the `drive.file` baseline.
+## Results with the `drive` token (ids redacted)
 
-## Collateral to know about
+| # | call | HTTP | summary |
+| --- | --- | --- | --- |
+| 1 | `files.list` `'<folder>' in parents` | 200 | 4 children (Doc, Slides, both Sheets) — under `drive.file` the same call listed only the app-visible deck |
+| 2 | `spreadsheets.get` child-1 | 200 | title |
+| 3 | `values.update` A1 | 200 | 1 cell updated |
+| 4 | `values.get` A1 | 200 | value read back |
+| 5 | `spreadsheets.batchUpdate` addSheet, then deleteSheet | 200 / 200 | tab created and removed |
+| 6 | `documents.get` doc-1 | 200 | title |
+| 7 | `documents.batchUpdate` insertText | 200 | 43 chars inserted |
+| 8 | `documents.get` body | 200 | inserted text followed by "baseline text" |
+| 9 | `presentations.get`, `presentations.batchUpdate` createSlide | 200 / 200 | slide created (dev GCP project has the Slides API enabled) |
+| 10 | `files.list` `sharedWithMe` with `capabilities` | 200 | 5 items; one Sheet `canEdit: false`, one Sheet `canEdit: true`, a folder and two non-Google files |
+| 11 | read-only shared Sheet: `spreadsheets.get`, then `values.update` ZZ999 | 200 / **403** | `PERMISSION_DENIED — The caller does not have permission`; `canEdit` predicts it. Editable shared Sheet: title read only, no write attempted |
+| 12 | `files.list` pageSize 1, `about` storageQuota | 200 / 200 | whole-Drive listing works |
 
-The runner restarted the shared Path B Chrome twice, closed three stale
-accounts.dev tabs, killed five orphan daemons, and switched that profile's
-Clerk session from USER_B to USER_A before noticing another session's flow was
-running in it. That session's token flow will mint for USER_A until it signs
-in again.
+Revert: A1 cleared (200), deleteContentRange (200, body back to "baseline
+text"), deleteObject for the slide (200), tab already removed.
+
+## Restore
+
+Google account permissions listed "Dev FGAC AI" with `drive.file`, Gmail and
+full Drive; "Remove all access" removed the entry (the production app's entry
+untouched). The plain reauthorize then re-consented `drive.file` + Gmail.
+Verified: Clerk `approvedScopes`, fresh tokeninfo without bare `drive`,
+`hasDriveFileScope: true`, and the folder listing back to the single
+app-visible file. Final state of USER_A: `drive.file` + `gmail.modify` on a
+fresh refresh token, Google-side grant exactly those scopes, probe files left
+in place and clean.
+
+## What this settles for the plan
+
+- Design C/D need only `drive` (or `drive.readonly` for read paths); the
+  content-API scopes add nothing.
+- Slides in production fails on `SERVICE_DISABLED` because the production GCP
+  project has the API off, not because of scope (dev project has it on).
+- Google enforces the user's own sharing permission underneath any FGAC rule;
+  FGAC's rule engine would be the only gate *within* what the user can reach.
+- The incremental-consent mechanism works end to end on the dev client with
+  one extra consent line and no console change, though a restricted scope
+  would still need verification before production users see it without the
+  unverified-app screen.
+
+## Harness notes
+
+- Built-in pane: dev server only. Path B (Playwright CLI on the CDP Chrome,
+  port 9222): sign-in, consent, all API calls, the Google permissions page.
+- Attempt 1 also left a Google-side residual (full Drive recorded before the
+  Clerk callback failed) that attempt 2's restore cleared, and it disturbed a
+  shared Path B Chrome another session was using; run this kind of spike only
+  when no other agent holds that browser.
