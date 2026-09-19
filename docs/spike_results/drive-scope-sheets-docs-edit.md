@@ -3,7 +3,7 @@
 Date: 2026-09-17 (attempt 1, incomplete) and 2026-09-18 (attempt 2, complete) ·
 Environment: local dev server, dev Clerk instance, dev Google OAuth client, QA
 account USER_A · Runner: `qa-setup-driver` · Plan:
-`docs/implementation_plans/claude_great-dhawan-c05848_v5.md`
+`docs/implementation_plans/claude_great-dhawan-c05848_v6.md`
 
 ## Verdict
 
