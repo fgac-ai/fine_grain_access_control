@@ -1,24 +1,26 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import Link from 'next/link'
 import { useUser } from '@clerk/nextjs'
 import posthog from 'posthog-js'
 import { Check, X } from 'lucide-react'
 import { SignUpCta } from '../SignUpCta'
 
 /* ─── Pricing plans (fake door) ─────────────────────────────────────────────
-   Nothing here is enforced or billed. The page exists to measure which plan
-   prospective users reach for, so every interaction captures a PostHog event
-   (catalog in docs/analytics.md; rationale in
-   docs/implementation_plans/pricing-page-design-9dbc83_v1.md). Prices and
-   limits live in PLANS so a later variant is a one-place change; the
-   PRICING_VARIANT constant rides on every event so variants stay comparable. */
+   Nothing here is enforced or billed. The page exists to measure whether
+   people will pay, so every interaction captures a PostHog event (catalog in
+   docs/analytics.md; strategy in
+   docs/implementation_plans/pricing-page-design-9dbc83_v2.md).
 
-export const PRICING_VARIANT = 'v1-2026-09'
+   Mechanic (v2): one flat Personal plan after a 30-day trial, no meters, no
+   per-account maths; Team is per seat. Prices live in PLANS so a variant is
+   a one-place change; PRICING_VARIANT rides on every event so variants stay
+   comparable in one query. */
+
+export const PRICING_VARIANT = 'v2-2026-09'
 
 type Interval = 'monthly' | 'annual'
-type PlanId = 'personal' | 'pro' | 'team'
+type PlanId = 'personal' | 'team'
 
 type Plan = {
   id: PlanId
@@ -27,9 +29,8 @@ type Plan = {
   monthly: number
   annual: number // per month, billed yearly
   unit: string
-  metric: string
+  trial?: string
   features: string[]
-  cta: string
   highlight?: boolean
   badge?: string
 }
@@ -38,39 +39,21 @@ const PLANS: Plan[] = [
   {
     id: 'personal',
     name: 'Personal',
-    tagline: 'One Google account, every rule.',
-    monthly: 0,
-    annual: 0,
-    unit: '',
-    metric: '1 Google account',
-    features: [
-      'Send allowlists, read blacklists, label rules',
-      'Per-file Sheets and Docs access',
-      'One-click approval links',
-      'Unlimited agent profiles',
-      'Claude, Cursor, Claude Code, any MCP client',
-      '1,000 requests / month fair use',
-    ],
-    cta: 'Get started — it’s free',
-  },
-  {
-    id: 'pro',
-    name: 'Pro',
-    tagline: 'Every inbox your agent should reach.',
-    monthly: 8,
-    annual: 6,
+    tagline: 'Everything, for one person. No meters.',
+    monthly: 10,
+    annual: 8,
     unit: '/ month',
-    metric: 'Up to 5 Google accounts',
+    trial: '30-day free trial · no card',
     features: [
-      'Everything in Personal',
-      'Multi-account delegation — family, teammates, extra inboxes',
-      'One agent, many mailboxes, each under its own rules',
-      '10,000 requests / month fair use',
-      'Priority support',
+      'All your own Google accounts — Gmail, Sheets, Docs',
+      'Every rule type: send allowlists, read blacklists, labels, per-file access',
+      'Delegate to and from anyone, free for both of you',
+      'Unlimited agent profiles and requests',
+      'Claude, Cursor, Claude Code, any MCP client',
+      'One-click approval links and email reminders',
     ],
-    cta: 'Get Pro',
     highlight: true,
-    badge: 'Most popular',
+    badge: 'One plan',
   },
   {
     id: 'team',
@@ -79,15 +62,13 @@ const PLANS: Plan[] = [
     monthly: 15,
     annual: 12,
     unit: '/ user / month',
-    metric: 'Per seat',
     features: [
-      'Everything in Pro, for every member',
+      'Everything in Personal, for every seat',
       'Shared rule templates across the team',
       'Admin view of every profile and approval',
       'Google Workspace domain',
       'Commercial licence and invoicing',
     ],
-    cta: 'Talk to us',
     badge: 'Early access',
   },
 ]
@@ -100,7 +81,7 @@ function capture(event: string, props: Record<string, unknown>) {
 
 export function PricingPlans({ signedIn }: { signedIn: boolean }) {
   const [interval, setInterval] = useState<Interval>('monthly')
-  const [door, setDoor] = useState<Extract<PlanId, 'pro' | 'team'> | null>(null)
+  const [door, setDoor] = useState<PlanId | null>(null)
 
   const toggle = (next: Interval) => {
     if (next === interval) return
@@ -110,8 +91,12 @@ export function PricingPlans({ signedIn }: { signedIn: boolean }) {
 
   const clickPlan = (plan: PlanId) => {
     capture('pricing_plan_clicked', { plan, interval, signed_in: signedIn })
-    if (plan !== 'personal') setDoor(plan)
   }
+
+  const ctaClass = (primary: boolean) =>
+    primary
+      ? 'block w-full rounded-sm bg-primary px-5 py-3 text-center text-[15px] font-semibold text-primary-foreground hover:opacity-90'
+      : 'block w-full rounded-sm border border-border bg-card px-5 py-3 text-center text-[15px] font-semibold text-foreground hover:border-ring'
 
   return (
     <>
@@ -138,7 +123,7 @@ export function PricingPlans({ signedIn }: { signedIn: boolean }) {
                 <>
                   Annual{' '}
                   <span className={interval === opt ? 'opacity-80' : 'text-primary'}>
-                    · save 25%
+                    · save 20%
                   </span>
                 </>
               )}
@@ -148,7 +133,7 @@ export function PricingPlans({ signedIn }: { signedIn: boolean }) {
       </div>
 
       {/* Plan cards */}
-      <div className="grid gap-5 md:grid-cols-3">
+      <div className="mx-auto grid max-w-[880px] gap-5 md:grid-cols-2">
         {PLANS.map((plan) => {
           const price = interval === 'monthly' ? plan.monthly : plan.annual
           return (
@@ -181,24 +166,22 @@ export function PricingPlans({ signedIn }: { signedIn: boolean }) {
               <div>
                 <div className="flex items-baseline gap-1.5">
                   <span className="text-[40px] font-extrabold leading-none tracking-[-0.03em] text-foreground">
-                    {price === 0 ? 'Free' : `$${price}`}
+                    ${price}
                   </span>
-                  {plan.unit && (
-                    <span className="text-sm text-muted-foreground">{plan.unit}</span>
-                  )}
+                  <span className="text-sm text-muted-foreground">{plan.unit}</span>
                 </div>
                 <p className="mt-1.5 text-xs text-muted-foreground">
-                  {price === 0
-                    ? 'For personal use, forever'
-                    : interval === 'annual'
-                      ? `Billed yearly · $${plan.annual * 12}${plan.id === 'team' ? ' per user' : ''}`
-                      : 'Billed monthly · cancel any time'}
+                  {interval === 'annual'
+                    ? `Billed yearly · $${plan.annual * 12}${plan.id === 'team' ? ' per user' : ''}`
+                    : 'Billed monthly · cancel any time'}
                 </p>
               </div>
 
-              <p className="rounded-sm bg-primary-muted px-3 py-2 text-[13px] font-semibold text-primary">
-                {plan.metric}
-              </p>
+              {plan.trial && (
+                <p className="rounded-sm bg-primary-muted px-3 py-2 text-[13px] font-semibold text-primary">
+                  {plan.trial}
+                </p>
+              )}
 
               <ul className="flex flex-col gap-2.5 text-sm text-foreground">
                 {plan.features.map((f) => (
@@ -210,36 +193,25 @@ export function PricingPlans({ signedIn }: { signedIn: boolean }) {
               </ul>
 
               <div className="mt-auto pt-2">
-                {plan.id === 'personal' ? (
-                  signedIn ? (
-                    <Link
-                      href="/dashboard"
-                      onClick={() => clickPlan('personal')}
-                      className="block rounded-sm border border-border bg-card px-5 py-3 text-center text-[15px] font-semibold text-foreground hover:border-ring"
-                    >
-                      Go to Dashboard
-                    </Link>
-                  ) : (
-                    <span onClickCapture={() => clickPlan('personal')} className="block">
-                      <SignUpCta
-                        location="pricing_personal"
-                        className="block w-full rounded-sm border border-border bg-card px-5 py-3 text-center text-[15px] font-semibold text-foreground hover:border-ring"
-                      >
-                        {plan.cta}
-                      </SignUpCta>
-                    </span>
-                  )
+                {plan.id === 'personal' && !signedIn ? (
+                  /* Signed-out: the trial IS today's product, so this is a real
+                     sign-up. Clicking captures pricing_plan_clicked, then the
+                     ordinary sign_up_started with cta_location pricing_personal. */
+                  <span onClickCapture={() => clickPlan('personal')} className="block">
+                    <SignUpCta location="pricing_personal" className={ctaClass(true)}>
+                      Start 30-day free trial
+                    </SignUpCta>
+                  </span>
                 ) : (
                   <button
                     type="button"
-                    onClick={() => clickPlan(plan.id)}
-                    className={
-                      plan.highlight
-                        ? 'block w-full rounded-sm bg-primary px-5 py-3 text-[15px] font-semibold text-primary-foreground hover:opacity-90'
-                        : 'block w-full rounded-sm border border-border bg-card px-5 py-3 text-[15px] font-semibold text-foreground hover:border-ring'
-                    }
+                    onClick={() => {
+                      clickPlan(plan.id)
+                      setDoor(plan.id)
+                    }}
+                    className={ctaClass(Boolean(plan.highlight))}
                   >
-                    {plan.cta}
+                    {plan.id === 'personal' ? 'Subscribe' : 'Talk to us'}
                   </button>
                 )}
               </div>
@@ -261,9 +233,10 @@ export function PricingPlans({ signedIn }: { signedIn: boolean }) {
 }
 
 /* ─── Fake door ──────────────────────────────────────────────────────────────
-   Honest copy: the plan is not purchasable yet. Signed-in visitors confirm
-   with one click (their Clerk email is already on the PostHog person);
-   signed-out visitors leave an email, stored as a person property so the
+   Honest copy: billing is not live. A signed-in person pressing Subscribe is
+   the willingness-to-pay signal; they confirm with one click (their Clerk
+   email is already on the PostHog person). Signed-out visitors only reach
+   the Team door and leave an email, stored as a person property so the
    launch list is a PostHog query. Nothing is written to our database. */
 
 function InterestDialog({
@@ -272,7 +245,7 @@ function InterestDialog({
   signedIn,
   onClose,
 }: {
-  plan: 'pro' | 'team'
+  plan: PlanId
   interval: Interval
   signedIn: boolean
   onClose: () => void
@@ -293,7 +266,8 @@ function InterestDialog({
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  const planName = plan === 'pro' ? 'Pro' : 'Team'
+  const planName = plan === 'personal' ? 'Personal' : 'Team'
+  const price = plan === 'personal' ? (interval === 'annual' ? '$8/month billed yearly' : '$10/month') : null
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -331,7 +305,11 @@ function InterestDialog({
       >
         <div className="mb-4 flex items-start justify-between gap-4">
           <h2 id="pricing-door-title" className="text-lg font-bold text-foreground">
-            {done ? 'You’re on the list' : `${planName} isn’t available yet`}
+            {done
+              ? 'Thanks — you’re on the list'
+              : plan === 'personal'
+                ? 'Billing isn’t live yet'
+                : 'Team isn’t available yet'}
           </h2>
           <button
             type="button"
@@ -346,10 +324,11 @@ function InterestDialog({
         {done ? (
           <>
             <p className="text-sm leading-relaxed text-muted-foreground">
-              Thanks — we’ll email{' '}
+              We’ll email{' '}
               <span className="font-semibold text-foreground">{knownEmail ?? email.trim()}</span>{' '}
-              when {planName} launches. Until then everything on the Personal plan is free,
-              including the rules {planName} builds on.
+              {plan === 'personal'
+                ? 'before anything changes, and your first paid month is on us. Until then you keep full access, free.'
+                : `when ${planName} launches.`}
             </p>
             <div className="mt-5 flex justify-end">
               <button
@@ -364,8 +343,8 @@ function InterestDialog({
         ) : (
           <form onSubmit={submit} className="flex flex-col gap-4">
             <p className="text-sm leading-relaxed text-muted-foreground">
-              {plan === 'pro'
-                ? 'We’re finishing Pro now. Leave your email and you’ll hear from us the day multi-account delegation moves to Pro — nothing changes for you until then.'
+              {plan === 'personal'
+                ? `You keep full access free until billing launches. Tell us you’d pay ${price} and we’ll email you before anything changes — with your first paid month free.`
                 : 'Team is in early access. Tell us roughly how big your team is and we’ll reach out to set it up with you.'}
             </p>
 
@@ -418,10 +397,10 @@ function InterestDialog({
               </button>
               <button
                 type="submit"
-                ref={knownEmail && plan === 'pro' ? (firstField as React.RefObject<HTMLButtonElement>) : undefined}
+                ref={knownEmail && plan === 'personal' ? (firstField as React.RefObject<HTMLButtonElement>) : undefined}
                 className="rounded-sm bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90"
               >
-                {knownEmail ? 'Notify me' : 'Keep me posted'}
+                {plan === 'personal' ? 'Count me in' : knownEmail ? 'Notify me' : 'Keep me posted'}
               </button>
             </div>
           </form>

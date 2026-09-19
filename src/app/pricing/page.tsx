@@ -7,7 +7,7 @@ import { EnterpriseCta } from './EnterpriseCta';
 export const metadata = {
   title: 'Pricing | fgac.ai',
   description:
-    'FGAC.ai is free for personal use. Pro adds every inbox your agent should reach; Team adds shared rules for everyone’s agents.',
+    'One plan, everything included: $10 a month after a 30-day free trial. Teams per seat. Self-hosting is free for personal use.',
 };
 
 /* ─── Pricing ────────────────────────────────────────────────────────────────
@@ -25,14 +25,14 @@ export default async function PricingPage() {
       <section className="px-6 pt-16 pb-10 text-center sm:px-8">
         <div className="mx-auto max-w-[720px]">
           <h1 className="mb-3.5 text-[36px] font-extrabold leading-[1.05] tracking-[-0.03em] text-foreground sm:text-[48px]">
-            Free for you.
+            One plan.
             <br />
-            Priced for every inbox after that.
+            Everything included.
           </h1>
           <p className="text-[17px] leading-[1.55] text-muted-foreground">
-            Every plan has the same rules engine and the same promise: your
-            data passes through, nothing is stored. You pay for how many
-            accounts — and how many people — your agents are allowed to reach.
+            Try it free for 30 days, then $10 a month. No request meters, no
+            per-account maths, nothing to count. Teams pay per seat. Your data
+            passes through and is never stored, on every plan.
           </p>
         </div>
       </section>
@@ -41,6 +41,16 @@ export default async function PricingPage() {
       <section className="px-6 sm:px-8">
         <div className="mx-auto max-w-[1120px]">
           <PricingPlans signedIn={signedIn} />
+          <p className="mx-auto mt-6 max-w-[880px] text-center text-sm text-muted-foreground">
+            Prefer to run it yourself? The code is open source and{' '}
+            <Link
+              href="https://github.com/fgac-ai/fine_grain_access_control/blob/main/LICENSE"
+              className="text-primary underline underline-offset-2"
+            >
+              free to self-host for personal use
+            </Link>
+            .
+          </p>
         </div>
       </section>
 
@@ -72,7 +82,7 @@ export default async function PricingPage() {
       {/* Closing */}
       <section className="px-6 pt-16 text-center sm:px-8">
         <h2 className="mb-2 text-[26px] font-extrabold tracking-[-0.02em] text-foreground">
-          Start on Personal. Nothing to cancel.
+          Thirty days to decide. Nothing to cancel.
         </h2>
         <p className="mb-6 text-base text-muted-foreground">
           Connected in under a minute from the{' '}

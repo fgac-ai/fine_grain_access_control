@@ -1,6 +1,7 @@
 'use client'
 
 import { useRef } from 'react'
+import Link from 'next/link'
 import posthog from 'posthog-js'
 import { PRICING_VARIANT } from './PricingPlans'
 
@@ -10,16 +11,35 @@ import { PRICING_VARIANT } from './PricingPlans'
 
 const FAQ: { q: string; a: React.ReactNode }[] = [
   {
-    q: 'Is Personal really free?',
-    a: 'Yes. FGAC.ai is free for personal use, and stays that way. The Personal plan has every rule type — the only limits are one Google account and a fair-use request ceiling that almost nobody reaches today.',
+    q: 'Is there a free plan?',
+    a: (
+      <>
+        The hosted service is free for 30 days, then $10 a month. There is no
+        permanent free tier: FGAC has real fixed costs — an annual third-party
+        security assessment for Gmail access chief among them — and a plan
+        that covers them is what keeps the service running. The code is open
+        source and{' '}
+        <Link
+          href="https://github.com/fgac-ai/fine_grain_access_control/blob/main/LICENSE"
+          className="text-primary underline underline-offset-2"
+        >
+          free to self-host for personal use
+        </Link>
+        .
+      </>
+    ),
   },
   {
-    q: 'I already connected more than one account. What happens to me?',
-    a: 'Nothing. Accounts and delegations you set up before Pro launches keep working. When Pro is live we will tell you well ahead of any change, and you will have the choice of moving to Pro or trimming back to one account.',
+    q: 'I signed up before pricing existed. What happens to me?',
+    a: 'Nothing yet. You keep full access, free, until billing launches, and we will email you before anything changes. When it does, your first paid month is free.',
   },
   {
-    q: 'What counts as a request?',
-    a: 'One call your agent makes through FGAC to Google: reading a thread, appending rows to a sheet, sending an email. Denied calls do not count. The typical active user makes under a hundred a month; the Personal ceiling is a thousand.',
+    q: 'Do you count requests, accounts, or seats?',
+    a: 'Personal is one flat price for one person: every Google account you own, unlimited agent profiles, unlimited requests. Delegating an inbox to someone else, or being delegated one, costs neither of you anything. Team is per seat, because a team is a number of people.',
+  },
+  {
+    q: 'What does the trial include?',
+    a: 'Everything. Every rule type, Sheets and Docs per-file access, multiple accounts, delegation, approval links. No card up front; the trial simply ends after 30 days.',
   },
   {
     q: 'Do you ever see my email or documents?',
@@ -27,7 +47,7 @@ const FAQ: { q: string; a: React.ReactNode }[] = [
   },
   {
     q: 'Can I use this at work?',
-    a: 'Personal use means your own accounts. Use by or for a company, school or agency needs the Team plan (or Enterprise), which also carries the commercial licence. If you are not sure which side you are on, ask us.',
+    a: 'Personal covers your own accounts. Use by or for a company, school or agency needs the Team plan (or Enterprise), which also carries the commercial licence. If you are not sure which side you are on, ask us.',
   },
   {
     q: 'Which agents does it work with?',
