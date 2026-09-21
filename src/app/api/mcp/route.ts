@@ -672,9 +672,9 @@ async function policyDenialWithLink(
   // say so, or the agent gets "Access Denied" and tries again.
   if (!action) return textResult(withNoLinkStop(message));
   try {
-    const { url, requestId, targetHash } = await mintApprovalLink(DASHBOARD_URL, conn.user.id, proxyKeyId, action);
+    const { url, query, requestId, targetHash } = await mintApprovalLink(DASHBOARD_URL, conn.user.id, proxyKeyId, action);
     const mintCount = await recordApprovalMint({
-      requestId, userId: conn.user.id, proxyKeyId, action: action.action, targetHash,
+      requestId, userId: conn.user.id, proxyKeyId, action: action.action, targetHash, linkQuery: query,
     });
     // Out-of-band delivery (2026-09-15): when the agent asks for the SAME
     // link again and the person has still not opened it, FGAC emails the
@@ -771,7 +771,7 @@ async function sendDenialWithLinks(
       lines.push(`👉 Allow sending to '${denial.deniedRecipient}' only — share this one-click link with the user: ${one.url}`);
       const oneMintCount = await recordApprovalMint({
         requestId: one.requestId, userId: conn.user.id, proxyKeyId,
-        action: 'send_whitelist', targetHash: one.targetHash,
+        action: 'send_whitelist', targetHash: one.targetHash, linkQuery: one.query,
       });
       emailLinks.push({
         requestId: one.requestId, action: 'send_whitelist', url: one.url,
@@ -785,7 +785,7 @@ async function sendDenialWithLinks(
     const all = await mintApprovalLink(DASHBOARD_URL, conn.user.id, proxyKeyId, { action: 'send_all' });
     lines.push(`👉 Or allow sending to ANY recipient from this profile — share this one-click link with the user instead: ${all.url}`);
     const allMintCount = await recordApprovalMint({
-      requestId: all.requestId, userId: conn.user.id, proxyKeyId, action: 'send_all',
+      requestId: all.requestId, userId: conn.user.id, proxyKeyId, action: 'send_all', linkQuery: all.query,
     });
     emailLinks.push({
       requestId: all.requestId, action: 'send_all', url: all.url,
@@ -3410,12 +3410,12 @@ const handler = createMcpHandler(
           return textResult(`🚫 Unknown request type '${type}'. ${REQUESTABLE}`);
         }
 
-        const { url, requestId, targetHash } = await mintApprovalLink(DASHBOARD_URL, conn.user.id, conn.proxyKeyId, action);
+        const { url, query, requestId, targetHash } = await mintApprovalLink(DASHBOARD_URL, conn.user.id, conn.proxyKeyId, action);
         // The title rides in the request ledger, never in the URL (the link
         // stays deterministic); the approve page reads it back by request_id.
         const mintCount = await recordApprovalMint({
           requestId, userId: conn.user.id, proxyKeyId: conn.proxyKeyId, action: action.action, targetHash,
-          ...named,
+          linkQuery: query, ...named,
         });
         // A re-request without a title still has one if an earlier mint stored
         // it — the response should say so rather than ask the agent again

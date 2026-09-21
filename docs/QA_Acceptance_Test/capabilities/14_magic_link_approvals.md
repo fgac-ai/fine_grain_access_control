@@ -266,3 +266,36 @@
   second refusal, never emails twice for the same (key, value), and never
   sends through a user's Google grant. Never assert on a production
   account's inbox
+
+### A18: Open requests appear on the dashboard until approved or dismissed
+- Signed in as USER_A with the MCP connection from capability 15, call
+  `request_access` for a sheet (A8 shape, any plausible spreadsheet id with a
+  `title`) and do NOT open the link the agent returns. Then visit
+  `/dashboard` (the profile page it redirects to) in the built-in browser
+- **Expected**: above the profile view a card `[data-testid=pending-approvals-banner]`
+  says "An agent is waiting for your approval" with one
+  `[data-testid=pending-approval-item]` whose text is the same description
+  the approve page would show (`Give this agent read-only access to
+  spreadsheet <title>`), the profile's label, and "just now". Its "Review"
+  link (`[data-testid=pending-approval-open]`) opens the approve page for
+  that request — the URL carries the link's own `a/k/r/s` plus
+  `src=banner` — and approving there (pick the file, or the plain approve
+  for a send link) makes the entry disappear from the next `/dashboard`
+  load. Mint a second request (a different spreadsheet id) and click its
+  "Dismiss" (`[data-testid=pending-approval-dismiss]`): the entry hides at
+  once and stays hidden on reload; call `request_access` for the SAME id
+  again and it is back. A request whose grant is already active never
+  shows: add the file through the Picker in the profile view first, then
+  mint for it — no entry. Nothing in the card names a request id or a raw
+  query string; two requests render two items, newest first
+- **Why**: the approval-link funnel loses most of its requests before the
+  first open (47 of 87 minted 2026-09-16 → 09-20 never opened) and the
+  post-sign-in wall router cannot reach those — the person never clicked.
+  The ledger knows what is pending for this owner; the dashboard is where
+  they end up in every browser, so it lists them there. Rules and clearing
+  in `src/lib/approvalPending.ts` (unit tests `scripts/test-approval-pending.ts`)
+- **Never**: the banner never shows another user's requests (the query is
+  scoped to the signed-in owner and every stored link is re-verified
+  against that owner before rendering), never shows a request older than 7
+  days since its last mint, and never fails the dashboard when the ledger
+  read fails (it renders nothing)

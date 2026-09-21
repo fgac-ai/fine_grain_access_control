@@ -197,7 +197,7 @@ export async function mintApprovalLink(
   userId: string,
   proxyKeyId: string,
   action: ApprovalAction,
-): Promise<{ url: string; requestId: string; targetHash?: string }> {
+): Promise<{ url: string; query: string; requestId: string; targetHash?: string }> {
   // Env-sourced base URLs have shipped with a trailing newline before (a
   // pasted Vercel env var), which breaks every link at the client — most
   // clients truncate at the newline and land on the site root. Sanitize here
@@ -214,7 +214,10 @@ export async function mintApprovalLink(
   q.set(APPROVAL_PARAMS.key, proxyKeyId);
   if (target) q.set(APPROVAL_PARAMS.target, target);
   q.set(APPROVAL_PARAMS.signature, signature);
-  return { url: `${origin}/dashboard/approve?${q.toString()}`, requestId, targetHash };
+  // `query` is what the ledger stores (approval_requests.link_query) so the
+  // dashboard's pending-approvals banner can re-open the link as minted.
+  const query = q.toString();
+  return { url: `${origin}/dashboard/approve?${query}`, query, requestId, targetHash };
 }
 
 export async function mintApprovalUrl(

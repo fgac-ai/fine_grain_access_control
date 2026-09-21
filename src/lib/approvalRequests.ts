@@ -31,6 +31,9 @@ export async function recordApprovalMint(opts: {
    * a later mint without a name never erases one, and a later mint WITH a
    * name fills a row that was minted nameless by a policy denial. */
   resourceName?: string;
+  /** The link's own a/k/r/s query, for the dashboard's pending-approvals
+   * banner (src/lib/approvalPending.ts). Latest mint wins. */
+  linkQuery?: string;
 }): Promise<number | null> {
   try {
     const [row] = await db.insert(approvalRequests)
@@ -41,6 +44,7 @@ export async function recordApprovalMint(opts: {
         action: opts.action,
         targetHash: opts.targetHash ?? null,
         resourceName: opts.resourceName ?? null,
+        linkQuery: opts.linkQuery ?? null,
       })
       .onConflictDoUpdate({
         target: approvalRequests.requestId,
@@ -48,6 +52,7 @@ export async function recordApprovalMint(opts: {
           mintCount: sql`${approvalRequests.mintCount} + 1`,
           lastMintedAt: new Date(),
           resourceName: sql`coalesce(${approvalRequests.resourceName}, excluded.resource_name)`,
+          linkQuery: sql`coalesce(excluded.link_query, ${approvalRequests.linkQuery})`,
         },
       })
       .returning({ mintCount: approvalRequests.mintCount });
@@ -269,4 +274,67 @@ export async function resolveWallRoute(userId: string): Promise<{ path: string; 
     action: hit.action,
     secondsSinceWall: Math.max(0, Math.round((now - hit.wallHitAt.getTime()) / 1000)),
   };
+}
+
+// ─── Pending-approvals banner ───────────────────────────────────────────────
+// The owner's open requests, listed on every dashboard page from the ledger
+// alone (no cookie, no wall hit, any browser). Selection rules are pure and
+// unit-tested in src/lib/approvalPending.ts; this is only the read and the
+// dismiss stamp.
+
+export interface PendingApprovalLedgerRow {
+  requestId: string;
+  action: string;
+  proxyKeyId: string;
+  linkQuery: string | null;
+  resourceName: string | null;
+  mintCount: number;
+  lastMintedAt: Date;
+  approvedAt: Date | null;
+  dismissedAt: Date | null;
+}
+
+/** Candidate rows for the banner: this owner's unapproved requests minted in
+ *  the last `sinceMs`. The link is link_query (every mint since 2026-09-20),
+ *  else wall_query (the same string, stamped only on a sign-in wall hit). */
+export async function listPendingApprovalRows(userId: string, sinceMs: number): Promise<PendingApprovalLedgerRow[]> {
+  try {
+    const rows = await db.select({
+      requestId: approvalRequests.requestId,
+      action: approvalRequests.action,
+      proxyKeyId: approvalRequests.proxyKeyId,
+      linkQuery: sql<string | null>`coalesce(${approvalRequests.linkQuery}, ${approvalRequests.wallQuery})`,
+      resourceName: approvalRequests.resourceName,
+      mintCount: approvalRequests.mintCount,
+      lastMintedAt: approvalRequests.lastMintedAt,
+      approvedAt: approvalRequests.approvedAt,
+      dismissedAt: approvalRequests.dismissedAt,
+    })
+      .from(approvalRequests)
+      .where(and(
+        eq(approvalRequests.userId, userId),
+        isNull(approvalRequests.approvedAt),
+        sql`${approvalRequests.lastMintedAt} >= ${new Date(Date.now() - sinceMs)}`,
+      ));
+    return rows;
+  } catch (err) {
+    console.error('[approvalRequests] pending lookup failed:', err);
+    return [];
+  }
+}
+
+/** Stamp the owner's dismissal. Scoped to the owner so a request id alone
+ *  cannot hide someone else's banner entry. Returns the row's action when a
+ *  row was stamped, null otherwise. */
+export async function dismissApprovalRequest(requestId: string, userId: string): Promise<string | null> {
+  try {
+    const rows = await db.update(approvalRequests)
+      .set({ dismissedAt: new Date() })
+      .where(and(eq(approvalRequests.requestId, requestId), eq(approvalRequests.userId, userId)))
+      .returning({ action: approvalRequests.action });
+    return rows[0]?.action ?? null;
+  } catch (err) {
+    console.error('[approvalRequests] dismiss failed:', err);
+    return null;
+  }
 }

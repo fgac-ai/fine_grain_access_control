@@ -35,6 +35,8 @@ export interface DashboardData {
   lastSignInAt: number | null;
   /** FGAC users.id — the owner key the approval ledger is filed under. */
   userId: string;
+  /** Clerk user id — the distinct id for server-side PostHog events. */
+  clerkUserId: string;
 }
 
 /**
@@ -127,6 +129,6 @@ export async function loadDashboardData(): Promise<DashboardData | null> {
 
   return {
     profiles, rules, accessibleEmails, mcpEndpoint, hasCompleteGoogleAccess,
-    googleAccess, needsDriveFile, lastSignInAt: user.lastSignInAt, userId: dbUser.id,
+    googleAccess, needsDriveFile, lastSignInAt: user.lastSignInAt, userId: dbUser.id, clerkUserId: user.id,
   };
 }

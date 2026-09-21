@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation';
 import { ConnectGoogleWarning } from './ConnectGoogleWarning';
 import { SignInTelemetry } from './SignInTelemetry';
+import { PendingApprovalsBanner } from './PendingApprovalsBanner';
 import { AgentProfilesView } from './AgentProfilesView';
 import { loadDashboardData, defaultProfileSlug } from './loadDashboard';
 import { resolveWallRoute } from '@/lib/approvalRequests';
@@ -63,6 +64,7 @@ export default async function DashboardPage({
         access={data.googleAccess}
         needsDriveFile={data.needsDriveFile}
       />
+      <PendingApprovalsBanner userId={data.userId} clerkUserId={data.clerkUserId} profiles={data.profiles} />
       {!data.hasCompleteGoogleAccess && (
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 pt-8">
           <ConnectGoogleWarning

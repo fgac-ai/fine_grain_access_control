@@ -13,6 +13,7 @@ import { validateRulePattern, patternKind, assertStorablePattern } from "@/lib/r
 import { slugifyProfileLabel } from "@/lib/profileSlugs";
 import type { ApprovalSearchParams, ApprovalPayload } from "@/lib/approvalLinks";
 import { DRIVE_FILE_KINDS, kindForService, kindForActionType, kindForApprovalAction, type DriveFileKind } from "@/lib/driveFileKinds";
+import { grantActiveForApproval } from "@/lib/approvalGrantState";
 import * as jose from "jose";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -208,6 +209,24 @@ export async function revokeDelegation(delegationId: string) {
   // the delegation too, but the rows should not linger regardless.
   await db.delete(keyEmailAccess).where(eq(keyEmailAccess.delegationId, delegationId));
 
+  revalidateDashboard();
+}
+
+// ─── Pending approvals (dashboard banner) ───────────────────────────────────
+
+/**
+ * "Dismiss" on a pending-approvals banner entry. Hides the request until the
+ * agent mints its link again (src/lib/approvalPending.ts). Scoped to the
+ * signed-in owner: a request id alone cannot hide someone else's entry.
+ */
+export async function dismissPendingApproval(requestId: string) {
+  const dbUser = await getDbUser();
+  const { dismissApprovalRequest } = await import("@/lib/approvalRequests");
+  const { captureServerEvent } = await import("@/lib/posthogServer");
+  const action = await dismissApprovalRequest(requestId, dbUser.id);
+  if (action) {
+    captureServerEvent(dbUser.clerkUserId, "approval_banner_dismissed", { request_id: requestId, action });
+  }
   revalidateDashboard();
 }
 
@@ -922,64 +941,6 @@ export type MagicApprovalResult =
        * that had lost the link). */
       retryable?: boolean;
     };
-
-/**
- * Is the grant a magic-link payload describes currently active for its key?
- *
- * Since single-use was retired (2026-08-25) this is the ONLY replay guard:
- * re-approving an already-active grant writes nothing and reports success,
- * so a double submit cannot duplicate a rule. Re-approving after the grant
- * was REVOKED deliberately re-grants — the URL is permanent by design, and
- * doing so requires the owner's session plus an explicit click on a page
- * naming the grant, the same bar as re-adding the rule in the dashboard.
- */
-async function grantActiveForApproval(
-  p: { action: string; userId: string; recipient?: string; spreadsheetId?: string; documentId?: string; presentationId?: string },
-  keyId: string,
-): Promise<boolean> {
-  const assignedOrGlobal = async (ruleId: string): Promise<boolean> => {
-    const asgn = await db.select().from(keyRuleAssignments)
-      .where(eq(keyRuleAssignments.accessRuleId, ruleId));
-    return asgn.length === 0 || asgn.some(a => a.proxyKeyId === keyId);
-  };
-
-  if ((p.action === "send_whitelist" && p.recipient) || p.action === "send_all") {
-    const escaped = p.recipient?.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
-    const wanted = p.action === "send_all" ? ["*"] : [`^${escaped}$`, "*"];
-    const rules = await db.select().from(accessRules).where(and(
-      eq(accessRules.userId, p.userId),
-      eq(accessRules.service, "gmail"),
-      eq(accessRules.actionType, "send_whitelist"),
-    ));
-    for (const r of rules) {
-      if (!r.regexPattern || !wanted.includes(r.regexPattern)) continue;
-      if (await assignedOrGlobal(r.id)) return true;
-    }
-    return false;
-  }
-
-  // Per-file grants, any kind: the action name resolves the kind, the kind's
-  // id key names the file, and its action types say which levels satisfy it.
-  const fileKind = kindForApprovalAction(p.action);
-  const fileId = fileKind ? p[DRIVE_FILE_KINDS[fileKind].idKey] : undefined;
-  if (fileKind && fileId) {
-    const d = DRIVE_FILE_KINDS[fileKind];
-    const needed = p.action === d.approvalActions.write
-      ? [d.actionTypes.readWrite]
-      : [d.actionTypes.read, d.actionTypes.readWrite];
-    const rules = await db.select().from(accessRules).where(and(
-      eq(accessRules.userId, p.userId),
-      eq(accessRules.service, d.service),
-    ));
-    for (const r of rules) {
-      if (r.targetResourceId !== fileId || !needed.includes(r.actionType)) continue;
-      if (await assignedOrGlobal(r.id)) return true;
-    }
-    return false;
-  }
-
-  return false;
-}
 
 /** What the approve page needs to render the wrong-account card. */
 export interface WrongAccountDetails {

@@ -1897,6 +1897,92 @@ LEFT JOIN routed ro ON ro.rid = r.rid
 LEFT JOIN opened o ON o.rid = r.rid
 ```
 
+**Read 2026-09-20, four days after the router shipped (production, 2026-09-16
+13:24Z → 09-20 22:45Z).** The first query above was mis-run in the 2026-09-19
+review as a join of wall hits to `approval_link_opened` on `action` +
+`target_hash` — `approval_link_opened` does not carry `target_hash`, so that
+join is 0 by construction. Joined as written here (wall → mint → open on
+`request_id`) the picture inverts:
+
+| signal | value |
+| --- | --- |
+| `approval_sign_in_wall`, `navigation = true`, people | 25 hits on 18 requests (11 `claude_desktop`, 7 `browser`) |
+| `approval_wall_recorded {recorded: true}` | 25, all 17 ledger rows stamped |
+| walled requests opened by their owner afterwards | 16 of 17 (median 12 s after the hit; `claude_desktop` walls are re-opened in the person's real browser 5–95 s later) |
+| walled requests approved | 14 of 17 |
+| `approval_wall_routed` | 0 — and `routed_at` is NULL on every ledger row |
+| `sign_in_completed {after_approval_wall: true}` | 0 |
+
+So the router's fix half never fired because it had nothing to do: a
+same-browser sign-in comes straight back to the approve page through Clerk's
+own `redirect_url` (the approve page renders, `opened_at` stamps, the router's
+"not seen since" rule correctly declines), and a Claude-desktop bounce is
+repaired by the person themselves. The `browser` class over-counts people:
+every `browser` wall hit whose owner was on the approve page at the time
+carried the owner's EXACT user-agent and fired within 150 ms of that owner's
+own signed-in `approval_link_opened` — a cookie-less duplicate load of the
+link (a link scanner or preview fetch riding the click), not a person losing
+context; two more `browser` hits came from a Windows Chrome 151 UA whose
+owner uses a different machine entirely. Read `client = 'browser'` wall rows
+as an upper bound, and read recovery per request from the query above.
+
+The lost context that IS real sits outside the wall: 47 of the 87 requests
+minted in the same window were never opened at all (21 owners), and 5 of
+those had the owner on a dashboard page within the week — every one shown the
+profile page with nothing about the request. That is what the pending-
+approvals banner (shipped 2026-09-20, `src/lib/approvalPending.ts`) is for:
+every dashboard page lists the owner's open requests from the ledger alone,
+in whatever browser they sign in with. Its funnel, per request:
+
+```sql
+-- pending-approvals banner: owners shown → requests clicked → opened via the banner → dismissed
+SELECT 'owners_shown' AS metric, count(DISTINCT distinct_id) AS n
+FROM events WHERE event = 'approval_banner_shown' AND properties.environment = 'production' AND timestamp >= now() - INTERVAL 30 DAY
+UNION ALL
+SELECT 'banner_renders', count()
+FROM events WHERE event = 'approval_banner_shown' AND properties.environment = 'production' AND timestamp >= now() - INTERVAL 30 DAY
+UNION ALL
+SELECT 'requests_clicked', count(DISTINCT toString(properties.request_id))
+FROM events WHERE event = 'approval_banner_clicked' AND properties.environment = 'production' AND timestamp >= now() - INTERVAL 30 DAY
+UNION ALL
+SELECT 'requests_opened_via_banner', count(DISTINCT toString(properties.request_id))
+FROM events WHERE event = 'approval_link_opened' AND properties.environment = 'production'
+  AND toString(properties.link_source) = 'banner' AND timestamp >= now() - INTERVAL 30 DAY
+UNION ALL
+SELECT 'requests_dismissed', count(DISTINCT toString(properties.request_id))
+FROM events WHERE event = 'approval_banner_dismissed' AND properties.environment = 'production' AND timestamp >= now() - INTERVAL 30 DAY
+```
+
+```sql
+-- requests approved after a banner open (the banner's converted share)
+WITH opened AS (
+  SELECT toString(properties.request_id) AS rid, min(timestamp) AS first_open
+  FROM events
+  WHERE event = 'approval_link_opened' AND properties.environment = 'production'
+    AND toString(properties.link_source) = 'banner' AND timestamp >= now() - INTERVAL 30 DAY
+  GROUP BY rid
+),
+approved AS (
+  SELECT toString(properties.request_id) AS rid, min(timestamp) AS first_approved
+  FROM events
+  WHERE event = 'approval_link_approved' AND properties.environment = 'production'
+    AND timestamp >= now() - INTERVAL 30 DAY
+  GROUP BY rid
+)
+SELECT count() AS opened_via_banner,
+       countIf(a.first_approved > o.first_open) AS approved_after,
+       round(100.0 * countIf(a.first_approved > o.first_open) / count(), 1) AS pct_converted
+FROM opened o
+LEFT JOIN approved a ON a.rid = o.rid
+```
+
+The banner is judged working if `requests_opened_via_banner` grows out of
+the never-opened pool (the 47/87 above), and `pct_converted` sits near the
+agent-link rate in 7.26. A high `requests_dismissed` with low clicks means
+the entries read as noise — check `oldest_pending_s` on the shown rows
+before shortening the 7-day window. Rows minted before 2026-09-20 have no
+stored link and never appear; the banner's population starts at the deploy.
+
 **7.26 — Approval-link reminder email: does the emailed link get more
 interaction than the one the agent was handed?** Added 2026-09-15 with the
 repeat-request reminder (`src/lib/approvalNotify.ts`; sender = FGAC's

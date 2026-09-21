@@ -94,6 +94,16 @@ export const approvalRequests = pgTable('approval_requests', {
   wallHitAt: timestamp('wall_hit_at'),
   wallQuery: text('wall_query'),
   routedAt: timestamp('routed_at'),
+  // Pending-approvals banner (2026-09-20, src/lib/approvalPending.ts). The
+  // link's own a/k/r/s query, stored at EVERY mint (latest wins) so the
+  // dashboard can list this owner's open requests with a working link --
+  // the ledger never stores the target in the clear, and the approve page
+  // needs the signed query. wallQuery is the same string for the subset of
+  // rows that hit the sign-in wall; rows minted before this column exists
+  // and never walled cannot be listed. dismissedAt hides a row from the
+  // banner until the agent mints it again (last_minted_at moves past it).
+  linkQuery: text('link_query'),
+  dismissedAt: timestamp('dismissed_at'),
 }, (table) => [
   // The per-owner hourly email cap counts this owner's recent notified_at
   // stamps on every first mint; keep that a range scan as the ledger grows.
