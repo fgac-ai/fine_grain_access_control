@@ -270,7 +270,12 @@
 ### A18: Open requests appear on the dashboard until approved or dismissed
 - Signed in as USER_A with the MCP connection from capability 15, call
   `request_access` for a sheet (A8 shape, any plausible spreadsheet id with a
-  `title`) and do NOT open the link the agent returns. Then visit
+  `resourceName` — the argument is `resourceName`, not `title`; a mint
+  without it stores no name and the banner shows the file id) and do NOT
+  open the link the agent returns. On a preview deployment the returned
+  link carries the PRODUCTION origin (`DASHBOARD_URL` prefers
+  `NEXT_PUBLIC_APP_URL`); rewrite the origin to the preview host before
+  opening any link — the signature covers only `a/k/r/s`. Then visit
   `/dashboard` (the profile page it redirects to) in the built-in browser
 - **Expected**: above the profile view a card `[data-testid=pending-approvals-banner]`
   says "An agent is waiting for your approval" with one

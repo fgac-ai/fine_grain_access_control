@@ -82,11 +82,12 @@ export async function getApprovalRequestResourceName(requestId: string): Promise
   }
 }
 
-/** Stamp the first time a request's approve page was loaded. */
+/** Stamp the first time a request's approve page was loaded (funnel), and
+ *  every time (the router's "seen since the wall hit" clock). */
 export async function markApprovalRequestOpened(requestId: string): Promise<void> {
   try {
     await db.update(approvalRequests)
-      .set({ openedAt: sql`coalesce(${approvalRequests.openedAt}, now())` })
+      .set({ openedAt: sql`coalesce(${approvalRequests.openedAt}, now())`, lastOpenedAt: sql`now()` })
       .where(eq(approvalRequests.requestId, requestId));
   } catch (err) {
     console.error('[approvalRequests] open record failed:', err);
@@ -229,7 +230,10 @@ export async function listWallHitsForRouting(userId: string): Promise<Array<Rout
       action: approvalRequests.action,
       wallQuery: approvalRequests.wallQuery,
       wallHitAt: approvalRequests.wallHitAt,
-      openedAt: approvalRequests.openedAt,
+      // The LATEST owner render: opened_at is first-open-only, so a request
+      // opened before the hit and reached again after it would otherwise
+      // still look unseen and be routed back to.
+      openedAt: sql<Date | null>`coalesce(${approvalRequests.lastOpenedAt}, ${approvalRequests.openedAt})`,
       routedAt: approvalRequests.routedAt,
     })
       .from(approvalRequests)

@@ -104,6 +104,12 @@ export const approvalRequests = pgTable('approval_requests', {
   // banner until the agent mints it again (last_minted_at moves past it).
   linkQuery: text('link_query'),
   dismissedAt: timestamp('dismissed_at'),
+  // Every owner render of the approve page (openedAt keeps the FIRST open
+  // for the funnel). The wall router's "not seen since the hit" rule reads
+  // this one: a request first opened before a wall hit and reached again
+  // after it (Clerk's redirect_url, the banner, the link itself) must not be
+  // routed back to (preview QA 2026-09-21, F3).
+  lastOpenedAt: timestamp('last_opened_at'),
 }, (table) => [
   // The per-owner hourly email cap counts this owner's recent notified_at
   // stamps on every first mint; keep that a range scan as the ledger grows.
