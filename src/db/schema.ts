@@ -136,6 +136,41 @@ export const accountRefusals = pgTable('account_refusals', {
   index('account_refusals_user_notified_idx').on(table.userId, table.notifiedAt),
 ]);
 
+// ─── Google Grant Failures ───────────────────────────────────────────────────
+// Ledger for the dead-grant owner notice (src/lib/googleGrantFailures.ts): one
+// row per (mailbox OWNER, mailbox) whose Google grant a reconnect would repair
+// (`no_token` / `refresh_failed` / `grant_revoked` — src/lib/googleTokenFailure.ts
+// `reconnectRepairs`). The owner is the only person who can run the reconnect;
+// for a delegated mailbox that is NOT the key owner whose agent was refused,
+// which is why the ledger is keyed on the owner, not the key. Measured in
+// production (30 d to 2026-09-19): one delegated mailbox was refused once a
+// day for 30 days with zero successes and its owner never told; two own-mailbox
+// owners each got ONE refusal and went silent. Hence: email on the first
+// failure, repeat while it persists, bounded per episode.
+export const googleGrantFailures = pgTable('google_grant_failures', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  // The mailbox owner (grantor) — the recipient of the notice.
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  // The mailbox whose grant failed, lower-cased (one row per owner + mailbox).
+  accountEmail: text('account_email').notNull(),
+  // Latest classified reason (`no_token` / `refresh_failed` / `grant_revoked`).
+  lastReason: text('last_reason').notNull(),
+  // Episode bookkeeping: a failure arriving more than GRANT_DEAD_EPISODE_GAP
+  // after the previous one starts a new episode (count and notices reset).
+  firstFailedAt: timestamp('first_failed_at').defaultNow().notNull(),
+  lastFailedAt: timestamp('last_failed_at').defaultNow().notNull(),
+  failureCount: integer('failure_count').notNull().default(1),
+  // Notices sent in the current episode, and when the last one went out.
+  // `notified_at` is the claim stamp the shared daily cap counts.
+  notifiedCount: integer('notified_count').notNull().default(0),
+  notifiedAt: timestamp('notified_at'),
+}, (table) => [
+  uniqueIndex('google_grant_failures_owner_email_unique').on(table.userId, table.accountEmail),
+  // Third range scan for the per-owner daily email cap (approvalRequests.ts
+  // `recentNotificationCountSql` counts all three ledgers in one statement).
+  index('google_grant_failures_user_notified_idx').on(table.userId, table.notifiedAt),
+]);
+
 // ─── Email Delegations ───────────────────────────────────────────────────────
 // Tracks cross-user email delegation. Owner grants delegate permission to
 // create API keys/rules that access the owner's Gmail.

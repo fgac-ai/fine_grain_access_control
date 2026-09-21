@@ -188,7 +188,8 @@
   branch can exhaust it (2026-09-16: three link reminders sent to USER_A at
   ~05:00 UTC blocked a later run outright). Check headroom first
   (read-only: `notified_at > now() - interval '24 hours'` on
-  `approval_requests` and `account_refusals`, grouped by owner) and, when
+  `approval_requests`, `account_refusals` and `google_grant_failures` — all
+  three ledgers share the cap — grouped by owner) and, when
   it is spent, run A16/A17 with the OTHER QA account as the connection
   owner and recipient — never clear the stamps
 - Signed in as USER_A, trigger a send denial to a recipient never denied

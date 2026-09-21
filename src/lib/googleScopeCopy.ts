@@ -9,7 +9,12 @@
  * missing and, for drive.file, the reason it goes missing.
  */
 
-export type GoogleAccessLike = { gmail: boolean; driveFile: boolean };
+export type GoogleAccessLike = {
+  gmail: boolean;
+  driveFile: boolean;
+  /** A Google account is linked but its grant is dead (googleAccess.ts). */
+  disconnected?: boolean;
+};
 
 export type MissingGoogleScope = 'gmail' | 'drive_file';
 
@@ -47,6 +52,22 @@ export function describeMissingGoogleAccess(
         'Every Gmail tool fails until you reconnect and approve Gmail.',
       button: 'Reconnect Google',
       missing: ['gmail'],
+    };
+  }
+
+  if (access.disconnected) {
+    // Linked, but Google no longer honours the grant (revoked under the Google
+    // account's third-party access, a password change, an aged-out grant).
+    // Every agent call on this account is being refused with a reconnect link
+    // — the owner email (PR: dead-grant notice) points here. Say so, and say
+    // "reconnect": to a user whose agent worked yesterday, "connect your
+    // Google account" reads like the wrong page.
+    return {
+      title: 'Action Required: Reconnect Google',
+      body: 'Google has expired or revoked FGAC\'s access to this account — this happens when FGAC is removed under your Google account\'s third-party access, when your Google password changes, or when a grant ages out. ' +
+        'Every agent call on this account is refused until you reconnect; reconnecting shows Google\'s consent screen again and takes one click.',
+      button: 'Reconnect Google',
+      missing: ['gmail', 'drive_file'],
     };
   }
 

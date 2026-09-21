@@ -127,13 +127,16 @@ export function encodeHeaderWord(value: string): string {
 /**
  * The RFC 2822 message FGAC's proxy API sends (base64url-encoded by the
  * caller). From and Reply-To are the support mailbox; the proxy sends as
- * the key's own account, so Gmail keeps the From consistent.
+ * the key's own account, so Gmail keeps the From consistent. `cc` is used by
+ * the dead-grant notice on a delegated mailbox (the key owner rides along).
  */
-export function approvalEmailRaw(opts: { from: string; to: string; subject: string; body: string }): string {
+export function approvalEmailRaw(opts: { from: string; to: string; cc?: string | null; subject: string; body: string }): string {
   const from = sanitizeLine(opts.from, 254);
+  const cc = opts.cc ? sanitizeLine(opts.cc, 254) : '';
   return `From: FGAC <${from}>\r\n` +
     `Reply-To: ${from}\r\n` +
     `To: ${sanitizeLine(opts.to, 254)}\r\n` +
+    (cc ? `Cc: ${cc}\r\n` : '') +
     `Subject: ${encodeHeaderWord(sanitizeLine(opts.subject, 200))}\r\n` +
     `MIME-Version: 1.0\r\n` +
     `Content-Type: text/plain; charset=utf-8\r\n` +

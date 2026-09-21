@@ -14,9 +14,17 @@ export type GoogleAccess = {
   gmail: boolean;
   /** Token is live and carries drive.file (or full drive). */
   driveFile: boolean;
+  /** A verified Google account IS linked, but no usable token came back —
+   * Clerk could not refresh it (Google revoked / expired the grant) or Google
+   * rejected it. The card then says "reconnect", not "connect": this is the
+   * dead-grant state the agent-facing 🚫 refusal and the owner email describe,
+   * and it must not read like a first-time setup to a user whose agent worked
+   * yesterday. Absent when no Google account is linked at all. */
+  disconnected?: boolean;
 };
 
 const NO_ACCESS: GoogleAccess = { gmail: false, driveFile: false };
+const DISCONNECTED: GoogleAccess = { gmail: false, driveFile: false, disconnected: true };
 
 /**
  * Which of the Google scopes FGAC needs are actually usable right now.
@@ -45,15 +53,15 @@ export async function checkGoogleAccess(user: ClerkUser): Promise<GoogleAccess> 
     // Provider takes no `oauth_` prefix — the prefixed form is deprecated and
     // removed in Clerk's next major.
     const oauthTokens = await clerk.users.getUserOauthAccessToken(user.id, 'google');
-    if (oauthTokens.data.length === 0) return NO_ACCESS;
+    if (oauthTokens.data.length === 0) return DISCONNECTED;
 
     const tokenInfo = oauthTokens.data[0];
-    if (!tokenInfo.token) return NO_ACCESS;
+    if (!tokenInfo.token) return DISCONNECTED;
 
     const ping = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${tokenInfo.token}`);
     if (!ping.ok) {
       console.error('Token rejected by Google (likely revoked or expired in limbo state).', ping.status);
-      return NO_ACCESS;
+      return DISCONNECTED;
     }
 
     const tokenData = await ping.json();
@@ -63,7 +71,10 @@ export async function checkGoogleAccess(user: ClerkUser): Promise<GoogleAccess> 
       driveFile: scopes.includes(DRIVE_FILE_SCOPE) || scopes.includes(DRIVE_FULL_SCOPE),
     };
   } catch (error) {
+    // Clerk threw: a 400 oauth_token_retrieval_error (Google: invalid_grant) or
+    // a 422 cannot-refresh — the same dead-grant classes the MCP route refuses
+    // on (src/lib/googleTokenFailure.ts). The account is linked; the grant is not.
     console.error('Failed to validate Google OAuth token. Account is likely disconnected in Clerk.', error);
-    return NO_ACCESS;
+    return DISCONNECTED;
   }
 }

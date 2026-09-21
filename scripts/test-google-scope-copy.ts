@@ -40,5 +40,11 @@ const none = describeMissingGoogleAccess({ gmail: false, driveFile: false }, tru
 check('no access lists both scopes', none.missing.length === 2);
 check('no access keeps the connect button label', none.button === 'Sign in with Google');
 
+const dead = describeMissingGoogleAccess({ gmail: false, driveFile: false, disconnected: true }, true)!;
+check('dead grant lists both scopes', dead.missing.length === 2);
+check('dead grant says reconnect, not connect', dead.title === 'Action Required: Reconnect Google' && dead.button === 'Reconnect Google');
+check('dead grant names the causes (revoked / password / aged out)', /revoked/.test(dead.body) && /password/.test(dead.body));
+check('dead grant says agent calls are refused until reconnected', /refused until you reconnect/.test(dead.body));
+
 if (failures) { console.error(`\n${failures} failure(s)`); process.exit(1); }
 console.log('\nAll google-scope-copy checks passed.');

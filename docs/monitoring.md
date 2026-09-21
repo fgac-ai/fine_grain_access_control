@@ -830,6 +830,8 @@ Healthy: `oauth_token_retrieval_error` rows carry `reason = 'grant_revoked'`
 `$mcp_tool_call` rows after the first failure are `denied_by_policy` with
 `google_token_error = 'grant_revoked'` — not a run of `failed`. Whether the
 reconnect link converts is §7.8's `google_reconnect_*` funnel for that person.
+Since 2026-09-20 the refusal also emails the mailbox OWNER (§7.29) — the agent's
+link reaches nobody when the owner is not the person running the agent.
 The per-tool split the directory table needs is now a property, no join:
 
 ```sql
@@ -2159,3 +2161,99 @@ Google message the classifier has not seen, and the fixture list in
 `scripts/test-google-bad-request-copy.ts` is where it gets added. The
 fetch layer stamps the props, so raw `google_api_get` / `google_api_modify`
 400s appear in 7.28b too; only the sheets typed tools list tabs.
+
+**7.29 — Dead-grant owner notice: is the owner told, and does the grant come
+back?** Added 2026-09-20 (`src/lib/approvalNotify.ts` `notifyOwnerOfDeadGrant`,
+`docs/implementation_plans/claude_lucid-pare-619cae_v1.md`). The
+`google_token_unavailable` refusal (§7.13a) carries an owner-bound reconnect
+link, and until now the AGENT was the only party that saw it. Measured in the
+30 d to 2026-09-19: one scheduled job read a delegated mailbox once a day and
+was refused every day for 30 days (zero successes on that mailbox — the same
+job's other mailboxes worked; `clerk_error` to 09-05, `refresh_failed` from
+09-06 once PR #127 classified it) and the mailbox owner, a different person
+and the only one who can reconnect, was never told. Own-mailbox: five owners
+hit a non-retryable class; the three who recovered (9 h, 26 h, 4 d) all did so
+after dashboard visits with `google_reconnect_*` events; the two who did not
+each got exactly ONE refusal, then their agent stopped, zero pageviews, still
+dead 48 h later. So the notice fires on the FIRST reconnect-repairable refusal
+(`grant_revoked` / `refresh_failed` / `no_token`), to the mailbox owner from
+the support mailbox (CC the key owner when delegated), repeats only while it
+is still failing a week later, at most 3 per episode, under the shared
+3-a-day cap. The event is captured for the OWNER, so it joins to that
+person's reconnect funnel (§7.8).
+
+```sql
+-- 7.29a — notices sent (30 d): who, which mailbox class, which notice in the
+-- episode, and how long the grant had been dead when the email went out.
+-- `days_dead` > 0 on a `first` row means the failure predates the deploy or
+-- the episode began on the quiet list_accounts probes (which never notify).
+SELECT toDate(timestamp) AS day, person.properties.email AS owner,
+       properties.trigger AS trigger, properties.reason AS reason,
+       properties.account_delegated AS delegated, properties.notice_number AS n,
+       properties.failure_count AS failures, properties.days_dead AS days_dead
+FROM events
+WHERE event = 'google_grant_dead_notified' AND properties.environment = 'production'
+  AND timestamp > now() - INTERVAL 30 DAY
+ORDER BY timestamp DESC
+```
+
+```sql
+-- 7.29b — did the email work (30 d)? Per notified owner: refusals on that
+-- owner's mailboxes before vs after the first notice, the first own-mailbox
+-- success after it, and whether a reconnect started. `refusals_after` still
+-- climbing a week later with no `reconnect_started` is exactly the case the
+-- repeat notice exists for; three notices and still climbing means the owner
+-- does not want it reconnected (or the address is dead) — stop there, the
+-- delegate has been CC'd and can drop the mailbox from the task.
+WITH notified AS (
+  SELECT person_id, min(timestamp) AS emailed_at, count() AS notices
+  FROM events WHERE event = 'google_grant_dead_notified' AND properties.environment = 'production'
+    AND timestamp > now() - INTERVAL 30 DAY
+  GROUP BY person_id
+)
+SELECT person.properties.email AS owner, any(n.emailed_at) AS emailed_at, any(n.notices) AS notices,
+       countIf(e.event = 'google_token_fetch_failed' AND e.timestamp < n.emailed_at) AS failures_before,
+       countIf(e.event = 'google_token_fetch_failed' AND e.timestamp >= n.emailed_at) AS failures_after,
+       countIf(e.event = 'google_reconnect_started' AND e.timestamp >= n.emailed_at) AS reconnect_started,
+       countIf(e.event = 'google_reconnect_verified' AND e.timestamp >= n.emailed_at) AS reconnect_verified,
+       minIf(e.timestamp, e.event = '$mcp_tool_call' AND e.properties.outcome = 'success' AND e.timestamp >= n.emailed_at) AS first_success_after
+FROM events e JOIN notified n ON n.person_id = e.person_id
+WHERE e.timestamp > now() - INTERVAL 30 DAY
+GROUP BY owner ORDER BY failures_after DESC
+```
+
+```sql
+-- 7.29c — delivery health (7 d): every reconnect-repairable refusal by what
+-- the notice did. `disabled` = the sender is off (SUPPORT_FGAC_PROXY_KEY /
+-- SUPPORT_SENDER_EMAIL unset, or APPROVAL_LINK_EMAIL=off); `failed` = the
+-- send or the ledger write failed (server logs: "[approvalNotify] dead-grant");
+-- `skipped_rate_capped` = the owner already had 3 notices of any kind today.
+-- `already_sent` is the steady state of a still-dead mailbox between notices.
+SELECT toDate(timestamp) AS day, properties.google_token_error AS reason,
+       properties.account_delegated AS delegated, properties.notify_status AS notify,
+       max(toInt32OrNull(toString(properties.grant_days_dead))) AS max_days_dead,
+       count() AS refusals, uniq(person_id) AS key_owners
+FROM events
+WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
+  AND properties.denial_code = 'google_token_unavailable'
+  AND properties.google_token_error IN ('grant_revoked', 'refresh_failed', 'no_token')
+  AND timestamp > now() - INTERVAL 7 DAY
+GROUP BY day, reason, delegated, notify ORDER BY day DESC, refusals DESC
+```
+
+Healthy: every `first` row in 7.29a is within minutes of that owner's first
+`google_token_fetch_failed` of the episode (the trigger is the first refusal,
+not a repeat); `repeat` rows are 7+ days apart and never more than two per
+owner + mailbox; 7.29c shows `sent` once per new dead mailbox and
+`already_sent` on the rest, with `disabled` absent and `failed` rare;
+`max_days_dead` on a delegated row stops growing past ~21 days without a
+reconnect only when the owner has had all three notices. Pair with the
+ledger itself (branch DB or a read-only production query): `SELECT
+account_email, last_reason, failure_count, notified_count, first_failed_at,
+notified_at FROM google_grant_failures ORDER BY last_failed_at DESC LIMIT
+20`. Under this rule the 30-day delegated case would have emailed its owner
+(CC the delegate) on 2026-09-06 — the first day PR #127 classified it
+`refresh_failed`; before that it was `clerk_error`, which is retried and
+never notifies — again on 09-13 and 09-20, then stopped, with the delegate
+told three times which mailbox to drop. The own-mailbox owner who went dark
+on 2026-09-17 would have been emailed at 22:21 UTC that evening.

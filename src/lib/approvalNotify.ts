@@ -40,6 +40,18 @@
  * 24 h emails the owner once (ever, per key + value) from the same sender,
  * under the same per-person daily cap (both ledgers count), naming the value
  * the task passes and the accounts that would work.
+ *
+ * Third trigger (2026-09-20) — `notifyOwnerOfDeadGrant`: a Google grant that
+ * a reconnect would repair (`no_token` / `refresh_failed` / `grant_revoked`)
+ * refuses every call until the MAILBOX OWNER reconnects, and until now only
+ * the agent was told. Measured in production (30 d to 2026-09-19): a
+ * scheduled job was refused on a delegated mailbox once a day for 30 days,
+ * zero successes, and the owner — a different person — never heard; two
+ * own-mailbox owners got ONE refusal each and went silent. So: the FIRST
+ * non-retryable failure emails the owner (with the owner-bound reconnect
+ * link; the key owner is CC'd when the mailbox is delegated), a repeat goes
+ * out only if it is still failing a week later, at most three per episode —
+ * all under the same per-person daily cap (three ledgers count).
  */
 import { NextRequest } from 'next/server';
 import { POST as proxyPost } from '@/app/api/proxy/[...path]/route';
@@ -51,6 +63,12 @@ import {
 import {
   claimAccountRefusalNotification, recordAccountRefusal, releaseAccountRefusalNotification,
 } from './accountRefusals';
+import {
+  claimGrantFailureNotification, grantNoticeDue, recordGrantFailure, releaseGrantFailureNotification,
+} from './googleGrantFailures';
+import {
+  daysDead, deadGrantEmailBody, deadGrantEmailSubject, GRANT_DEAD_MAX_NOTICES, type DeadGrantReason,
+} from './googleGrantNotifyCopy';
 import {
   claimApprovalNotification, getApprovalNotificationState, releaseApprovalNotification,
 } from './approvalRequests';
@@ -277,4 +295,111 @@ async function attemptRefusalNotice(
     hours_since_first_refusal: Math.round((now.getTime() - row.windowStartedAt.getTime()) / 36_000) / 100,
   });
   return { status: 'sent', notifiedAt: claim.notifiedAt ?? now, refusalCount: row.windowCount };
+}
+
+// ─── Trigger 3: the grant that died ─────────────────────────────────────────
+
+export interface NotifyDeadGrantOpts {
+  /** The mailbox OWNER — the only person who can run the reconnect. For a
+   * delegated mailbox this is NOT the key owner. */
+  owner: { id: string; email: string; clerkUserId: string };
+  /** The mailbox whose grant failed (the owner's FGAC address). */
+  accountEmail: string;
+  reason: DeadGrantReason;
+  /** The FGAC user whose agent was refused; equals the owner unless delegated. */
+  keyOwnerEmail: string;
+  agentLabel: string;
+  /** `reconnectLink(accountEmail)` — already bound to the owner via `for=`. */
+  reconnectUrl: string;
+  dashboardUrl: string;
+  /** Test seams. */
+  sender?: SenderConfig | null;
+  send?: (cfg: SenderConfig, raw: string) => Promise<SendResult>;
+  now?: () => Date;
+}
+
+export interface NotifyDeadGrantResult {
+  status: NotifyStatus;
+  notifiedAt: Date | null;
+  /** Whether the key owner was CC'd (delegated mailbox). */
+  ccDelegate: boolean;
+  /** Refusals in the current episode (null = ledger write failed). */
+  failureCount: number | null;
+  /** Whole days since the episode began (null = ledger write failed). */
+  daysDead: number | null;
+}
+
+/**
+ * Record one reconnect-repairable token failure for (owner, mailbox) and, when
+ * a notice is due — first failure of an episode, or a repeat at least a week
+ * after the previous notice, under GRANT_DEAD_MAX_NOTICES per episode — email
+ * the owner from the support mailbox under the shared daily cap. The ledger
+ * row is written whether or not the sender is configured. Never throws.
+ */
+export async function notifyOwnerOfDeadGrant(opts: NotifyDeadGrantOpts): Promise<NotifyDeadGrantResult> {
+  const delegated = opts.keyOwnerEmail.toLowerCase() !== opts.accountEmail.toLowerCase();
+  const now = (opts.now ?? (() => new Date()))();
+  const base = { ccDelegate: delegated, failureCount: null, daysDead: null };
+  const row = await recordGrantFailure({ userId: opts.owner.id, accountEmail: opts.accountEmail, reason: opts.reason });
+  if (!row) return { status: 'failed', notifiedAt: null, ...base };
+  const known = { ccDelegate: delegated, failureCount: row.failureCount, daysDead: daysDead(row.firstFailedAt, now) };
+  const sender = opts.sender === undefined ? senderConfig() : opts.sender;
+  if (!sender) return { status: 'disabled', notifiedAt: null, ...known };
+  if (!grantNoticeDue(row, now)) return { status: 'already_sent', notifiedAt: row.notifiedAt, ...known };
+  try {
+    return await attemptDeadGrantNotice(opts, row, sender, delegated, now, known);
+  } catch (err) {
+    console.error('[approvalNotify] dead-grant attempt failed:', err instanceof Error ? err.message : err);
+    return { status: 'failed', notifiedAt: null, ...known };
+  }
+}
+
+async function attemptDeadGrantNotice(
+  opts: NotifyDeadGrantOpts,
+  row: { id: string; firstFailedAt: Date; failureCount: number; notifiedCount: number },
+  sender: SenderConfig,
+  delegated: boolean,
+  now: Date,
+  known: { ccDelegate: boolean; failureCount: number; daysDead: number },
+): Promise<NotifyDeadGrantResult> {
+  const claim = await claimGrantFailureNotification(row.id, opts.owner.id, NOTIFY_MAX_PER_DAY);
+  if (!claim.claimed) {
+    if (claim.reason === 'already') return { status: 'already_sent', notifiedAt: claim.notifiedAt, ...known };
+    if (claim.reason === 'capped') return { status: 'skipped_rate_capped', notifiedAt: null, ...known };
+    return { status: 'failed', notifiedAt: null, ...known };
+  }
+
+  const notice = {
+    accountEmail: opts.accountEmail, reason: opts.reason, delegated, keyOwnerEmail: opts.keyOwnerEmail,
+    agentLabel: opts.agentLabel, reconnectUrl: opts.reconnectUrl, failureCount: row.failureCount,
+    firstFailedAt: row.firstFailedAt, noticeNumber: claim.noticeNumber, dashboardUrl: opts.dashboardUrl,
+    supportAddress: sender.address,
+  };
+  const subject = deadGrantEmailSubject(notice);
+  const body = deadGrantEmailBody({ ...notice, now });
+  const raw = Buffer.from(approvalEmailRaw({
+    from: sender.address, to: opts.owner.email, cc: delegated ? opts.keyOwnerEmail : null, subject, body,
+  })).toString('base64url');
+  const sent = await (opts.send ?? proxySend)(sender, raw);
+  if (!sent.ok) {
+    console.error(`[approvalNotify] dead-grant send ${sent.definite ? 'refused' : 'unconfirmed'}:`, sent.error);
+    if (sent.definite) await releaseGrantFailureNotification(row.id);
+    return { status: 'failed', notifiedAt: null, ...known };
+  }
+
+  // Captured for the OWNER (the recipient), so `uniq(person)` is the notified
+  // population and the funnel joins to their own google_reconnect_* events.
+  captureServerEvent(opts.owner.clerkUserId, 'google_grant_dead_notified', {
+    channel: 'email',
+    trigger: claim.noticeNumber === 1 ? 'first' : 'repeat',
+    reason: opts.reason,
+    account_delegated: delegated,
+    cc_delegate: delegated,
+    notice_number: claim.noticeNumber,
+    max_notices: GRANT_DEAD_MAX_NOTICES,
+    failure_count: row.failureCount,
+    days_dead: known.daysDead,
+    via: 'mcp',
+  });
+  return { status: 'sent', notifiedAt: claim.notifiedAt ?? now, ...known };
 }
