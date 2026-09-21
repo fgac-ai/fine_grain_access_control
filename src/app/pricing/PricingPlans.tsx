@@ -274,11 +274,12 @@ function Price({ plan, interval }: { plan: PlanId; interval: Interval }) {
 }
 
 /* ─── Fake door ──────────────────────────────────────────────────────────────
-   Honest copy: Pro is not billed during the launch period. A signed-in person
-   pressing Upgrade and then "Count me in" is the willingness-to-pay signal;
-   their Clerk email is already on the PostHog person. Signed-out visitors
-   leave an email, stored as a person property so the launch list is a
-   PostHog query. Nothing is written to our database. */
+   Honest copy: Pro is not billed yet. A signed-in person pressing Upgrade and
+   then "Count me in" is the willingness-to-pay signal; their Clerk email is
+   already on the PostHog person, so the launch list is a PostHog query.
+   Signed-out visitors are sent to sign-up instead of being asked for an
+   email (sign_up_started carries cta_location pricing_pro). Nothing is
+   written to our database. */
 
 function ProDoor({
   interval,
@@ -291,9 +292,8 @@ function ProDoor({
 }) {
   const { user } = useUser()
   const knownEmail = user?.primaryEmailAddress?.emailAddress ?? null
-  const [email, setEmail] = useState('')
   const [done, setDone] = useState(false)
-  const firstField = useRef<HTMLInputElement | HTMLButtonElement>(null)
+  const firstField = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     firstField.current?.focus()
@@ -308,15 +308,11 @@ function ProDoor({
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault()
-    const submittedEmail = knownEmail ?? email.trim()
-    if (!submittedEmail) return
     capture('pricing_interest_submitted', { plan: 'pro', interval, signed_in: signedIn })
     posthog.setPersonProperties({
       pricing_interest_plan: 'pro',
       pricing_interest_interval: interval,
       pricing_interest_at: new Date().toISOString(),
-      // Signed-in persons already carry `email` from sign_up_completed.
-      ...(knownEmail ? {} : { email: submittedEmail }),
     })
     setDone(true)
   }
@@ -352,7 +348,7 @@ function ProDoor({
           <>
             <p className="text-sm leading-relaxed text-muted-foreground">
               We’ll email{' '}
-              <span className="font-semibold text-foreground">{knownEmail ?? email.trim()}</span>{' '}
+              <span className="font-semibold text-foreground">{knownEmail}</span>{' '}
               before billing starts, and your first month of Pro is on us.
             </p>
             <div className="mt-5 flex justify-end">
@@ -365,32 +361,16 @@ function ProDoor({
               </button>
             </div>
           </>
-        ) : (
+        ) : signedIn && knownEmail ? (
           <form onSubmit={submit} className="flex flex-col gap-4">
             <p className="text-sm leading-relaxed text-muted-foreground">
               Tell us you’d pay {price} and we’ll email you before billing starts — with
               your first month free. Until then, nothing changes.
             </p>
 
-            {knownEmail ? (
-              <p className="rounded-sm bg-muted px-3 py-2 text-sm text-muted-foreground">
-                We’ll email <span className="font-semibold text-foreground">{knownEmail}</span>
-              </p>
-            ) : (
-              <label className="flex flex-col gap-1.5 text-sm font-medium text-foreground">
-                Email
-                <input
-                  ref={firstField as React.RefObject<HTMLInputElement>}
-                  type="email"
-                  required
-                  autoComplete="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="you@example.com"
-                  className="rounded-sm border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground-subtle"
-                />
-              </label>
-            )}
+            <p className="rounded-sm bg-muted px-3 py-2 text-sm text-muted-foreground">
+              We’ll email <span className="font-semibold text-foreground">{knownEmail}</span>
+            </p>
 
             <div className="flex items-center justify-end gap-3 pt-1">
               <button
@@ -402,13 +382,36 @@ function ProDoor({
               </button>
               <button
                 type="submit"
-                ref={knownEmail ? (firstField as React.RefObject<HTMLButtonElement>) : undefined}
+                ref={firstField}
                 className="rounded-sm bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90"
               >
                 Count me in
               </button>
             </div>
           </form>
+        ) : (
+          <div className="flex flex-col gap-4">
+            <p className="text-sm leading-relaxed text-muted-foreground">
+              Sign up free and start using it today. We’ll email you before billing starts,
+              and if you tell us then that you’d pay {price}, your first month is free.
+            </p>
+
+            <div className="flex items-center justify-end gap-3 pt-1">
+              <button
+                type="button"
+                onClick={onClose}
+                className="rounded-sm px-3 py-2 text-sm font-semibold text-muted-foreground hover:text-foreground"
+              >
+                Not now
+              </button>
+              <SignUpCta
+                location="pricing_pro"
+                className="rounded-sm bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90"
+              >
+                Sign up free
+              </SignUpCta>
+            </div>
+          </div>
         )}
       </div>
     </div>

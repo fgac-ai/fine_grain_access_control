@@ -540,12 +540,12 @@ attributable to it.
 
 ### A26: The pricing fake door is measurable per plan
 - In the built-in browser, open `/pricing` on the environment under test
-  signed out. Toggle the interval to Annual, click **Get Pro**, submit the
-  dialog with a QA address, click **Contact sales** (a mailto link — the
-  click is enough). Then sign in as `USER_A`, return to
-  `/pricing`, click **Upgrade to Pro** and press **Count me in**. (Signed
-  out, **Start free** is a real Clerk sign-up — do not complete it; its
-  click is enough for the click event.)
+  signed out. Toggle the interval to Annual, click **Get Pro**, then click
+  **Sign up free** in the dialog (the Clerk modal opens — close it, do not
+  complete it), click **Contact sales** (a mailto link — the click is
+  enough). Then sign in as `USER_A`, return to `/pricing`, click
+  **Upgrade to Pro** and press **Count me in**. (Signed out, **Start free**
+  is also a real Clerk sign-up — its click is enough for the click event.)
 - Query: `SELECT event, properties.plan, properties.interval,
   properties.signed_in, properties.pricing_variant,
   properties.cta_location FROM events WHERE (event LIKE 'pricing_%' OR
@@ -553,15 +553,14 @@ attributable to it.
   timestamp >= now() - INTERVAL 1 HOUR ORDER BY timestamp`
 - **Expected**: one `pricing_interval_toggled {interval: 'annual'}`; a
   `pricing_plan_clicked {plan: 'pro', interval: 'annual', signed_in:
-  false}` followed by `pricing_interest_submitted {plan: 'pro', interval:
-  'annual', signed_in: false}`; one `pricing_plan_clicked {plan: 'enterprise',
-  interval: 'contract'}`; then `pricing_plan_clicked {plan: 'pro',
-  signed_in: true}` and `pricing_interest_submitted {plan: 'pro',
-  signed_in: true}`. Every row carries `pricing_variant` (`v3-2026-09`
-  today). The signed-out submission's person carries
-  `properties.pricing_interest_plan = 'pro'` and the submitted `email`; the
-  signed-in one sets the same on `USER_A`'s existing person. No new rows
-  appear in any application table — the door writes to PostHog only.
+  false}` followed by `sign_up_started {cta_location: 'pricing_pro'}` and
+  NO `pricing_interest_submitted` (signed-out visitors are never asked for
+  an email); one `pricing_plan_clicked {plan: 'enterprise', interval:
+  'contract'}`; then `pricing_plan_clicked {plan: 'pro', signed_in: true}`
+  and `pricing_interest_submitted {plan: 'pro', signed_in: true}`. Every
+  row carries `pricing_variant` (`v3-2026-09` today). `USER_A`'s person
+  carries `properties.pricing_interest_plan = 'pro'`. No new rows appear
+  in any application table — the door writes to PostHog only.
 - **Regression guard**: `pricing_plan_clicked` must fire BEFORE the dialog
   opens (it is the click-through measure; the dialog can be dismissed), and
   a signed-out click on **Start free** must still emit `sign_up_started

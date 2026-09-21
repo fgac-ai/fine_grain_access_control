@@ -114,3 +114,6 @@ cap if the free/paid split lands far from the 82/71 the data predicts.
   `pricing_faq_opened` retired before reaching production.
 - **Launch-period notice removed** from above the cards (Ken, same session).
   The Pro dialog is now the only place that says billing is not live.
+- **Signed-out Pro dialog offers sign-up, not an email field** (Ken, same
+  session). `sign_up_started {cta_location: 'pricing_pro'}` counts it;
+  `pricing_interest_submitted` is signed-in only from here on.
