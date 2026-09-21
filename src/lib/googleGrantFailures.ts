@@ -15,10 +15,10 @@
  */
 import { db } from '@/db';
 import { googleGrantFailures } from '@/db/schema';
-import { and, eq, or, isNull, lt, sql } from 'drizzle-orm';
+import { and, eq, isNull, lt, sql } from 'drizzle-orm';
 import { recentNotificationCountSql } from './approvalRequests';
 import {
-  GRANT_DEAD_EPISODE_GAP_MS, GRANT_DEAD_MAX_NOTICES, GRANT_DEAD_REPEAT_AFTER_MS, grantNoticeDue, normalizeAccountEmail,
+  GRANT_DEAD_EPISODE_GAP_MS, GRANT_DEAD_GLOBAL_HOURLY_MAX, GRANT_DEAD_NOTICES_PER_EPISODE, grantNoticeDue, normalizeAccountEmail,
   type DeadGrantReason,
 } from './googleGrantNotifyCopy';
 
@@ -81,44 +81,52 @@ export async function recordGrantFailure(opts: {
   }
 }
 
+/** Notices sent to ANY owner in the last hour — the circuit breaker's count. */
+function recentGlobalNoticeCountSql() {
+  return sql`(SELECT count(*) FROM ${googleGrantFailures} AS recent_global
+              WHERE recent_global.notified_at > now() - interval '1 hour')`;
+}
+
 /**
- * Claim the right to email the owner about this row: bumps `notified_count`
- * and stamps `notified_at` atomically, and only while (a) the episode is under
- * GRANT_DEAD_MAX_NOTICES, (b) the previous notice is old enough for a repeat
- * (or there is none), and (c) the owner is under `maxPerDay` reminder emails
- * in the last 24 h across all three ledgers. One statement, so two refusals
- * landing together cannot both claim.
+ * Claim the right to email the owner about this row: stamps `notified_at` and
+ * bumps `notified_count` atomically, and only while (a) the episode has not
+ * been notified, (b) the owner is under `maxPerDay` reminder emails in the
+ * last 24 h across all three ledgers, and (c) fewer than
+ * GRANT_DEAD_GLOBAL_HOURLY_MAX notices went to anyone in the last hour. One
+ * statement, so two refusals landing together cannot both claim.
  */
 export async function claimGrantFailureNotification(id: string, userId: string, maxPerDay: number): Promise<
-  { claimed: true; notifiedAt: Date | null; noticeNumber: number }
-  | { claimed: false; notifiedAt: Date | null; reason: 'already' | 'capped' | 'missing' | 'error' }
+  { claimed: true; notifiedAt: Date | null }
+  | { claimed: false; notifiedAt: Date | null; reason: 'already' | 'capped' | 'global_capped' | 'missing' | 'error' }
 > {
   try {
-    const repeatSeconds = Math.round(GRANT_DEAD_REPEAT_AFTER_MS / 1000);
     const [row] = await db.update(googleGrantFailures)
       .set({ notifiedAt: sql`now()`, notifiedCount: sql`${googleGrantFailures.notifiedCount} + 1` })
       .where(and(
         eq(googleGrantFailures.id, id),
-        lt(googleGrantFailures.notifiedCount, GRANT_DEAD_MAX_NOTICES),
-        or(
-          isNull(googleGrantFailures.notifiedAt),
-          sql`${googleGrantFailures.notifiedAt} <= now() - ${sql.raw(`interval '${repeatSeconds} seconds'`)}`,
-        ),
+        isNull(googleGrantFailures.notifiedAt),
+        lt(googleGrantFailures.notifiedCount, GRANT_DEAD_NOTICES_PER_EPISODE),
         sql`${recentNotificationCountSql(userId)} < ${maxPerDay}`,
+        sql`${recentGlobalNoticeCountSql()} < ${GRANT_DEAD_GLOBAL_HOURLY_MAX}`,
       ))
-      .returning({ notifiedAt: googleGrantFailures.notifiedAt, notifiedCount: googleGrantFailures.notifiedCount });
-    if (row) return { claimed: true, notifiedAt: row.notifiedAt, noticeNumber: row.notifiedCount };
-    const existing = await db.select({ notifiedAt: googleGrantFailures.notifiedAt, notifiedCount: googleGrantFailures.notifiedCount })
+      .returning({ notifiedAt: googleGrantFailures.notifiedAt });
+    if (row) return { claimed: true, notifiedAt: row.notifiedAt };
+    const [existing] = await db.select({
+      notifiedAt: googleGrantFailures.notifiedAt,
+      notifiedCount: googleGrantFailures.notifiedCount,
+      globalRecent: recentGlobalNoticeCountSql(),
+    })
       .from(googleGrantFailures)
       .where(eq(googleGrantFailures.id, id))
-      .limit(1).then(r => r[0]);
+      .limit(1);
     if (!existing) return { claimed: false, notifiedAt: null, reason: 'missing' };
-    // Not due (recent notice, or episode cap reached) reads as `already`: the
-    // owner HAS been told and the denial line says when.
-    if (existing.notifiedAt && !grantNoticeDue(existing, new Date())) {
+    if (existing.notifiedAt || !grantNoticeDue(existing)) {
       return { claimed: false, notifiedAt: existing.notifiedAt, reason: 'already' };
     }
-    return { claimed: false, notifiedAt: existing.notifiedAt, reason: 'capped' };
+    if (Number(existing.globalRecent) >= GRANT_DEAD_GLOBAL_HOURLY_MAX) {
+      return { claimed: false, notifiedAt: null, reason: 'global_capped' };
+    }
+    return { claimed: false, notifiedAt: null, reason: 'capped' };
   } catch (err) {
     console.error('[googleGrantFailures] notification claim failed:', err);
     return { claimed: false, notifiedAt: null, reason: 'error' };
@@ -126,10 +134,9 @@ export async function claimGrantFailureNotification(id: string, userId: string, 
 }
 
 /**
- * Undo a claim whose send definitely did not happen, so a later failure can
- * try again. The previous stamp is not recoverable; clearing it makes the next
- * failure eligible immediately, which is the right side to err on for a lost
- * email (the alternative is an owner who is never told).
+ * Undo a claim whose send definitely did not happen, so the next failure can
+ * try again — the right side to err on for a refused send (the alternative is
+ * an owner who is never told).
  */
 export async function releaseGrantFailureNotification(id: string): Promise<void> {
   try {

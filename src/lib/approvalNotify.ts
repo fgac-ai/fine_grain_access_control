@@ -49,9 +49,10 @@
  * zero successes, and the owner — a different person — never heard; two
  * own-mailbox owners got ONE refusal each and went silent. So: the FIRST
  * non-retryable failure emails the owner (with the owner-bound reconnect
- * link; the key owner is CC'd when the mailbox is delegated), a repeat goes
- * out only if it is still failing a week later, at most three per episode —
- * all under the same per-person daily cap (three ledgers count).
+ * link; the key owner is CC'd when the mailbox is delegated), ONCE per
+ * episode (Ken, 2026-09-21), under the same per-person daily cap (three
+ * ledgers count) plus a global hourly circuit breaker against an
+ * auth-provider incident classifying every grant dead at once.
  */
 import { NextRequest } from 'next/server';
 import { POST as proxyPost } from '@/app/api/proxy/[...path]/route';
@@ -67,7 +68,7 @@ import {
   claimGrantFailureNotification, grantNoticeDue, recordGrantFailure, releaseGrantFailureNotification,
 } from './googleGrantFailures';
 import {
-  daysDead, deadGrantEmailBody, deadGrantEmailSubject, GRANT_DEAD_MAX_NOTICES, type DeadGrantReason,
+  daysDead, deadGrantEmailBody, deadGrantEmailSubject, type DeadGrantReason,
 } from './googleGrantNotifyCopy';
 import {
   claimApprovalNotification, getApprovalNotificationState, releaseApprovalNotification,
@@ -330,10 +331,9 @@ export interface NotifyDeadGrantResult {
 }
 
 /**
- * Record one reconnect-repairable token failure for (owner, mailbox) and, when
- * a notice is due — first failure of an episode, or a repeat at least a week
- * after the previous notice, under GRANT_DEAD_MAX_NOTICES per episode — email
- * the owner from the support mailbox under the shared daily cap. The ledger
+ * Record one reconnect-repairable token failure for (owner, mailbox) and, on
+ * the first failure of an episode, email the owner ONCE from the support
+ * mailbox under the shared daily cap and the global hourly breaker. The ledger
  * row is written whether or not the sender is configured. Never throws.
  */
 export async function notifyOwnerOfDeadGrant(opts: NotifyDeadGrantOpts): Promise<NotifyDeadGrantResult> {
@@ -345,7 +345,7 @@ export async function notifyOwnerOfDeadGrant(opts: NotifyDeadGrantOpts): Promise
   const known = { ccDelegate: delegated, failureCount: row.failureCount, daysDead: daysDead(row.firstFailedAt, now) };
   const sender = opts.sender === undefined ? senderConfig() : opts.sender;
   if (!sender) return { status: 'disabled', notifiedAt: null, ...known };
-  if (!grantNoticeDue(row, now)) return { status: 'already_sent', notifiedAt: row.notifiedAt, ...known };
+  if (!grantNoticeDue(row)) return { status: 'already_sent', notifiedAt: row.notifiedAt, ...known };
   try {
     return await attemptDeadGrantNotice(opts, row, sender, delegated, now, known);
   } catch (err) {
@@ -366,13 +366,17 @@ async function attemptDeadGrantNotice(
   if (!claim.claimed) {
     if (claim.reason === 'already') return { status: 'already_sent', notifiedAt: claim.notifiedAt, ...known };
     if (claim.reason === 'capped') return { status: 'skipped_rate_capped', notifiedAt: null, ...known };
+    if (claim.reason === 'global_capped') {
+      console.warn('[approvalNotify] dead-grant notice skipped: global hourly circuit breaker tripped');
+      return { status: 'skipped_global_capped', notifiedAt: null, ...known };
+    }
     return { status: 'failed', notifiedAt: null, ...known };
   }
 
   const notice = {
     accountEmail: opts.accountEmail, reason: opts.reason, delegated, keyOwnerEmail: opts.keyOwnerEmail,
     agentLabel: opts.agentLabel, reconnectUrl: opts.reconnectUrl, failureCount: row.failureCount,
-    firstFailedAt: row.firstFailedAt, noticeNumber: claim.noticeNumber, dashboardUrl: opts.dashboardUrl,
+    firstFailedAt: row.firstFailedAt, dashboardUrl: opts.dashboardUrl,
     supportAddress: sender.address,
   };
   const subject = deadGrantEmailSubject(notice);
@@ -394,12 +398,10 @@ async function attemptDeadGrantNotice(
   // population and the funnel joins to their own google_reconnect_* events.
   captureServerEvent(opts.owner.clerkUserId, 'google_grant_dead_notified', {
     channel: 'email',
-    trigger: claim.noticeNumber === 1 ? 'first' : 'repeat',
+    trigger: 'first_failure',
     reason: opts.reason,
     account_delegated: delegated,
     cc_delegate: delegated,
-    notice_number: claim.noticeNumber,
-    max_notices: GRANT_DEAD_MAX_NOTICES,
     failure_count: row.failureCount,
     days_dead: known.daysDead,
     via: 'mcp',

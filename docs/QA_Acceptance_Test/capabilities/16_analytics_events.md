@@ -572,7 +572,7 @@ attributable to it.
   properties.google_token_error, properties.account_delegated,
   properties.notify_status, properties.grant_failure_count,
   properties.grant_days_dead, properties.trigger, properties.reason,
-  properties.cc_delegate, properties.notice_number, properties.failure_count,
+  properties.cc_delegate, properties.failure_count,
   properties.days_dead FROM events WHERE event IN ('$mcp_tool_call',
   'google_grant_dead_notified','google_token_fetch_failed') AND timestamp >=
   now() - INTERVAL 1 HOUR ORDER BY timestamp`
@@ -586,9 +586,9 @@ attributable to it.
   `google_grant_dead_notified` row for the owner + mailbox, whose
   `distinct_id` is the mailbox OWNER's Clerk id (the same person as the
   `google_token_fetch_failed` rows of the own-mailbox leg, and NOT the key
-  owner of the delegated leg), with `channel: 'email'`, `trigger: 'first'`,
-  `reason` the class, `notice_number: 1`, `max_notices: 3`, `failure_count:
-  1`, `days_dead: 0`, `via: 'mcp'`, and `account_delegated` / `cc_delegate`
+  owner of the delegated leg), with `channel: 'email'`, `trigger:
+  'first_failure'`, `reason` the class, `failure_count: 1`, `days_dead: 0`,
+  `via: 'mcp'`, and `account_delegated` / `cc_delegate`
   true exactly when the delegated leg produced it. ONE `proxy_request
   {service: 'gmail', outcome: 'success'}` row under the sender's key. Five
   `list_accounts` calls on the dead account add NO `google_token_fetch_failed`

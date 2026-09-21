@@ -24,7 +24,8 @@
  * Third member of the owner-notice family (approval-link reminder, account
  * refusal): same sender (FGAC's support mailbox through FGAC's own proxy API,
  * never a user's grant — 2026-09-15), same transport, same 3-per-owner daily
- * cap across all three ledgers. Every agent-controlled string goes through
+ * cap across all three ledgers, plus a global hourly circuit breaker of its
+ * own. One email per episode. Every agent-controlled string goes through
  * `sanitizeLine`. Plain text, no HTML.
  */
 import { sanitizeLine } from './approvalNotifyCopy';
@@ -34,22 +35,29 @@ import type { GoogleTokenFailureReason } from './googleTokenFailure';
  * (the same set `list_accounts` mints a reconnect link for). */
 export type DeadGrantReason = Extract<GoogleTokenFailureReason, 'no_token' | 'refresh_failed' | 'grant_revoked'>;
 
-/** A repeat notice goes out only when the failure is STILL happening this
- * long after the previous notice. The 30-day delegated case argues for
- * weekly: daily denials, owner unreachable through the agent, the delegate
- * paying the refusal every day. */
-export const GRANT_DEAD_REPEAT_AFTER_MS = 7 * 24 * 60 * 60_000;
-
-/** Notices per episode (first + repeats). A mailbox nobody reconnects after
- * three weekly emails is a mailbox nobody wants reconnected — the owner has
- * been told, and the daily denial already carries the link for the agent. */
-export const GRANT_DEAD_MAX_NOTICES = 3;
+/** ONE notice per episode (Ken, 2026-09-21: "I don't want to email someone 3
+ * times for an event that occurred once"). The refusal itself recurs on every
+ * agent call, but the owner is told once; the delegate is CC'd on a delegated
+ * mailbox and can nudge the owner directly, and the dashboard card says
+ * "Reconnect Google" for anyone who logs in. A repaired grant that dies again
+ * after GRANT_DEAD_EPISODE_GAP_MS is a new episode and gets a new notice. */
+export const GRANT_DEAD_NOTICES_PER_EPISODE = 1;
 
 /** A failure arriving this long after the previous one on the same mailbox
  * starts a new episode: the grant was repaired in between (or the agent went
- * quiet), so a fresh death gets a fresh first notice. Longer than the repeat
- * interval so a still-failing daily job never resets itself. */
+ * quiet), so a fresh death gets a fresh notice. A still-failing daily job
+ * never resets itself. */
 export const GRANT_DEAD_EPISODE_GAP_MS = 14 * 24 * 60 * 60_000;
+
+/** Circuit breaker across ALL owners: notices per rolling hour, enforced
+ * inside the claim. The dead-grant classes are deterministic by Clerk error
+ * code, so an auth-provider or Google token-endpoint incident would classify
+ * every account as revoked at once and, without this, send one email per user
+ * in minutes. Ten an hour is far above the organic rate (30 d to 2026-09-19:
+ * five own-mailbox owners and one delegated mailbox in total) and low enough
+ * that an incident sends a handful, not hundreds; the skipped refusals stamp
+ * `notify_status: 'skipped_global_capped'` so monitoring.md 7.29 sees it. */
+export const GRANT_DEAD_GLOBAL_HOURLY_MAX = 10;
 
 /** Normalise the mailbox the way access rows compare it (the ledger key). */
 export function normalizeAccountEmail(value: string): string {
@@ -57,17 +65,14 @@ export function normalizeAccountEmail(value: string): string {
 }
 
 /**
- * Pure decision: is a notice due for this ledger row right now? The first
- * notice of an episode is always due; a repeat is due only when the previous
- * notice is at least GRANT_DEAD_REPEAT_AFTER_MS old and the episode is under
- * GRANT_DEAD_MAX_NOTICES. The atomic claim in googleGrantFailures.ts re-checks
- * the same conditions in SQL; this exists so the common "not due" case costs
- * no UPDATE and so the rule is unit-testable without a database.
+ * Pure decision: is a notice due for this ledger row right now? Exactly one
+ * per episode — due while the episode has not been notified. The atomic claim
+ * in googleGrantFailures.ts re-checks this in SQL together with the caps; this
+ * exists so the steady state of a still-dead mailbox (`already_sent` on every
+ * later refusal) costs no UPDATE, and so the rule is unit-testable.
  */
-export function grantNoticeDue(row: { notifiedCount: number; notifiedAt: Date | null }, now: Date): boolean {
-  if (row.notifiedCount >= GRANT_DEAD_MAX_NOTICES) return false;
-  if (!row.notifiedAt) return true;
-  return now.getTime() - row.notifiedAt.getTime() >= GRANT_DEAD_REPEAT_AFTER_MS;
+export function grantNoticeDue(row: { notifiedCount: number; notifiedAt: Date | null }): boolean {
+  return row.notifiedAt === null && row.notifiedCount < GRANT_DEAD_NOTICES_PER_EPISODE;
 }
 
 export interface DeadGrantNotice {
@@ -85,8 +90,6 @@ export interface DeadGrantNotice {
   /** Refusals in this episode, and when it began. */
   failureCount: number;
   firstFailedAt: Date;
-  /** 1 for the first notice of an episode, 2–3 for repeats. */
-  noticeNumber: number;
   dashboardUrl: string;
   supportAddress: string;
 }
@@ -113,13 +116,12 @@ export function deadGrantCause(reason: DeadGrantReason): string {
   }
 }
 
-export function deadGrantEmailSubject(notice: Pick<DeadGrantNotice, 'accountEmail' | 'noticeNumber' | 'delegated'>): string {
+export function deadGrantEmailSubject(notice: Pick<DeadGrantNotice, 'accountEmail' | 'delegated'>): string {
   const account = sanitizeLine(notice.accountEmail, 80);
-  const still = notice.noticeNumber > 1 ? 'still ' : '';
   return sanitizeLine(
     notice.delegated
-      ? `Google access to ${account} is ${still}disconnected — an agent you delegated to is being refused`
-      : `Google access to ${account} is ${still}disconnected — your agent is being refused`,
+      ? `Google access to ${account} is disconnected — an agent you delegated to is being refused`
+      : `Google access to ${account} is disconnected — your agent is being refused`,
     160,
   );
 }
@@ -161,12 +163,9 @@ export function deadGrantEmailBody(opts: DeadGrantNotice & { now: Date }): strin
       `${keyOwner} (copied on this email): this is the mailbox owner's grant, not yours — nothing on your own Accounts page fixes it. Until ${account} reconnects, every run that touches that mailbox will be refused; your other mailboxes are unaffected.`,
     );
   }
-  const remaining = GRANT_DEAD_MAX_NOTICES - opts.noticeNumber;
   lines.push(
     '',
-    opts.noticeNumber >= GRANT_DEAD_MAX_NOTICES
-      ? 'This is the last email FGAC will send about this account. If you intentionally disconnected it, do nothing — the agent stays refused.'
-      : `If you intentionally disconnected it, do nothing — the agent stays refused. FGAC will email you again only if it is still failing in a week (at most ${remaining} more time${remaining === 1 ? '' : 's'}); reply to this email if you would rather we did not.`,
+    'This is the only email FGAC will send about this account unless it is repaired and disconnects again. If you intentionally disconnected it, do nothing — the agent stays refused. Reply to this email if you need a hand.',
     '',
     `Connected accounts: ${base}/dashboard/accounts`,
     `— FGAC (${opts.supportAddress})`,

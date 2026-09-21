@@ -27,6 +27,8 @@ export type NotifyStatus =
   | 'not_due'
   | 'skipped_opened'
   | 'skipped_rate_capped'
+  /** Dead-grant notice only: the global hourly circuit breaker tripped. */
+  | 'skipped_global_capped'
   | 'skipped_no_links'
   | 'failed'
   | 'disabled';

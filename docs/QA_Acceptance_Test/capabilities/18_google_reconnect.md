@@ -181,7 +181,7 @@
   until expiry); the Google permissions page and the consent leg needed Path B
   in an unattended session
 
-### A13: A dead grant emails the mailbox owner once, with the owner-bound link, and repeats only weekly
+### A13: A dead grant emails the mailbox owner exactly once per episode, with the owner-bound link
 - Sender configured exactly as capability 14 A16 (`SUPPORT_FGAC_PROXY_KEY` /
   `SUPPORT_SENDER_EMAIL`; USER_A stands in for the support mailbox via
   `.secrets/sender.env` and `fgac-dev-sender`). Without them every refusal
@@ -216,8 +216,9 @@
   "expired or revoked"; `refresh_failed` → "no usable refresh token"), the
   SAME `?reconnect=1&for=<address>` link as the refusal, "Open the link while
   signed in to FGAC as <address>", "do nothing — the agent stays refused", and
-  "will email you again only if it is still failing in a week (at most 2 more
-  times)". Opening the emailed link signed in as that account runs A4
+  "This is the only email FGAC will send about this account unless it is
+  repaired and disconnects again" — never a promise of a reminder. Opening the
+  emailed link signed in as that account runs A4
 - Delegated leg: as the OTHER account's agent, call `gmail_list` with
   `account` = the dead mailbox, twice
 - **Expected**: the refusal is the A12 delegated text (only the owner can
@@ -246,7 +247,10 @@
 - **Cap**: with three notices of any kind already sent to this owner in 24 h,
   a due first refusal carries no 📧 line and `notify_status:
   'skipped_rate_capped'`; the row keeps `notified_at` NULL and
-  `notified_count` 0
+  `notified_count` 0. The global breaker (10 dead-grant notices per rolling
+  hour across ALL owners → `notify_status: 'skipped_global_capped'`) cannot be
+  reached with two QA accounts — `npx tsx scripts/test-google-grant-notify-copy.ts`
+  pins the constant and the status; record it as covered by unit test
 - **Never**: never emails on a transient `clerk_error` / `timeout` refusal
   (the ❌ "retry once" text) or on `owner_not_found` / `delegation_inactive`;
   never emails from the quiet `list_accounts` probes (call `list_accounts`
@@ -255,5 +259,5 @@
   through a user's Google grant; never assert on a production account's inbox.
   If the dead grant cannot be arranged, `npx tsx
   scripts/test-google-grant-notify-copy.ts` pins the copy, the Cc header and
-  the first/weekly/3-max rule — record the assertion as covered by unit test,
+  the one-per-episode rule — record the assertion as covered by unit test,
   with the reason, not as a pass

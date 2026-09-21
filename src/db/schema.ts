@@ -146,7 +146,7 @@ export const accountRefusals = pgTable('account_refusals', {
 // production (30 d to 2026-09-19): one delegated mailbox was refused once a
 // day for 30 days with zero successes and its owner never told; two own-mailbox
 // owners each got ONE refusal and went silent. Hence: email on the first
-// failure, repeat while it persists, bounded per episode.
+// failure, ONCE per episode (Ken, 2026-09-21); a 14-day gap starts a new one.
 export const googleGrantFailures = pgTable('google_grant_failures', {
   id: uuid('id').defaultRandom().primaryKey(),
   // The mailbox owner (grantor) — the recipient of the notice.
@@ -160,8 +160,8 @@ export const googleGrantFailures = pgTable('google_grant_failures', {
   firstFailedAt: timestamp('first_failed_at').defaultNow().notNull(),
   lastFailedAt: timestamp('last_failed_at').defaultNow().notNull(),
   failureCount: integer('failure_count').notNull().default(1),
-  // Notices sent in the current episode, and when the last one went out.
-  // `notified_at` is the claim stamp the shared daily cap counts.
+  // Notices sent in the current episode (0 or 1) and when; `notified_at` is
+  // the claim stamp the shared daily cap and the global hourly breaker count.
   notifiedCount: integer('notified_count').notNull().default(0),
   notifiedAt: timestamp('notified_at'),
 }, (table) => [
