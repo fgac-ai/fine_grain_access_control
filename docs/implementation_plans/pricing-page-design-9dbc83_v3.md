@@ -110,4 +110,5 @@ cap if the free/paid split lands far from the 82/71 the data predicts.
 - Removed from the cards: agent profiles, one-click approval links and
   reminders, and the rule-type list. The cards now say what the plan is
   for, which accounts it covers, and the support commitment.
-
+- **FAQ section removed** (Ken, same session). `PricingFaq.tsx` deleted;
+  `pricing_faq_opened` retired before reaching production.

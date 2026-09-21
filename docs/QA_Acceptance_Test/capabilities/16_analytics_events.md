@@ -541,21 +541,20 @@ attributable to it.
 ### A26: The pricing fake door is measurable per plan
 - In the built-in browser, open `/pricing` on the environment under test
   signed out. Toggle the interval to Annual, click **Get Pro**, submit the
-  dialog with a QA address, open one FAQ item, click **Contact sales** (a
-  mailto link — the click is enough). Then sign in as `USER_A`, return to
+  dialog with a QA address, click **Contact sales** (a mailto link — the
+  click is enough). Then sign in as `USER_A`, return to
   `/pricing`, click **Upgrade to Pro** and press **Count me in**. (Signed
   out, **Start free** is a real Clerk sign-up — do not complete it; its
   click is enough for the click event.)
 - Query: `SELECT event, properties.plan, properties.interval,
-  properties.signed_in, properties.question, properties.pricing_variant,
+  properties.signed_in, properties.pricing_variant,
   properties.cta_location FROM events WHERE (event LIKE 'pricing_%' OR
   event = 'sign_up_started') AND properties.environment = '<env>' AND
   timestamp >= now() - INTERVAL 1 HOUR ORDER BY timestamp`
 - **Expected**: one `pricing_interval_toggled {interval: 'annual'}`; a
   `pricing_plan_clicked {plan: 'pro', interval: 'annual', signed_in:
   false}` followed by `pricing_interest_submitted {plan: 'pro', interval:
-  'annual', signed_in: false}`; one `pricing_faq_opened` whose `question`
-  is the FAQ heading text; one `pricing_plan_clicked {plan: 'enterprise',
+  'annual', signed_in: false}`; one `pricing_plan_clicked {plan: 'enterprise',
   interval: 'contract'}`; then `pricing_plan_clicked {plan: 'pro',
   signed_in: true}` and `pricing_interest_submitted {plan: 'pro',
   signed_in: true}`. Every row carries `pricing_variant` (`v3-2026-09`

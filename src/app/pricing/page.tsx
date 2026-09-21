@@ -1,12 +1,11 @@
 import Link from 'next/link';
 import { auth } from '@clerk/nextjs/server';
 import { PricingPlans } from './PricingPlans';
-import { PricingFaq } from './PricingFaq';
 
 export const metadata = {
   title: 'Pricing | fgac.ai',
   description:
-    'Free for occasional use. Pro is $5 a month or $30 a year per person, with unlimited requests. Enterprise adds BAA, SOC 2 and vendor paperwork.',
+    'Free for occasional use. Pro is $5 a month or $30 a year per person for regular use. Enterprise adds BAA, SOC 2 and vendor paperwork.',
 };
 
 /* ─── Pricing ────────────────────────────────────────────────────────────────
@@ -40,16 +39,6 @@ export default async function PricingPage() {
       <section className="px-6 sm:px-8">
         <div className="mx-auto max-w-[1120px]">
           <PricingPlans signedIn={signedIn} />
-        </div>
-      </section>
-
-      {/* FAQ */}
-      <section className="px-6 pt-16 sm:px-8">
-        <div className="mx-auto max-w-[760px]">
-          <h2 className="mb-6 text-center text-[28px] font-extrabold tracking-[-0.02em] text-foreground">
-            Questions people ask
-          </h2>
-          <PricingFaq />
         </div>
       </section>
 
