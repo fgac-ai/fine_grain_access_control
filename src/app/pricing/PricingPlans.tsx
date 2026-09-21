@@ -88,7 +88,15 @@ const ctaClass = (primary: boolean) =>
     ? 'block w-full rounded-sm bg-primary px-5 py-3 text-center text-[15px] font-semibold text-primary-foreground hover:opacity-90'
     : 'block w-full rounded-sm border border-border bg-card px-5 py-3 text-center text-[15px] font-semibold text-foreground hover:border-ring'
 
-export function PricingPlans({ signedIn }: { signedIn: boolean }) {
+export function PricingPlans({ signedIn: signedInOnServer }: { signedIn: boolean }) {
+  /* The server's auth() reads the session cookie, which on localhost goes
+     stale while Clerk's client keeps a live session (and the reverse right
+     after a modal sign-in). Rendering the signed-out CTAs to a signed-in
+     browser makes the Clerk sign-up modal refuse to open ("single-session
+     mode") and the button looks dead. So once Clerk has loaded, its client
+     state wins; the server value only covers the first paint. */
+  const { isLoaded, isSignedIn } = useUser()
+  const signedIn = isLoaded ? Boolean(isSignedIn) : signedInOnServer
   const [interval, setInterval] = useState<Interval>('monthly')
   const [door, setDoor] = useState(false)
 
