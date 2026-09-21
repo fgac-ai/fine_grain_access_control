@@ -112,3 +112,5 @@ cap if the free/paid split lands far from the 82/71 the data predicts.
   for, which accounts it covers, and the support commitment.
 - **FAQ section removed** (Ken, same session). `PricingFaq.tsx` deleted;
   `pricing_faq_opened` retired before reaching production.
+- **Launch-period notice removed** from above the cards (Ken, same session).
+  The Pro dialog is now the only place that says billing is not live.

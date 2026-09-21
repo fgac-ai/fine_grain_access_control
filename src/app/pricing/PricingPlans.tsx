@@ -8,8 +8,8 @@ import { Check, X } from 'lucide-react'
 import { SignUpCta } from '../SignUpCta'
 
 /* ─── Pricing plans (fake door) ─────────────────────────────────────────────
-   Nothing here is enforced or billed. During the launch period every account
-   has Pro-level access; the page exists to measure whether people will pay,
+   Nothing here is enforced or billed; the page exists to measure whether
+   people will pay,
    so every interaction captures a PostHog event (catalog in docs/analytics.md;
    strategy in docs/implementation_plans/pricing-page-design-9dbc83_v3.md).
 
@@ -108,13 +108,6 @@ export function PricingPlans({ signedIn }: { signedIn: boolean }) {
 
   return (
     <>
-      {/* Launch-period notice — the honest half of the fake door */}
-      <p className="mx-auto mb-8 max-w-[760px] rounded-sm border border-border bg-primary-muted px-4 py-3 text-center text-sm text-foreground">
-        <span className="font-semibold text-primary">Launch period:</span> nothing is
-        billed yet. Every account has Pro-level access until billing starts, and we
-        will email you before it does.
-      </p>
-
       {/* Interval toggle */}
       <div className="mb-8 flex justify-center">
         <div
@@ -360,8 +353,7 @@ function ProDoor({
             <p className="text-sm leading-relaxed text-muted-foreground">
               We’ll email{' '}
               <span className="font-semibold text-foreground">{knownEmail ?? email.trim()}</span>{' '}
-              before billing starts, and your first month of Pro is on us. Until then you have
-              Pro-level access, free.
+              before billing starts, and your first month of Pro is on us.
             </p>
             <div className="mt-5 flex justify-end">
               <button
@@ -376,9 +368,8 @@ function ProDoor({
         ) : (
           <form onSubmit={submit} className="flex flex-col gap-4">
             <p className="text-sm leading-relaxed text-muted-foreground">
-              During the launch period every account already has Pro-level access. Tell us
-              you’d pay {price} and we’ll email you before billing starts — with your first
-              month free.
+              Tell us you’d pay {price} and we’ll email you before billing starts — with
+              your first month free. Until then, nothing changes.
             </p>
 
             {knownEmail ? (
