@@ -377,8 +377,11 @@ async function attemptDeadGrantNotice(
   };
   const subject = deadGrantEmailSubject(notice);
   const body = deadGrantEmailBody({ ...notice, now });
+  // To = the mailbox itself: it IS the owner's address by definition (a
+  // delegated row is matched on it; an own mailbox under a drifted
+  // `users.email` is still the address the reconnect link is bound to).
   const raw = Buffer.from(approvalEmailRaw({
-    from: sender.address, to: opts.owner.email, cc: delegated ? opts.keyOwnerEmail : null, subject, body,
+    from: sender.address, to: opts.accountEmail, cc: delegated ? opts.keyOwnerEmail : null, subject, body,
   })).toString('base64url');
   const sent = await (opts.send ?? proxySend)(sender, raw);
   if (!sent.ok) {
