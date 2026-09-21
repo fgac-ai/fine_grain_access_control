@@ -143,3 +143,35 @@ docs**:
 - A fresh Neon branch resets FGAC rules but NOT Google-side drive.file
   grants — "exposed" fixtures stay granted across branches; the external doc
   must simply never be picked.
+
+## Drive Folder Fixtures (capability 21 — draft, full `drive` scope)
+
+Capability 21 (`capabilities/drafts/21_drive_folder_rules.md`) needs a folder
+tree owned by USER_A, created in the Drive / Docs web UI as USER_A — never
+through FGAC and never picked in the FGAC Picker. Names are the contract; record
+ids in the local, gitignored QA state, never here:
+
+```
+Test Folder A/
+  DinA                      Google Doc, one line of text
+  Shortcut to K             Drive shortcut whose target is K (right-click K → Add shortcut → Test Folder A)
+  Test Folder B/
+    CinBinA                 Google Doc
+    Test Folder C/
+      Test Folder D/
+        DeepInD             Google Doc — four folder levels below A (past the three-level check)
+Test Folder K/
+  K                         Google Doc — the outside-any-grant control
+S-unpicked                  Google Sheet at My Drive root, never picked
+P-unpicked                  Google Slides at My Drive root, never picked
+```
+
+Notes:
+- Create in-tab with `docs.google.com/document/create?folder=<folderId>` (and the
+  `spreadsheets/create`, `presentation/create` twins) — the Drive "New" menu
+  opens a new tab the embedded pane blocks (measured 2026-09-17).
+- The tree survives Neon branch resets (it is Google-side state); only the
+  FGAC rules on it reset. Re-verify the shortcut still points at K after any
+  fixture rebuild.
+- The QA account's Google grant is widened to `drive` ONLY for a capability 21
+  run and restored at its end (A21); capabilities 09/17/19 assume `drive.file`.
