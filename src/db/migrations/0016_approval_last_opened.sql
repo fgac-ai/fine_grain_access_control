@@ -1,0 +1,1 @@
+ALTER TABLE "approval_requests" ADD COLUMN "last_opened_at" timestamp;

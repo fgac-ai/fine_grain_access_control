@@ -4,6 +4,7 @@ import { headers } from "next/headers";
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { classifyApproveClient, type ApproveClient } from "@/lib/approveClientClass";
 import { EMAIL_LINK_SOURCE_PARAM, EMAIL_LINK_SOURCE_VALUE } from "@/lib/approvalNotifyCopy";
+import { BANNER_LINK_SOURCE_VALUE } from "@/lib/approvalPending";
 import { describeApproval, peekApprovalParams, approvalFileKind, approvalFileId, APPROVAL_PARAMS, type ApprovalPayload, type ApprovalSearchParams } from "@/lib/approvalLinks";
 import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS } from "@/lib/driveFileKinds";
 import { markApprovalRequestOpened, getApprovalRequestResourceName } from "@/lib/approvalRequests";
@@ -75,7 +76,7 @@ function linkQuery(params: ApprovalSearchParams, src?: string): string {
   if (params.s) q.set(APPROVAL_PARAMS.signature, params.s);
   // Keep the delivery marker through sign-out / try-again round trips, so
   // the open that finally converts is still attributed to the email.
-  if (src === EMAIL_LINK_SOURCE_VALUE) q.set(EMAIL_LINK_SOURCE_PARAM, src);
+  if (src === EMAIL_LINK_SOURCE_VALUE || src === BANNER_LINK_SOURCE_VALUE) q.set(EMAIL_LINK_SOURCE_PARAM, src);
   return q.toString();
 }
 
@@ -169,9 +170,11 @@ export default async function ApprovePage({
         : resolved.status === "wrong_account" ? resolved.details.action
           : resolved.payload.action,
     // Which channel delivered the URL: the notification email appends
-    // `src=email` (not part of the signed params, so it changes nothing
+    // `src=email`, the dashboard's pending-approvals banner `src=banner`
+    // (neither is part of the signed params, so it changes nothing
     // about verification); anything else came through the agent's reply.
-    link_source: params.src === EMAIL_LINK_SOURCE_VALUE ? "email" : "agent",
+    link_source: params.src === EMAIL_LINK_SOURCE_VALUE ? "email"
+      : params.src === BANNER_LINK_SOURCE_VALUE ? "banner" : "agent",
     ...client,
   });
   if (resolved.status === "fresh" || resolved.status === "already_granted") {

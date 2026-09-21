@@ -565,3 +565,28 @@ attributable to it.
 - **Regression guard**: a `message` ending in `Invalid arguments for tool
   gmail_read: [` is the pre-2026-09-17 truncation returning — the capture
   regex has replaced `parseValidationFailure` (`monitoring.md` 7.10a).
+
+### A27: The pending-approvals banner is measurable end to end
+- Run capability 14 A18, then query the user's events for the last hour:
+  `SELECT event, properties.pending_count, properties.request_ids,
+  properties.oldest_pending_s, properties.request_id, properties.action,
+  properties.link_source FROM events WHERE event IN
+  ('approval_banner_shown','approval_banner_clicked','approval_link_opened',
+  'approval_link_approved','approval_banner_dismissed') AND timestamp >= now()
+  - INTERVAL 1 HOUR ORDER BY timestamp`
+- **Expected**: an `approval_banner_shown` row per dashboard render that had
+  something pending, with `pending_count` matching the items shown,
+  `request_ids` listing them, and `oldest_pending_s` a small number; one
+  `approval_banner_clicked {request_id, action, pending_count}` for the
+  "Review" click; the approve page's `approval_link_opened` on the same
+  `request_id` carries `link_source: 'banner'` (an open from the agent's URL
+  still says `'agent'`, from the reminder email `'email'`); the approval is
+  the usual `approval_link_approved`; the "Dismiss" click is one
+  `approval_banner_dismissed {request_id, action}` and the next dashboard
+  render's `approval_banner_shown` (if any) no longer lists that id — until
+  the re-mint in A18 brings it back. A dashboard render with nothing pending
+  emits no banner row at all
+- **Why**: `monitoring.md` 7.25 judges the banner on requests opened via it
+  out of the never-opened pool, and on the approved share after a banner
+  open; without `link_source: 'banner'` those opens would be counted as the
+  agent's URL working
