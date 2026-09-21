@@ -197,7 +197,7 @@ export function PricingPlans({ signedIn: signedInOnServer }: { signedIn: boolean
                      pricing_plan_clicked, then the ordinary sign_up_started. */
                   <span onClickCapture={() => clickPlan('free')} className="block">
                     <SignUpCta location="pricing_free" className={ctaClass(false)}>
-                      Start free
+                      Start for free
                     </SignUpCta>
                   </span>
                 ))}

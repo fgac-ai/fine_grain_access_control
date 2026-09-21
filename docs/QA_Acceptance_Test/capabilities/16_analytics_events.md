@@ -544,7 +544,7 @@ attributable to it.
   **Sign up free** in the dialog (the Clerk modal opens — close it, do not
   complete it), click **Contact sales** (a mailto link — the click is
   enough). Then sign in as `USER_A`, return to `/pricing`, click
-  **Upgrade to Pro** and press **Count me in**. (Signed out, **Start free**
+  **Upgrade to Pro** and press **Count me in**. (Signed out, **Start for free**
   is also a real Clerk sign-up — its click is enough for the click event.)
 - Query: `SELECT event, properties.plan, properties.interval,
   properties.signed_in, properties.pricing_variant,
@@ -563,6 +563,6 @@ attributable to it.
   in any application table — the door writes to PostHog only.
 - **Regression guard**: `pricing_plan_clicked` must fire BEFORE the dialog
   opens (it is the click-through measure; the dialog can be dismissed), and
-  a signed-out click on **Start free** must still emit `sign_up_started
+  a signed-out click on **Start for free** must still emit `sign_up_started
   {cta_location: 'pricing_free'}` so the sign-up funnel keeps counting
   pricing-page sign-ups
