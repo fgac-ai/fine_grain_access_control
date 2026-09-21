@@ -230,10 +230,8 @@ export async function listWallHitsForRouting(userId: string): Promise<Array<Rout
       action: approvalRequests.action,
       wallQuery: approvalRequests.wallQuery,
       wallHitAt: approvalRequests.wallHitAt,
-      // The LATEST owner render: opened_at is first-open-only, so a request
-      // opened before the hit and reached again after it would otherwise
-      // still look unseen and be routed back to.
-      openedAt: sql<Date | null>`coalesce(${approvalRequests.lastOpenedAt}, ${approvalRequests.openedAt})`,
+      openedAt: approvalRequests.openedAt,
+      lastOpenedAt: approvalRequests.lastOpenedAt,
       routedAt: approvalRequests.routedAt,
     })
       .from(approvalRequests)
@@ -243,8 +241,14 @@ export async function listWallHitsForRouting(userId: string): Promise<Array<Rout
         isNotNull(approvalRequests.wallHitAt),
         isNotNull(approvalRequests.wallQuery),
       ));
+    // The LATEST owner render feeds the "not seen since the hit" rule:
+    // opened_at is first-open-only, so a request opened before the hit and
+    // reached again after it would otherwise look unseen and be routed back
+    // to. Coalesced here, as plain columns: a raw SQL coalesce bypasses
+    // Drizzle's timestamp decoder and hands the router a string (preview QA
+    // 2026-09-21 F5 -- /dashboard 500'd on `.getTime is not a function`).
     return rows.flatMap(r => r.wallHitAt && r.wallQuery
-      ? [{ requestId: r.requestId, action: r.action, wallQuery: r.wallQuery, wallHitAt: r.wallHitAt, openedAt: r.openedAt, routedAt: r.routedAt }]
+      ? [{ requestId: r.requestId, action: r.action, wallQuery: r.wallQuery, wallHitAt: r.wallHitAt, openedAt: r.lastOpenedAt ?? r.openedAt, routedAt: r.routedAt }]
       : []);
   } catch (err) {
     console.error('[approvalRequests] wall hit lookup failed:', err);
@@ -276,21 +280,28 @@ export type WallRouteDecision =
  *  the route to send a freshly signed-in owner to, stamped as routed -- or
  *  why not, so the page can report a skip. Rules in src/lib/approvalRouting.ts. */
 export async function resolveWallRoute(userId: string): Promise<WallRouteDecision> {
-  const { pickRoutableWallHit, approvalRoutePath, explainWallRouteSkip } = await import('./approvalRouting');
-  const now = Date.now();
-  const rows = await listWallHitsForRouting(userId);
-  if (rows === null) return { kind: 'lookup_failed' };
-  if (rows.length === 0) return { kind: 'none' };
-  const hit = pickRoutableWallHit(rows, now);
-  if (!hit) return { kind: 'skip', skip: explainWallRouteSkip(rows, now) };
-  await markApprovalRequestRouted(hit.requestId);
-  return {
-    kind: 'route',
-    path: approvalRoutePath(hit),
-    requestId: hit.requestId,
-    action: hit.action,
-    secondsSinceWall: Math.max(0, Math.round((now - hit.wallHitAt.getTime()) / 1000)),
-  };
+  // Routing is a repair, never a gate: whatever fails in here, /dashboard
+  // must still render the profile page.
+  try {
+    const { pickRoutableWallHit, approvalRoutePath, explainWallRouteSkip } = await import('./approvalRouting');
+    const now = Date.now();
+    const rows = await listWallHitsForRouting(userId);
+    if (rows === null) return { kind: 'lookup_failed' };
+    if (rows.length === 0) return { kind: 'none' };
+    const hit = pickRoutableWallHit(rows, now);
+    if (!hit) return { kind: 'skip', skip: explainWallRouteSkip(rows, now) };
+    await markApprovalRequestRouted(hit.requestId);
+    return {
+      kind: 'route',
+      path: approvalRoutePath(hit),
+      requestId: hit.requestId,
+      action: hit.action,
+      secondsSinceWall: Math.max(0, Math.round((now - hit.wallHitAt.getTime()) / 1000)),
+    };
+  } catch (err) {
+    console.error('[approvalRequests] wall route decision failed:', err);
+    return { kind: 'lookup_failed' };
+  }
 }
 
 // ─── Pending-approvals banner ───────────────────────────────────────────────
