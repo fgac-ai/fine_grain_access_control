@@ -40,7 +40,7 @@ export default async function PricingPage() {
       {/* Closing */}
       <section className="px-6 pt-16 text-center sm:px-8">
         <h2 className="mb-2 text-[26px] font-extrabold tracking-[-0.02em] text-foreground">
-          Start free. Nothing to cancel. No credit card required.
+          Start for free, Nothing to cancel, No credit card required
         </h2>
         <p className="mb-6 text-base text-muted-foreground">
           Connected in under a minute from the{' '}
