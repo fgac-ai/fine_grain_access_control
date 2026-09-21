@@ -117,3 +117,9 @@ cap if the free/paid split lands far from the 82/71 the data predicts.
 - **Signed-out Pro dialog offers sign-up, not an email field** (Ken, same
   session). `sign_up_started {cta_location: 'pricing_pro'}` counts it;
   `pricing_interest_submitted` is signed-in only from here on.
+- **Contact sales is a form, not a mailto** (Ken, 2026-09-21: the mailto
+  did nothing visible in the desktop app's browser pane). Submissions land
+  in PostHog as `pricing_interest_submitted {plan: 'enterprise'}` with team
+  size, company and needs; the sales address is a fallback link inside the
+  dialog. Follow-up: a server-side email to the sales mailbox via the
+  support sender so leads are not PostHog-only.

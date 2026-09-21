@@ -542,8 +542,9 @@ attributable to it.
 - In the built-in browser, open `/pricing` on the environment under test
   signed out. Toggle the interval to Annual, click **Get Pro**, then click
   **Sign up free** in the dialog (the Clerk modal opens — close it, do not
-  complete it), click **Contact sales** (a mailto link — the click is
-  enough). Then sign in as `USER_A`, return to `/pricing`, click
+  complete it), click **Contact sales**, fill the form with a QA address,
+  pick a team size and one need, and press **Send**. Then sign in as
+  `USER_A`, return to `/pricing`, click
   **Upgrade to Pro** and press **Count me in**. (Signed out, **Start for free**
   is also a real Clerk sign-up — its click is enough for the click event.)
 - Query: `SELECT event, properties.plan, properties.interval,
@@ -556,10 +557,14 @@ attributable to it.
   false}` followed by `sign_up_started {cta_location: 'pricing_pro'}` and
   NO `pricing_interest_submitted` (signed-out visitors are never asked for
   an email); one `pricing_plan_clicked {plan: 'enterprise', interval:
-  'contract'}`; then `pricing_plan_clicked {plan: 'pro', signed_in: true}`
+  'contract'}` followed by `pricing_interest_submitted {plan: 'enterprise',
+  interval: 'contract', signed_in: false, team_size: '<the bucket>', needs:
+  ['<the need>']}`; then `pricing_plan_clicked {plan: 'pro', signed_in: true}`
   and `pricing_interest_submitted {plan: 'pro', signed_in: true}`. Every
-  row carries `pricing_variant` (`v3-2026-09` today). `USER_A`'s person
-  carries `properties.pricing_interest_plan = 'pro'`. No new rows appear
+  row carries `pricing_variant` (`v3-2026-09` today). The signed-out
+  submitter's person carries `pricing_interest_plan = 'enterprise'` and the
+  submitted `email`; `USER_A`'s person carries `pricing_interest_plan =
+  'pro'`. No new rows appear
   in any application table — the door writes to PostHog only.
 - **Regression guard**: `pricing_plan_clicked` must fire BEFORE the dialog
   opens (it is the click-through measure; the dialog can be dismissed), and

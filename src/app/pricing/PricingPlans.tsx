@@ -98,7 +98,7 @@ export function PricingPlans({ signedIn: signedInOnServer }: { signedIn: boolean
   const { isLoaded, isSignedIn } = useUser()
   const signedIn = isLoaded ? Boolean(isSignedIn) : signedInOnServer
   const [interval, setInterval] = useState<Interval>('monthly')
-  const [door, setDoor] = useState(false)
+  const [door, setDoor] = useState<'pro' | 'enterprise' | null>(null)
 
   const toggle = (next: Interval) => {
     if (next === interval) return
@@ -207,7 +207,7 @@ export function PricingPlans({ signedIn: signedInOnServer }: { signedIn: boolean
                   type="button"
                   onClick={() => {
                     clickPlan('pro')
-                    setDoor(true)
+                    setDoor('pro')
                   }}
                   className={ctaClass(true)}
                 >
@@ -216,22 +216,31 @@ export function PricingPlans({ signedIn: signedInOnServer }: { signedIn: boolean
               )}
 
               {plan.id === 'enterprise' && (
-                /* No fake door — a real conversation is the product. */
-                <a
-                  href={`mailto:${SALES_EMAIL}?subject=${encodeURIComponent('FGAC.ai Enterprise')}`}
-                  onClick={() => clickPlan('enterprise')}
+                /* A short form rather than a bare mailto: — a mailto does
+                   nothing visible in browsers without a mail handler (the
+                   desktop app's pane, most work machines), which reads as a
+                   dead button. The address stays as a fallback link inside. */
+                <button
+                  type="button"
+                  onClick={() => {
+                    clickPlan('enterprise')
+                    setDoor('enterprise')
+                  }}
                   className={ctaClass(false)}
                 >
                   Contact sales
-                </a>
+                </button>
               )}
             </div>
           </article>
         ))}
       </div>
 
-      {door && (
-        <ProDoor interval={interval} signedIn={signedIn} onClose={() => setDoor(false)} />
+      {door === 'pro' && (
+        <ProDoor interval={interval} signedIn={signedIn} onClose={() => setDoor(null)} />
+      )}
+      {door === 'enterprise' && (
+        <EnterpriseDoor signedIn={signedIn} onClose={() => setDoor(null)} />
       )}
     </>
   )
@@ -420,6 +429,215 @@ function ProDoor({
               </SignUpCta>
             </div>
           </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/* ─── Contact sales ──────────────────────────────────────────────────────────
+   Captured to PostHog like the Pro door (pricing_interest_submitted with
+   plan 'enterprise' plus person properties), so sales leads are a PostHog
+   query until a server-side email to the sales mailbox is wired. */
+
+const TEAM_SIZES = ['2–10', '11–50', '51–250', '250+'] as const
+const NEEDS = ['BAA', 'SOC 2 report', 'SSO / SAML', 'Self-hosted', 'DPA / security review', 'Invoicing'] as const
+
+function EnterpriseDoor({ signedIn, onClose }: { signedIn: boolean; onClose: () => void }) {
+  const { user } = useUser()
+  const knownEmail = user?.primaryEmailAddress?.emailAddress ?? ''
+  // Derived, not synced: Clerk resolves the user after mount, so the field
+  // shows the account email until the visitor types their own.
+  const [emailEdit, setEmailEdit] = useState<string | null>(null)
+  const email = emailEdit ?? knownEmail
+  const [company, setCompany] = useState('')
+  const [teamSize, setTeamSize] = useState<(typeof TEAM_SIZES)[number] | ''>('')
+  const [needs, setNeeds] = useState<string[]>([])
+  const [done, setDone] = useState(false)
+  const firstField = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    firstField.current?.focus()
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const toggleNeed = (n: string) =>
+    setNeeds((cur) => (cur.includes(n) ? cur.filter((x) => x !== n) : [...cur, n]))
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault()
+    const submittedEmail = email.trim()
+    if (!submittedEmail) return
+    capture('pricing_interest_submitted', {
+      plan: 'enterprise',
+      interval: 'contract',
+      signed_in: signedIn,
+      team_size: teamSize || 'unspecified',
+      company: company.trim() || undefined,
+      needs,
+    })
+    posthog.setPersonProperties({
+      pricing_interest_plan: 'enterprise',
+      pricing_interest_at: new Date().toISOString(),
+      pricing_interest_team_size: teamSize || 'unspecified',
+      ...(company.trim() ? { pricing_interest_company: company.trim() } : {}),
+      ...(knownEmail ? {} : { email: submittedEmail }),
+    })
+    setDone(true)
+  }
+
+  const field =
+    'rounded-sm border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground-subtle'
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-surface-inverse/60 p-4 sm:items-center"
+      onClick={onClose}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="pricing-sales-title"
+        data-testid="pricing-sales"
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-md rounded-lg border border-border bg-card p-6 shadow-lg"
+      >
+        <div className="mb-4 flex items-start justify-between gap-4">
+          <h2 id="pricing-sales-title" className="text-lg font-bold text-foreground">
+            {done ? 'Thanks — we’ll be in touch' : 'Talk to sales'}
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="rounded-sm p-1 text-muted-foreground hover:text-foreground"
+          >
+            <X className="h-4 w-4" aria-hidden />
+          </button>
+        </div>
+
+        {done ? (
+          <>
+            <p className="text-sm leading-relaxed text-muted-foreground">
+              We’ll reply to{' '}
+              <span className="font-semibold text-foreground">{email.trim()}</span> within one
+              business day. Prefer email? Write to{' '}
+              <a href={`mailto:${SALES_EMAIL}`} className="text-primary underline underline-offset-2">
+                {SALES_EMAIL}
+              </a>
+              .
+            </p>
+            <div className="mt-5 flex justify-end">
+              <button
+                type="button"
+                onClick={onClose}
+                className="rounded-sm bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90"
+              >
+                Done
+              </button>
+            </div>
+          </>
+        ) : (
+          <form onSubmit={submit} className="flex flex-col gap-4">
+            <p className="text-sm leading-relaxed text-muted-foreground">
+              Tell us a little about your team and what your vendor process needs. We reply
+              within one business day.
+            </p>
+
+            <label className="flex flex-col gap-1.5 text-sm font-medium text-foreground">
+              Work email
+              <input
+                ref={firstField}
+                type="email"
+                required
+                autoComplete="email"
+                value={email}
+                onChange={(e) => setEmailEdit(e.target.value)}
+                placeholder="you@company.com"
+                className={field}
+              />
+            </label>
+
+            <label className="flex flex-col gap-1.5 text-sm font-medium text-foreground">
+              Company
+              <input
+                type="text"
+                autoComplete="organization"
+                value={company}
+                onChange={(e) => setCompany(e.target.value)}
+                placeholder="Optional"
+                className={field}
+              />
+            </label>
+
+            <label className="flex flex-col gap-1.5 text-sm font-medium text-foreground">
+              Team size
+              <select
+                value={teamSize}
+                onChange={(e) => setTeamSize(e.target.value as (typeof TEAM_SIZES)[number])}
+                className={field}
+              >
+                <option value="">Select…</option>
+                {TEAM_SIZES.map((t) => (
+                  <option key={t} value={t}>
+                    {t} people
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <fieldset className="flex flex-col gap-1.5">
+              <legend className="mb-1 text-sm font-medium text-foreground">What do you need?</legend>
+              <div className="flex flex-wrap gap-2">
+                {NEEDS.map((n) => (
+                  <label
+                    key={n}
+                    className={`cursor-pointer rounded-full border px-3 py-1 text-xs font-semibold ${
+                      needs.includes(n)
+                        ? 'border-primary bg-primary-muted text-primary'
+                        : 'border-border bg-card text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      className="sr-only"
+                      checked={needs.includes(n)}
+                      onChange={() => toggleNeed(n)}
+                    />
+                    {n}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+
+            <div className="flex items-center justify-between gap-3 pt-1">
+              <a
+                href={`mailto:${SALES_EMAIL}?subject=${encodeURIComponent('FGAC.ai Enterprise')}`}
+                className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+              >
+                or email {SALES_EMAIL}
+              </a>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="rounded-sm px-3 py-2 text-sm font-semibold text-muted-foreground hover:text-foreground"
+                >
+                  Not now
+                </button>
+                <button
+                  type="submit"
+                  className="rounded-sm bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90"
+                >
+                  Send
+                </button>
+              </div>
+            </div>
+          </form>
         )}
       </div>
     </div>
