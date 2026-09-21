@@ -222,7 +222,7 @@ export interface RoutableWallHit {
 /** Candidate rows for routing: this owner's requests with a wall hit and no
  *  approval. The pure decision (recency, opened-since, routed-once) lives in
  *  `src/lib/approvalRouting.ts` so it can be unit-tested. */
-export async function listWallHitsForRouting(userId: string): Promise<Array<RoutableWallHit & { openedAt: Date | null; routedAt: Date | null }>> {
+export async function listWallHitsForRouting(userId: string): Promise<Array<RoutableWallHit & { openedAt: Date | null; routedAt: Date | null }> | null> {
   try {
     const rows = await db.select({
       requestId: approvalRequests.requestId,
@@ -244,7 +244,7 @@ export async function listWallHitsForRouting(userId: string): Promise<Array<Rout
       : []);
   } catch (err) {
     console.error('[approvalRequests] wall hit lookup failed:', err);
-    return [];
+    return null;
   }
 }
 
@@ -259,16 +259,29 @@ export async function markApprovalRequestRouted(requestId: string): Promise<void
   }
 }
 
+export type WallRouteDecision =
+  | { kind: 'route'; path: string; requestId: string; action: string; secondsSinceWall: number }
+  /** Candidate rows existed but every one was excluded by a rule (counts per rule). */
+  | { kind: 'skip'; skip: import('./approvalRouting').WallRouteSkip }
+  /** The ledger read threw (logged); nothing is known about candidates. */
+  | { kind: 'lookup_failed' }
+  /** No candidate rows at all -- the common case, not worth an event. */
+  | { kind: 'none' };
+
 /** The /dashboard decision in one call (keeps the clock out of render):
- *  the route to send a freshly signed-in owner to, stamped as routed, or
- *  null. Rules in src/lib/approvalRouting.ts. */
-export async function resolveWallRoute(userId: string): Promise<{ path: string; requestId: string; action: string; secondsSinceWall: number } | null> {
-  const { pickRoutableWallHit, approvalRoutePath } = await import('./approvalRouting');
+ *  the route to send a freshly signed-in owner to, stamped as routed -- or
+ *  why not, so the page can report a skip. Rules in src/lib/approvalRouting.ts. */
+export async function resolveWallRoute(userId: string): Promise<WallRouteDecision> {
+  const { pickRoutableWallHit, approvalRoutePath, explainWallRouteSkip } = await import('./approvalRouting');
   const now = Date.now();
-  const hit = pickRoutableWallHit(await listWallHitsForRouting(userId), now);
-  if (!hit) return null;
+  const rows = await listWallHitsForRouting(userId);
+  if (rows === null) return { kind: 'lookup_failed' };
+  if (rows.length === 0) return { kind: 'none' };
+  const hit = pickRoutableWallHit(rows, now);
+  if (!hit) return { kind: 'skip', skip: explainWallRouteSkip(rows, now) };
   await markApprovalRequestRouted(hit.requestId);
   return {
+    kind: 'route',
     path: approvalRoutePath(hit),
     requestId: hit.requestId,
     action: hit.action,

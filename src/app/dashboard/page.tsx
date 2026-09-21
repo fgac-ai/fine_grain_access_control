@@ -32,7 +32,7 @@ export default async function DashboardPage({
   if (!data) redirect('/');
 
   const wallRoute = await resolveWallRoute(data.userId);
-  if (wallRoute) {
+  if (wallRoute.kind === 'route') {
     const { userId: clerkUserId } = await auth();
     captureServerEvent(clerkUserId ?? 'anonymous-approve-wall', 'approval_wall_routed', {
       action: wallRoute.action,
@@ -40,6 +40,15 @@ export default async function DashboardPage({
       seconds_since_wall: wallRoute.secondsSinceWall,
     });
     redirect(wallRoute.path);
+  } else if (wallRoute.kind !== 'none') {
+    // A wall hit was on file for this owner and did not route: say which
+    // rule excluded it (or that the read failed). Without this row, "no
+    // candidate", "rule excluded" and "lookup failed" all look the same in
+    // PostHog -- which is what made the 2026-09-19 review unanswerable.
+    captureServerEvent(data.clerkUserId, 'approval_wall_route_skipped', {
+      reason: wallRoute.kind,
+      ...(wallRoute.kind === 'skip' ? wallRoute.skip : {}),
+    });
   }
 
   const slug = defaultProfileSlug(data.profiles);

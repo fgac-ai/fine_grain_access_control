@@ -6,7 +6,7 @@
  * has not opened the approve page since the hit, only once per hit, newest
  * hit wins, and the redirect carries exactly the signed link's query.
  */
-import { approvalRoutePath, canonicalWallQuery, pickRoutableWallHit, ROUTE_WINDOW_MS, type WallHitRow } from '../src/lib/approvalRouting';
+import { approvalRoutePath, canonicalWallQuery, explainWallRouteSkip, pickRoutableWallHit, ROUTE_WINDOW_MS, type WallHitRow } from '../src/lib/approvalRouting';
 
 let failures = 0;
 function check(name: string, cond: boolean) {
@@ -47,6 +47,25 @@ console.log('redirect target:');
 check('route path is the approve page with the stored query', approvalRoutePath(row({ requestId: 'r1' })) === `/dashboard/approve?${Q}`);
 check('canonical query keeps only a/k/r/s', canonicalWallQuery(new URLSearchParams(`${Q}&result=ok&notice=x`)) === Q);
 check('canonical query drops empty target', canonicalWallQuery(new URLSearchParams('a=send_all&k=K&r=&s=S')) === 'a=send_all&k=K&s=S');
+
+console.log('skip explanation:');
+{
+  const skip = explainWallRouteSkip([
+    row({ requestId: 's1', wallHitAt: at(ROUTE_WINDOW_MS + 60_000) }),
+    row({ requestId: 's2', routedAt: at(30_000) }),
+    row({ requestId: 's3', openedAt: at(30_000) }),
+    row({ requestId: 's4', wallQuery: '' }),
+    row({ requestId: 's5', wallHitAt: new Date(NOW + 60_000) }),
+  ], NOW);
+  check('counts every candidate', skip.candidates === 5);
+  check('names the stale one', skip.stale === 1);
+  check('names the already-routed one', skip.routed_already === 1);
+  check('names the opened-since one', skip.opened_since === 1);
+  check('names the query-less one', skip.no_query === 1);
+  check('names the future-dated one', skip.future === 1);
+  const clean = explainWallRouteSkip([row({ requestId: 'ok' })], NOW);
+  check('a routable row trips no rule', clean.candidates === 1 && clean.stale + clean.routed_already + clean.opened_since + clean.no_query + clean.future === 0);
+}
 
 if (failures) { console.error(`\n${failures} approval-routing check(s) failed`); process.exit(1); }
 console.log('\nall approval-routing checks passed');

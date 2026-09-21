@@ -1926,6 +1926,33 @@ context; two more `browser` hits came from a Windows Chrome 151 UA whose
 owner uses a different machine entirely. Read `client = 'browser'` wall rows
 as an upper bound, and read recovery per request from the query above.
 
+A local reproduction (dev build, USER_A, 2026-09-21) confirmed the router
+itself works — five of six signed-in `/dashboard` loads with a routable row
+redirected to the approve page — and produced one unexplained miss with a
+provably routable row and a clean log, the exact production signature. The
+page now emits `approval_wall_route_skipped {reason, candidates, stale,
+routed_already, opened_since, no_query, future}` whenever an owner had
+wall-hit rows on file and none routed, so the next such miss names its rule:
+
+```sql
+-- why wall hits on file did not route (per owner render), last 30 d
+SELECT toString(properties.reason) AS reason, count() AS renders,
+       sum(toFloat64OrNull(toString(properties.candidates))) AS candidates,
+       sum(toFloat64OrNull(toString(properties.stale))) AS stale,
+       sum(toFloat64OrNull(toString(properties.routed_already))) AS routed_already,
+       sum(toFloat64OrNull(toString(properties.opened_since))) AS opened_since,
+       sum(toFloat64OrNull(toString(properties.no_query))) AS no_query,
+       sum(toFloat64OrNull(toString(properties.future))) AS future
+FROM events
+WHERE event = 'approval_wall_route_skipped' AND properties.environment = 'production'
+  AND timestamp >= now() - INTERVAL 30 DAY
+GROUP BY reason
+```
+
+A `skip` render whose counts are all zero is the unexplained case (every rule
+passed and the pick still returned nothing) — that cannot happen by
+construction and would mean the row changed between the read and the pick.
+
 The lost context that IS real sits outside the wall: 47 of the 87 requests
 minted in the same window were never opened at all (21 owners), and 5 of
 those had the owner on a dashboard page within the week — every one shown the
@@ -2082,7 +2109,7 @@ SELECT person.properties.email AS who,
        toString(properties.$mcp_tool_name) AS tool,
        toString(properties.account_requested) AS requested,
        count() AS refusals, uniq(toDate(timestamp)) AS days,
-       max(toInt32OrNull(toString(properties.account_refusal_count))) AS max_in_window,
+       max(toFloat64OrNull(toString(properties.account_refusal_count))) AS max_in_window,
        groupUniqArray(toString(properties.notify_status)) AS notify,
        min(timestamp) AS first, max(timestamp) AS last
 FROM events
