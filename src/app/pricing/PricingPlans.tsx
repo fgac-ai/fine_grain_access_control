@@ -22,9 +22,10 @@ import { SignUpCta } from '../SignUpCta'
 export const PRICING_VARIANT = 'v3-2026-09'
 export const SALES_EMAIL = 'sales@fgac.ai'
 
-/* 50/month: in production the users active fewer than 4 days a month make a
-   median of 14 successful calls (p90 114), weekly-plus users start at ~58,
-   and the median active day is ~15 calls — so 50 ≈ three or four tasks. */
+/* Internal approximation of "less than one task a week" — deliberately NOT
+   shown on the page (Ken, 2026-09-20). In production the users active fewer
+   than 4 days a month make a median of 14 successful calls (p90 114),
+   weekly-plus users start at ~58, and an active day is ~15 calls. */
 export const FREE_REQUESTS_PER_MONTH = 50
 
 type Interval = 'monthly' | 'annual'
@@ -43,25 +44,23 @@ const PLANS: Plan[] = [
   {
     id: 'free',
     name: 'Free',
-    tagline: 'For occasional use — about one task a week.',
+    tagline: 'For occasional use.',
     features: [
-      `${FREE_REQUESTS_PER_MONTH} requests a month`,
+      'Occasional use — less than one task a week',
       'All your Google accounts — Gmail, Sheets, Docs',
-      'Every rule type: send allowlists, read blacklists, labels, per-file access',
       'Delegate to and from anyone',
       'Claude, Cursor, Claude Code, any MCP client',
+      'Support within 7 days',
     ],
   },
   {
     id: 'pro',
     name: 'Pro',
-    tagline: 'For people whose agent works every week.',
+    tagline: 'For regular use.',
     features: [
-      'Unlimited requests',
+      'Regular use — more than one task a week',
       'Everything in Free',
-      'Unlimited agent profiles',
-      'One-click approval links and email reminders',
-      'Priority support',
+      'Support within 24 hours',
     ],
     highlight: true,
     badge: 'Most popular',

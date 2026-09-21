@@ -98,3 +98,16 @@ signed_in: true}`.
 
 After four weeks: ship billing at $5 with the 50-request cap, or raise the
 cap if the free/paid split lands far from the 82/71 the data predicts.
+
+## Addendum 2026-09-20 (Ken, testing locally)
+
+- The request number is **not shown on the page**. Free is framed as
+  "occasional use — less than one task a week", Pro as "regular use — more
+  than one task a week". The 50-request approximation above stays internal
+  (a code constant and this document) for when enforcement is built.
+- Support commitments on the cards: **Free — support within 7 days; Pro —
+  support within 24 hours.**
+- Removed from the cards: agent profiles, one-click approval links and
+  reminders, and the rule-type list. The cards now say what the plan is
+  for, which accounts it covers, and the support commitment.
+

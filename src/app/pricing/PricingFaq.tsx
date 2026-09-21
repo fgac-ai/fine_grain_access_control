@@ -3,7 +3,7 @@
 import { useRef } from 'react'
 import Link from 'next/link'
 import posthog from 'posthog-js'
-import { FREE_REQUESTS_PER_MONTH, PRICING_VARIANT, SALES_EMAIL } from './PricingPlans'
+import { PRICING_VARIANT, SALES_EMAIL } from './PricingPlans'
 
 /* Native <details> accordions. Each question captures `pricing_faq_opened`
    the first time it is opened, so the answer to "which objection do people
@@ -11,12 +11,12 @@ import { FREE_REQUESTS_PER_MONTH, PRICING_VARIANT, SALES_EMAIL } from './Pricing
 
 const FAQ: { q: string; a: React.ReactNode }[] = [
   {
-    q: 'What counts as a request?',
-    a: `One successful call your agent makes through FGAC to Google — reading a thread, appending rows to a sheet, sending an email. Denied calls never count. A typical task is a handful of requests, so ${FREE_REQUESTS_PER_MONTH} a month is roughly one task a week.`,
+    q: 'What is the difference between occasional and regular use?',
+    a: 'Occasional means your agent does something with your Google account less than about once a week; regular means more often than that. We go by what your agent actually does through FGAC, and denied actions never count against you.',
   },
   {
-    q: 'What happens when I reach the Free limit?',
-    a: 'During the launch period, nothing — every account has Pro-level access. Once billing starts, your agent gets a clear message that the monthly limit is reached and you can upgrade in one click; nothing is silently dropped.',
+    q: 'What happens if my use picks up on the Free plan?',
+    a: 'During the launch period, nothing — every account has Pro-level access. Once billing starts, your agent gets a clear message that you have moved past occasional use and you can upgrade in one click; nothing is silently dropped.',
   },
   {
     q: 'Is billing live?',
