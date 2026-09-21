@@ -22,16 +22,11 @@ export default async function PricingPage() {
       {/* Header */}
       <section className="px-6 pt-16 pb-10 text-center sm:px-8">
         <div className="mx-auto max-w-[720px]">
-          <h1 className="mb-3.5 text-[36px] font-extrabold leading-[1.05] tracking-[-0.03em] text-foreground sm:text-[48px]">
-            Free to try.
+          <h1 className="text-[36px] font-extrabold leading-[1.05] tracking-[-0.03em] text-foreground sm:text-[48px]">
+            Free to try,
             <br />
-            $5 a month when it earns its keep.
+            $5 a month if you use it
           </h1>
-          <p className="text-[17px] leading-[1.55] text-muted-foreground">
-            Every plan has the same rules engine and the same promise: your
-            data passes through and is never stored. Pro is one flat price per
-            person — every Google account, every agent, no counting.
-          </p>
         </div>
       </section>
 
