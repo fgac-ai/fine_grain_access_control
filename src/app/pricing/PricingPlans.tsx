@@ -464,6 +464,11 @@ function EnterpriseDoor({ signedIn, onClose }: { signedIn: boolean; onClose: () 
   const openedAt = useRef(Date.now())
   const submitted = useRef(false)
   const timers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+  // The Escape listener is registered once, so it reads the form through a
+  // ref that every render refreshes — otherwise it sees the first render's
+  // empty values and the abandonment event lists no fields.
+  const latest = useRef({ email, company, teamSize, needs })
+  latest.current = { email, company, teamSize, needs }
 
   /* Field-level capture. Text fields debounce so a person typing is one
      event per pause, not per keystroke; choices capture at once. A
@@ -486,11 +491,12 @@ function EnterpriseDoor({ signedIn, onClose }: { signedIn: boolean; onClose: () 
 
   const close = () => {
     if (!submitted.current) {
+      const cur = latest.current
       const filled = [
-        email.trim() ? 'email' : null,
-        company.trim() ? 'company' : null,
-        teamSize ? 'team_size' : null,
-        needs.length ? 'needs' : null,
+        cur.email.trim() ? 'email' : null,
+        cur.company.trim() ? 'company' : null,
+        cur.teamSize ? 'team_size' : null,
+        cur.needs.length ? 'needs' : null,
       ].filter(Boolean)
       capture('pricing_sales_form_abandoned', {
         plan: 'enterprise',
@@ -516,12 +522,11 @@ function EnterpriseDoor({ signedIn, onClose }: { signedIn: boolean; onClose: () 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const toggleNeed = (n: string) =>
-    setNeeds((cur) => {
-      const next = cur.includes(n) ? cur.filter((x) => x !== n) : [...cur, n]
-      trackField('needs', next, true)
-      return next
-    })
+  const toggleNeed = (n: string) => {
+    const next = needs.includes(n) ? needs.filter((x) => x !== n) : [...needs, n]
+    setNeeds(next)
+    trackField('needs', next, true)
+  }
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
