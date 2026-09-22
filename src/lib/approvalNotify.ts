@@ -112,7 +112,7 @@ export interface NotifyOwnerResult {
  * only the request and its path params, so no network hop and no dependence
  * on the deployment's public URL — which on previews points at production).
  */
-async function proxySend(cfg: SenderConfig, raw: string): Promise<SendResult> {
+export async function proxySend(cfg: SenderConfig, raw: string): Promise<SendResult> {
   try {
     const req = new NextRequest(`http://fgac.internal/api/proxy/${GMAIL_SEND_PATH.join('/')}`, {
       method: 'POST',
