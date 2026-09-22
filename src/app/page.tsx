@@ -292,7 +292,11 @@ export default async function LandingPage() {
           Deny by default. Allow on your terms.
         </h2>
         <p className="mb-6 text-base text-muted-foreground">
-          Free for personal use. Connected in under a minute.
+          Free to start — connected in under a minute.{' '}
+          <Link href="/pricing" className="underline underline-offset-2 hover:text-foreground">
+            See pricing
+          </Link>
+          .
         </p>
         <Show when="signed-out">
           <SignUpCta

@@ -590,3 +590,45 @@ attributable to it.
   out of the never-opened pool, and on the approved share after a banner
   open; without `link_source: 'banner'` those opens would be counted as the
   agent's URL working
+
+### A28: The pricing fake door is measurable per plan
+- In the built-in browser, open `/pricing` on the environment under test
+  signed out. Toggle the interval to Annual, click **Get Pro**, then click
+  **Sign up free** in the dialog (the Clerk modal opens — close it, do not
+  complete it), click **Contact sales**, fill the form with a QA address,
+  pick a team size and one need, and press **Send** (type the address —
+  the field capture is part of the assertion). Then sign in as
+  `USER_A`, return to `/pricing`, click
+  **Upgrade to Pro** and press **Count me in**. (Signed out, **Start for free**
+  is also a real Clerk sign-up — its click is enough for the click event.)
+- Query: `SELECT event, properties.plan, properties.interval,
+  properties.signed_in, properties.pricing_variant,
+  properties.cta_location FROM events WHERE (event LIKE 'pricing_%' OR
+  event = 'sign_up_started') AND properties.environment = '<env>' AND
+  timestamp >= now() - INTERVAL 1 HOUR ORDER BY timestamp`
+- **Expected**: one `pricing_interval_toggled {interval: 'annual'}`; a
+  `pricing_plan_clicked {plan: 'pro', interval: 'annual', signed_in:
+  false}` followed by `sign_up_started {cta_location: 'pricing_pro'}` and
+  NO `pricing_interest_submitted` (signed-out visitors are never asked for
+  an email); one `pricing_plan_clicked {plan: 'enterprise', interval:
+  'contract'}` followed by at least one `pricing_sales_form_field {field:
+  'email', value: '<the typed address>'}`, one `{field: 'team_size'}` and
+  one `{field: 'needs'}`, then `pricing_interest_submitted {plan:
+  'enterprise', interval: 'contract', signed_in: false, team_size: '<the
+  bucket>', needs: ['<the need>']}` and a server `sales_lead_emailed
+  {status: 'disabled', source: 'pricing'}` on local/preview (the sender
+  vars are Production-only; on production `status: 'sent'` and the QA
+  address receives a confirmation with the sales inbox in Cc); then `pricing_plan_clicked {plan: 'pro', signed_in: true}`
+  and `pricing_interest_submitted {plan: 'pro', signed_in: true}`. Every
+  row carries `pricing_variant` (`v3-2026-09` today). The signed-out
+  submitter's person carries `pricing_interest_plan = 'enterprise'` and the
+  submitted `email`; `USER_A`'s person carries `pricing_interest_plan =
+  'pro'`. Re-open Contact sales, type a company name, close with Escape:
+  one `pricing_sales_form_abandoned {fields_filled: ['email','company']}`
+  (the email is prefilled when signed in). No new rows appear
+  in any application table — the door writes to PostHog only.
+- **Regression guard**: `pricing_plan_clicked` must fire BEFORE the dialog
+  opens (it is the click-through measure; the dialog can be dismissed), and
+  a signed-out click on **Start for free** must still emit `sign_up_started
+  {cta_location: 'pricing_free'}` so the sign-up funnel keeps counting
+  pricing-page sign-ups
