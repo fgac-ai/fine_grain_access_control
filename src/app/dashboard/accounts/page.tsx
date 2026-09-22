@@ -15,6 +15,11 @@ import { AddDelegatedAccountButton } from './AddDelegatedAccountButton';
 import { ReconnectGoogleButton } from './ReconnectGoogleButton';
 import { checkGoogleAccess } from '../googleAccess';
 import { clerkPrimaryEmail } from '@/lib/clerkPrimaryEmail';
+import { DELEGATE_TO_PARAM, isDelegateTarget } from '@/lib/secondAccount';
+import { accountAgeSeconds, delegationAlreadyActive, delegationTargetById } from '@/lib/delegationTargets';
+import { captureServerEvent } from '@/lib/posthogServer';
+import { DelegateToPanel } from '../DelegateToPanel';
+import { SecondAccountBanner } from '../SecondAccountBanner';
 
 export default async function AccountsPage({
   searchParams,
@@ -40,8 +45,62 @@ export default async function AccountsPage({
   // hold instead. The comparison is against every address this user could
   // legitimately be — identity drift between users.email and the Clerk/Google
   // records must not false-alarm.
-  const rawFor = (await searchParams).for;
+  const sp = await searchParams;
+  const rawFor = sp.for;
   const intendedFor = typeof rawFor === 'string' && rawFor.includes('@') ? rawFor : null;
+
+  // Delegate link (src/lib/secondAccount.ts): `?delegate_to=<users.id>` names
+  // the account that wants THIS mailbox. Whoever opens it signed in is the
+  // mailbox owner, so the page renders the one-click confirm — or says why
+  // not: it is their own link (open it as the other account), the target is
+  // gone, or the delegation already exists.
+  const rawTarget = sp[DELEGATE_TO_PARAM];
+  let delegateLanding: React.ReactNode = null;
+  if (isDelegateTarget(rawTarget)) {
+    const target = await delegationTargetById(rawTarget);
+    const isSelf = !!target && (target.userId === dbUser.id || target.email.toLowerCase() === dbUser.email.toLowerCase());
+    const already = !!target && !isSelf && await delegationAlreadyActive(dbUser.email, target.email);
+    const state = !target ? 'missing' : isSelf ? 'self' : already ? 'already_active' : 'offer';
+    captureServerEvent(user.id, 'delegation_prompt_shown', {
+      surface: 'accounts_link',
+      state,
+      account_age_s: accountAgeSeconds(dbUser.createdAt),
+    });
+    delegateLanding = state === 'offer' && target ? (
+      <DelegateToPanel
+        targetMasked={target.maskedEmail}
+        signedInEmail={dbUser.email}
+        surface="accounts_link"
+        target={{ kind: 'user', userId: target.userId }}
+        prominent
+      />
+    ) : (
+      <div
+        className="rounded-md border border-border bg-card px-4 py-3 text-sm text-muted-foreground"
+        data-testid="delegate-link-notice"
+        data-state={state}
+      >
+        {state === 'self' && (
+          <>
+            <strong className="text-foreground">This is your own account link.</strong> It attaches
+            another Gmail account to <strong className="text-foreground">{dbUser.email}</strong> — open it
+            signed in as the account you want to add (sign out, then sign in with that Google account),
+            or paste it into the browser profile where that account is signed in.
+          </>
+        )}
+        {state === 'already_active' && target && (
+          <>
+            <strong className="text-foreground">{dbUser.email}</strong> is already attached to{' '}
+            <strong className="text-foreground">{target.maskedEmail}</strong>&apos;s account — nothing more
+            to do here. Manage it under Delegations You&apos;ve Granted below.
+          </>
+        )}
+        {state === 'missing' && (
+          <>The account this link points at no longer exists. Ask for a fresh link from its Accounts page.</>
+        )}
+      </div>
+    );
+  }
   const viewerEmails = new Set(
     [
       dbUser.email,
@@ -78,7 +137,10 @@ export default async function AccountsPage({
   const activeDelegationsToMe = delegationsToMe.filter(d => d.status === 'active');
 
   return (
+    <>
+    <SecondAccountBanner currentClerkUserId={user.id} currentEmail={dbUser.email} accountCreatedAt={dbUser.createdAt} />
     <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+      {delegateLanding && <div className="max-w-2xl">{delegateLanding}</div>}
       <div className="max-w-2xl">
         <h1 className="text-2xl font-bold text-foreground">Accounts</h1>
         <p className="mt-1.5 text-sm text-muted-foreground">
@@ -178,7 +240,7 @@ export default async function AccountsPage({
             <CardHeader
               title="Accessible Gmail Accounts"
               subtitle="Mailboxes you can scope agent profiles against."
-              action={<AddDelegatedAccountButton />}
+              action={<AddDelegatedAccountButton userId={dbUser.id} />}
             />
             <div className="px-5 pb-5 space-y-2">
               <div className="flex items-center justify-between gap-2 rounded-sm border border-border bg-card px-4 py-3">
@@ -211,17 +273,16 @@ export default async function AccountsPage({
               ))}
 
               <p className="pt-1.5 text-[12px] leading-relaxed text-muted-foreground">
-                Want your agent in another inbox? Every extra mailbox — your
-                own second account included — is granted by signing in to FGAC
-                as that account and delegating it to this one. Watch the{' '}
+                Want your agent in another inbox? Click <strong>+ Add account</strong>{' '}
+                above for a link: open it signed in as that Gmail account — your
+                own second account or someone else&apos;s — and one click attaches
+                the mailbox here. No second FGAC account needed. Walkthrough:{' '}
                 <Link
                   href="/use-cases/multiple-gmail-accounts"
                   className="text-primary underline underline-offset-2"
                 >
-                  multi-account setup walkthrough
-                </Link>{' '}
-                (with video), or click <strong>+ Add account</strong>{' '}above
-                for the steps.
+                  multiple Gmail accounts
+                </Link>.
               </p>
             </div>
           </Card>
@@ -288,5 +349,6 @@ export default async function AccountsPage({
         </div>
       </div>
     </div>
+    </>
   );
 }

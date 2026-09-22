@@ -203,6 +203,33 @@ Owner (user_a@example.com)              Delegate (user_b@example.com)
 5. Click **"Grant"**.
 6. The delegation is **active immediately** — no approval step needed from the delegate.
 
+**The one-click way (your own second Gmail account, or anyone else's)** —
+since 2026-09-21 you do not have to walk the other person (or yourself)
+through the steps above:
+
+1. On **Accounts**, click **+ Add account**. The dialog shows a link of the
+   form `https://fgac.ai/dashboard/accounts?delegate_to=…` — it names *your*
+   account as the one that should receive the mailbox.
+2. Open that link **signed in to FGAC as the account you want to add**. For
+   your own second Gmail, click **Switch account now** in the dialog (it signs
+   you out and brings you back to the link, where you sign in with the other
+   Google account); for someone else, send them the link — they sign up with
+   that Google account if they haven't, then open it.
+3. The Accounts page asks *"Attach \<that mailbox\> to \<your account\>?"*
+   and, after a confirm step that names the mailbox and how to revoke, grants
+   the delegation in one click. The mailbox appears on your Accounts page and
+   in your Default Profile automatically.
+
+> [!TIP]
+> **You never need a second FGAC account for a second Gmail.** If you end up
+> with one anyway, FGAC notices: signing in as the new account right after the
+> old one in the same browser shows *"You were signed in as … a moment ago —
+> is that also you?"* with the same one-click attach; and opening the first
+> account's approval link while signed in as the second offers to attach the
+> second mailbox to the first before you switch back. Both name the other
+> account masked (e.g. `k•••••h@example.com`) and never write anything without
+> the confirm step.
+
 **As the Delegate** (the person whose agent will access the owner's email):
 
 1. Sign in to SecureAgent with your own Google account.

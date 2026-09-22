@@ -15,6 +15,8 @@ FGAC supports two paths for a key to access multiple email accounts:
 2. **Delegated email** — Another FGAC user grants you access via "Delegation Management". USER_B must sign up separately, then delegate their email to USER_A.
 
 > **Note for browser agents:** Multi-email is NOT done by connecting two Google accounts in Clerk. It is done via the delegation system — two separate FGAC users where one delegates to the other.
+>
+> Since 2026-09-21 there are three one-click ways to grant it besides the typed-email form in Test 3 (capability 04 A9–A10, capability 14 A19): USER_A's **+ Add account** dialog hands out a link that USER_B opens and confirms; a fresh sign-in as USER_B right after USER_A used this browser shows USER_B a "was that also you?" prompt; and USER_A's approval link opened as USER_B offers the same. Any of them leaves the baseline in the state Test 4 expects. Because the prompt and the wall test both need NO active USER_B → USER_A delegation, run those capability assertions BEFORE Test 3, or revoke and re-grant around them.
 
 ---
 

@@ -59,9 +59,11 @@ export default function MultipleGmailAccountsPage() {
               ). Your own inbox works immediately, read-only by default.
             </li>
             <li>
-              A teammate, assistant-holder, or your other account&apos;s owner
-              (you!) signs in to their own FGAC dashboard and delegates their
-              inbox — no password sharing, no Google Workspace admin needed.
+              Click <strong>+ Add account</strong> on your Accounts page and
+              open the link it gives you signed in as the other Gmail account
+              — your own second inbox, or a teammate&apos;s (send it to them).
+              One click there delegates that inbox to you — no password
+              sharing, no Google Workspace admin, no second FGAC account.
             </li>
             <li>
               That&apos;s it — the delegated inbox attaches to your Default
