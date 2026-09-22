@@ -174,6 +174,18 @@ Notes:
    require and simply carry on. Clicking through Google's account chooser and Clerk's
    OAuth consent for these two accounts is included in this standing approval.
 
+   **Accepting Google grants on the QA accounts is pre-approved, permanently (Ken,
+   2026-09-21: "QA agent is explicitly given permission to accept grants on test
+   accounts. No need to check with me in the future").** That covers every grant
+   screen these two accounts can meet on a local or preview build: first consent,
+   re-consent after a revoked or expired grant (the capability 18 fixtures), scope
+   re-grants (drive.file after a narrowing sign-in), the Accounts-page reconnect
+   flows, and the Google Picker's per-file grants. Click Allow and carry on; never
+   report a consent screen as needing the user, never end a turn or a QA run asking
+   whether to accept one. The only screens that still stop a flow are the ones the
+   next rule names (a password, passkey, Okta/SSO, or 2FA prompt) — and those are
+   reported in one line as the session having lapsed, not as a question.
+
    Do not ask again. Do not end a turn asking whether you may switch. Do not treat a
    previous approval as single-use — this rule *is* the approval, permanently, for every
    QA run. If a test needs the other account, switch and keep going.
