@@ -538,7 +538,60 @@ attributable to it.
   what the task passes (`monitoring.md` 7.26d); before 2026-09-16 that value
   had to be inferred from `response_chars`
 
-### A26: The pricing fake door is measurable per plan
+### A26: SDK input-validation failures name the rejected argument
+- Through the environment's MCP client, call `gmail_read` with `{"id": "x"}`
+  (the key `id` in place of `messageId`), then `sheets_update_range` with
+  `values` passed as the STRING `"[[1]]"` (any spreadsheetId/range — the
+  SDK rejects the shape before FGAC's rule check runs), then a tool that
+  does not exist (`gmail_search` with `{"query": "is:unread"}`). Each call
+  returns an `isError` result whose text starts `MCP error -32602:`.
+- Query: `SELECT properties.tool, properties.kind, properties.first_issue_path,
+  properties.first_issue_code, properties.first_issue_expected,
+  properties.first_issue_received, properties.sent_keys, properties.issue_count,
+  properties.issues_parsed, properties.message FROM events WHERE event =
+  'mcp_input_validation_failed' AND properties.environment = '<tier>' AND
+  timestamp >= now() - INTERVAL 1 HOUR ORDER BY timestamp`
+- **Expected**: three rows. `gmail_read`: `kind: 'invalid_arguments'`,
+  `first_issue_path: 'messageId'`, `first_issue_code: 'invalid_type'`,
+  `first_issue_expected: 'string'`, `first_issue_received: 'undefined'`,
+  `sent_keys: ['id']`, `issues_parsed: true`, `issue_count: 1`.
+  `sheets_update_range`: `first_issue_path: 'values'`,
+  `first_issue_expected: 'array'`, `first_issue_received: 'string'`,
+  `sent_keys` containing `values`. `gmail_search`: `kind: 'unknown_tool'`,
+  `sent_keys: ['query']`, no `first_issue_*` props. Every `message` is a
+  single line, at most 300 characters, and contains the issue JSON (the
+  word `messageId` appears in the gmail_read row's message) — never the
+  argument VALUES (`x` and `[[1]]` appear nowhere in the properties).
+- **Regression guard**: a `message` ending in `Invalid arguments for tool
+  gmail_read: [` is the pre-2026-09-17 truncation returning — the capture
+  regex has replaced `parseValidationFailure` (`monitoring.md` 7.10a).
+
+### A27: The pending-approvals banner is measurable end to end
+- Run capability 14 A18, then query the user's events for the last hour:
+  `SELECT event, properties.pending_count, properties.request_ids,
+  properties.oldest_pending_s, properties.request_id, properties.action,
+  properties.link_source FROM events WHERE event IN
+  ('approval_banner_shown','approval_banner_clicked','approval_link_opened',
+  'approval_link_approved','approval_banner_dismissed') AND timestamp >= now()
+  - INTERVAL 1 HOUR ORDER BY timestamp`
+- **Expected**: an `approval_banner_shown` row per dashboard render that had
+  something pending, with `pending_count` matching the items shown,
+  `request_ids` listing them, and `oldest_pending_s` a small number; one
+  `approval_banner_clicked {request_id, action, pending_count}` for the
+  "Review" click; the approve page's `approval_link_opened` on the same
+  `request_id` carries `link_source: 'banner'` (an open from the agent's URL
+  still says `'agent'`, from the reminder email `'email'`); the approval is
+  the usual `approval_link_approved`; the "Dismiss" click is one
+  `approval_banner_dismissed {request_id, action}` and the next dashboard
+  render's `approval_banner_shown` (if any) no longer lists that id — until
+  the re-mint in A18 brings it back. A dashboard render with nothing pending
+  emits no banner row at all
+- **Why**: `monitoring.md` 7.25 judges the banner on requests opened via it
+  out of the never-opened pool, and on the approved share after a banner
+  open; without `link_source: 'banner'` those opens would be counted as the
+  agent's URL working
+
+### A28: The pricing fake door is measurable per plan
 - In the built-in browser, open `/pricing` on the environment under test
   signed out. Toggle the interval to Annual, click **Get Pro**, then click
   **Sign up free** in the dialog (the Clerk modal opens — close it, do not

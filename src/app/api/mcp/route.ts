@@ -33,7 +33,7 @@ import { captureServerEvent } from '@/lib/posthogServer';
 import { runWithToolCallProps, addToolCallProps, getToolCallProps } from '@/lib/toolCallContext';
 import { cleanResourceName } from '@/lib/pickerRecoveryCopy';
 import { GOOGLE_FETCH_TIMEOUT_MS, CLERK_TOKEN_TIMEOUT_MS, withTimeout, isUpstreamTimeout } from '@/lib/upstreamTimeouts';
-import { classifyMcpClient, classifyTransportRejection, installFingerprint, parseInitializeClientInfo, parseRpcEnvelope, resourceIdHash, type McpClientInfo } from '@/lib/mcpClientSignals';
+import { classifyMcpClient, classifyTransportRejection, installFingerprint, parseInitializeClientInfo, parseRpcEnvelope, parseValidationFailure, resourceIdHash, validationFailureProps, type McpClientInfo } from '@/lib/mcpClientSignals';
 import { recordEagerResolve, shouldSkipEagerResolve } from '@/lib/connectionTouchMemo';
 import { after } from 'next/server';
 import { notifyOwnerOfAccountRefusal, notifyOwnerOfApprovalLinks, type NotifyLink } from '@/lib/approvalNotify';
@@ -41,7 +41,7 @@ import { accountRefusalDenialLine, notifyDenialLine } from '@/lib/approvalNotify
 import { normalizeRequestedEmail } from '@/lib/accountRefusals';
 import { inSuccessSample, AUTH_SUCCESS_SAMPLE } from '@/lib/authSampling';
 import { ensureDefaultProfile } from '@/db/defaultProfile';
-import { mintApprovalLink, describeApproval, type ApprovalAction, type ApprovalPayload } from '@/lib/approvalLinks';
+import { mintApprovalLink, describeApproval, actionTarget, fileApprovalActionFor, fileIdFields, type ApprovalAction, type ApprovalPayload } from '@/lib/approvalLinks';
 import { connectionsDeepLink } from '@/lib/dashboardAgentLinks';
 import { recordApprovalMint, getApprovalRequestResourceName } from '@/lib/approvalRequests';
 import {
@@ -51,12 +51,12 @@ import {
 import { TOOL_DEFS, toolAnnotations, type FgacToolDef } from './toolDefs';
 import {
   classifyGoogleApiCall, canonicalizeGoogleApiPath, extractSendRecipients, extractDraftSendInfo,
-  sheetsApprovalAction, docsApprovalAction, parseDriveFileId,
+  fileApprovalAction, parseDriveFileId, driveFileKindForPath,
   templateGoogleApiPath, rawApiFamily, extractGoogleErrorReason,
   RAW_MODIFY_METHODS, isForwardableGoogleMethod, methodDenial,
   type RawCallClass, type GoogleErrorReason,
 } from './googleApiPolicy';
-import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, kindForMimeType, type DriveFileKind } from '@/lib/driveFileKinds';
+import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, kindForMimeType, kindForService, kindForRequestType, type DriveFileKind } from '@/lib/driveFileKinds';
 import { clerkPrimaryEmail } from '@/lib/clerkPrimaryEmail';
 import { ownClerkEmailMatch } from '@/lib/identityDrift';
 import { slugifyProfileLabel } from '@/lib/profileSlugs';
@@ -66,6 +66,10 @@ import {
   type GoogleTokenFailureReason,
 } from '@/lib/googleTokenFailure';
 import { liveTokenScopes, reconcileScopes } from '@/lib/googleTokenScopes';
+import {
+  classifyGoogleBadRequest, extractFieldViolations, renderBadRequest, googleApiFamilyForUrl,
+  type GoogleBadRequest, type GoogleApiFamily, type SheetTab,
+} from '@/lib/googleBadRequestCopy';
 
 /** Env URL values have shipped with trailing whitespace/newlines (pasted
  * Vercel vars); a whitespace-only value must also not win the fallback chain.
@@ -668,9 +672,9 @@ async function policyDenialWithLink(
   // say so, or the agent gets "Access Denied" and tries again.
   if (!action) return textResult(withNoLinkStop(message));
   try {
-    const { url, requestId, targetHash } = await mintApprovalLink(DASHBOARD_URL, conn.user.id, proxyKeyId, action);
+    const { url, query, requestId, targetHash } = await mintApprovalLink(DASHBOARD_URL, conn.user.id, proxyKeyId, action);
     const mintCount = await recordApprovalMint({
-      requestId, userId: conn.user.id, proxyKeyId, action: action.action, targetHash,
+      requestId, userId: conn.user.id, proxyKeyId, action: action.action, targetHash, linkQuery: query,
     });
     // Out-of-band delivery (2026-09-15): when the agent asks for the SAME
     // link again and the person has still not opened it, FGAC emails the
@@ -728,8 +732,10 @@ function approvalPayloadFor(userId: string, proxyKeyId: string, action: Approval
   return {
     userId, proxyKeyId, action: action.action, requestId,
     recipient: action.action === 'send_whitelist' ? action.recipient : undefined,
-    spreadsheetId: action.action === 'sheets_expose' || action.action === 'sheets_write' ? action.spreadsheetId : undefined,
-    documentId: action.action === 'docs_expose' || action.action === 'docs_write' ? action.documentId : undefined,
+    // Per-file actions carry their id under the kind's own key
+    // (spreadsheetId / documentId / presentationId) — same helper the link
+    // verifier uses, so the two payloads cannot disagree.
+    ...fileIdFields(action.action, actionTarget(action)),
     resourceName: 'resourceName' in action ? action.resourceName : undefined,
   };
 }
@@ -765,7 +771,7 @@ async function sendDenialWithLinks(
       lines.push(`👉 Allow sending to '${denial.deniedRecipient}' only — share this one-click link with the user: ${one.url}`);
       const oneMintCount = await recordApprovalMint({
         requestId: one.requestId, userId: conn.user.id, proxyKeyId,
-        action: 'send_whitelist', targetHash: one.targetHash,
+        action: 'send_whitelist', targetHash: one.targetHash, linkQuery: one.query,
       });
       emailLinks.push({
         requestId: one.requestId, action: 'send_whitelist', url: one.url,
@@ -779,7 +785,7 @@ async function sendDenialWithLinks(
     const all = await mintApprovalLink(DASHBOARD_URL, conn.user.id, proxyKeyId, { action: 'send_all' });
     lines.push(`👉 Or allow sending to ANY recipient from this profile — share this one-click link with the user instead: ${all.url}`);
     const allMintCount = await recordApprovalMint({
-      requestId: all.requestId, userId: conn.user.id, proxyKeyId, action: 'send_all',
+      requestId: all.requestId, userId: conn.user.id, proxyKeyId, action: 'send_all', linkQuery: all.query,
     });
     emailLinks.push({
       requestId: all.requestId, action: 'send_all', url: all.url,
@@ -811,7 +817,14 @@ async function sendDenialWithLinks(
 
 type GoogleFetchResult =
   | { ok: true; data: unknown }
-  | { ok: false; error: string; status?: number };
+  /** `reason` is Google's error reason enum when the body carried one
+   * (`SERVICE_DISABLED`, `insufficientPermissions`, …). */
+  | {
+    ok: false; error: string; status?: number; reason?: string;
+    /** Set on 400 INVALID_ARGUMENT: what Google objected to, so per-tool
+     * result sites can add remedies the fetch layer cannot (sheet tabs). */
+    badRequest?: GoogleBadRequest;
+  };
 
 // GoogleErrorReason / extractGoogleErrorReason moved to googleApiPolicy.ts
 // (pure parsing, now unit-tested — it also reads the gRPC-style
@@ -869,13 +882,24 @@ function describe403(detail: string, targetEmail: string, r: GoogleErrorReason):
     `Retry ONCE after a short pause — if it fails again it is the grant, not throttling, and reconnecting is the fix: ${reconnectLink(targetEmail)}`;
 }
 
-function describeGoogleError(status: number, data: unknown, targetEmail: string): string {
+function describeGoogleError(
+  status: number, data: unknown, targetEmail: string,
+  family: GoogleApiFamily = 'other', badRequest?: GoogleBadRequest,
+): string {
   // Google's `message` usually ends in a period and every call site appends
   // its own, producing "…scopes.." in agent-facing text.
   const detail = ((data as { error?: { message?: string } })?.error?.message
     || (typeof data === 'string' ? data.slice(0, 300) : '')).replace(/\s*\.\s*$/, '');
   const r = extractGoogleErrorReason(data);
   switch (status) {
+    case 400: {
+      // Largest tool-error class (7 d to 2026-09-18) and, until now, the only
+      // 4xx with no remedy and no stop line. Google's cause can sit in
+      // fieldViolations under a generic message, so the detail merges it;
+      // the guidance is per kind (src/lib/googleBadRequestCopy.ts) and the
+      // sheets result site appends the tab list on range errors.
+      return renderBadRequest(badRequest ?? classifyGoogleBadRequest(detail, extractFieldViolations(data)), family);
+    }
     case 401:
       return `❌ Google authorization expired for '${targetEmail}'. STOP — do not retry; it will keep failing. ` +
         `Ask the user to reconnect this Google account with this one-click link (it opens Google's consent screen directly): ` +
@@ -950,6 +974,15 @@ async function googleFetch(
     // from a revoked grant. See extractGoogleErrorReason for why these are
     // safe to put on an event.
     const r = extractGoogleErrorReason(data);
+    // 400s: which argument Google objected to (range, values shape, request
+    // index, fields mask). Kind strings are FGAC's own enum, never customer
+    // data; `bad_request_index` is a position in the caller's array.
+    const badRequest = res.status === 400
+      ? classifyGoogleBadRequest(
+        (data as { error?: { message?: string } })?.error?.message ?? (typeof data === 'string' ? data : ''),
+        extractFieldViolations(data),
+      )
+      : undefined;
     addToolCallProps({
       error_status: res.status,
       // Fall back to Google's canonical status string (PERMISSION_DENIED,
@@ -958,8 +991,16 @@ async function googleFetch(
       // triaged by cause at all.
       ...(r.reason || r.status ? { error_reason: r.reason ?? r.status } : {}),
       ...(r.domain ? { error_domain: r.domain } : {}),
+      ...(badRequest ? { bad_request_kind: badRequest.kind } : {}),
+      ...(badRequest?.requestIndex !== undefined ? { bad_request_index: badRequest.requestIndex } : {}),
     });
-    return { ok: false, error: describeGoogleError(res.status, data, targetEmail), status: res.status };
+    return {
+      ok: false,
+      error: describeGoogleError(res.status, data, targetEmail, googleApiFamilyForUrl(url), badRequest),
+      status: res.status,
+      reason: r.reason ?? r.status,
+      badRequest,
+    };
   }
   return { ok: true, data };
 }
@@ -983,14 +1024,28 @@ async function googleFetch(
  * layer, so internal observability is unaffected. Other statuses stay
  * errorResult.
  */
-function fileGrantErrorResult(kind: DriveFileKind, result: { error: string; status?: number }, fileId: string) {
+function fileGrantErrorResult(kind: DriveFileKind, result: { error: string; status?: number; reason?: string }, fileId: string) {
+  if (result.status === 403 && result.reason === 'SERVICE_DISABLED') {
+    // The product's API is not enabled on the GCP project behind this
+    // environment's OAuth client (Slides on production until the console
+    // step is done). No grant, rule, or Picker pass can fix that — sending
+    // the user to the setup page would loop forever, so name the real cause
+    // and stop the agent. `api_disabled` keeps it separable from grant gaps.
+    const d = DRIVE_FILE_KINDS[kind];
+    addToolCallProps({ denial_code: 'api_disabled' });
+    return textResult(
+      `🚫 Not available: the ${d.productName} API is not enabled for FGAC's Google project, so Google refused this call (403 SERVICE_DISABLED). ` +
+      `This is a configuration step on FGAC's side — not a permission the user can grant, and no retry, re-approval, or Picker step will help. ` +
+      `Tell the user that ${d.productName} access is not yet available in FGAC and to contact support@fgac.ai; Gmail and the other file types are unaffected.`,
+    );
+  }
   if (result.status === 403 || result.status === 404) {
     const d = DRIVE_FILE_KINDS[kind];
-    const short = kind === 'sheet' ? 'sheet' : d.noun;
+    const short = d.shortNoun;
     addToolCallProps({ denial_code: 'file_grant_missing_at_google' });
     // Only the sheets setup page embeds a demo video today — the error must
-    // not promise docs users a video that isn't there (QA 19 A12 finding).
-    const setupBlurb = kind === 'sheet' ? ' (includes a short how-to video)' : '';
+    // not promise docs/slides users a video that isn't there (QA 19 A12 finding).
+    const setupBlurb = d.hasSetupVideo ? ' (includes a short how-to video)' : '';
     return textResult(
       `🚫 Not available yet: FGAC allows this ${d.noun}, but Google hasn't shared the ${short} itself with FGAC, so Google rejected the call (${result.status}). ` +
       `This is a one-time setup step only the user can do: they must pick this ${short} in Google's file picker. ` +
@@ -1110,8 +1165,51 @@ function gmailNotFoundResult(
   );
 }
 
-const sheetsErrorResult = (result: { error: string; status?: number }, spreadsheetId: string) =>
-  fileGrantErrorResult('sheet', result, spreadsheetId);
+/**
+ * Sheets typed-tool failure. On a 400 whose cause is the range (a tab that
+ * does not exist, or a range past the grid), one metadata GET lists the
+ * spreadsheet's tabs into the error — the rule exists and the token just
+ * worked (the 400 came from Google after FGAC's own check passed), so the
+ * call is permitted and costs the agent nothing. Measured before (7 d to
+ * 2026-09-18): the recovery agents performed on their own was exactly this
+ * read (`sheets_get_spreadsheet` within ~13 s of the 400), repeated in every
+ * new conversation because the guessed tab name ('Sheet1') never learns. The
+ * lookup is best-effort — a failure leaves the generic pointer at
+ * sheets_get_spreadsheet in place — and `sheet_tabs_listed` counts how often
+ * the list was actually shown (docs/monitoring.md 7.28).
+ */
+async function sheetsErrorResult(
+  result: { error: string; status?: number; reason?: string; badRequest?: GoogleBadRequest },
+  spreadsheetId: string,
+  ctx?: { token: string; targetEmail: string },
+) {
+  const kind = result.badRequest?.kind;
+  if (result.status === 400 && ctx && (kind === 'range_parse' || kind === 'grid_limits')) {
+    const tabs = await listSheetTabs(ctx.token, spreadsheetId, ctx.targetEmail);
+    addToolCallProps({ sheet_tabs_listed: tabs?.length ?? 0 });
+    // Same prefix and Google detail as the fetch layer rendered, with the
+    // tab list in place of the tab-less pointer at sheets_get_spreadsheet.
+    return errorResult(renderBadRequest(result.badRequest!, 'sheets', tabs ?? []));
+  }
+  return fileGrantErrorResult('sheet', result, spreadsheetId);
+}
+
+/** Tab titles and grid sizes, or null when the metadata read itself fails. */
+async function listSheetTabs(token: string, spreadsheetId: string, targetEmail: string): Promise<SheetTab[] | null> {
+  const meta = await sheetsFetch(
+    token, `${spreadsheetId}?fields=${encodeURIComponent('sheets.properties(title,gridProperties(rowCount,columnCount))')}`,
+    'GET', undefined, targetEmail,
+  );
+  if (!meta.ok) return null;
+  const sheets = (meta.data as { sheets?: Array<{ properties?: { title?: string; gridProperties?: { rowCount?: number; columnCount?: number } } }> })?.sheets;
+  if (!Array.isArray(sheets)) return null;
+  return sheets.flatMap(s => {
+    const p = s?.properties;
+    return p && typeof p.title === 'string'
+      ? [{ title: p.title, rowCount: p.gridProperties?.rowCount, columnCount: p.gridProperties?.columnCount }]
+      : [];
+  });
+}
 const docsErrorResult = (result: { error: string; status?: number }, documentId: string) =>
   fileGrantErrorResult('doc', result, documentId);
 
@@ -1126,6 +1224,10 @@ async function sheetsFetch(token: string, path: string, method = 'GET', body?: s
 
 async function docsFetch(token: string, path: string, method = 'GET', body?: string, targetEmail = ''): Promise<GoogleFetchResult> {
   return googleFetch(`https://docs.googleapis.com/v1/documents/${path}`, token, method, body, targetEmail);
+}
+
+async function slidesFetch(token: string, path: string, method = 'GET', body?: string, targetEmail = ''): Promise<GoogleFetchResult> {
+  return googleFetch(`https://slides.googleapis.com/v1/presentations/${path}`, token, method, body, targetEmail);
 }
 
 /** How recently a matching per-file rule must have been created for a 403/404
@@ -1304,7 +1406,7 @@ async function checkFilePermission(kind: DriveFileKind, userId: string, proxyKey
     return (isGlobal || isAssigned) && matchesId;
   });
 
-  const nounCap = d.noun.charAt(0).toUpperCase() + d.noun.slice(1);
+  const nounCap = d.nounCap;
   if (fileRules.length === 0) {
     addToolCallProps({ denial_code: `${d.service}_not_exposed` });
     return { allowed: false as const, denial: 'not_exposed' as const, reason: `🚫 Access Denied: ${nounCap} '${fileId}' is not exposed in your FGAC rules.` };
@@ -1353,13 +1455,13 @@ const checkDocsPermission = (userId: string, proxyKeyId: string, documentId: str
  * (`url` / `suffixed` on extraction, `malformed` on refusal; absent for a
  * bare id) so URL-pasting agents stay countable.
  */
-function resolveDriveFileId(kind: 'sheet' | 'doc' | 'file', raw: string): { id: string } | { denial: ReturnType<typeof textResult> } {
+function resolveDriveFileId(kind: DriveFileKind | null, raw: string): { id: string } | { denial: ReturnType<typeof textResult> } {
   const parsed = parseDriveFileId(raw, kind);
   if (!parsed.ok) {
     addToolCallProps({
       denial_code: parsed.code,
       file_id_input: parsed.code === 'file_id_wrong_kind' ? 'url' : 'malformed',
-      ...(kind === 'file' ? {} : { file_service: DRIVE_FILE_KINDS[kind].service }),
+      ...(kind ? { file_service: DRIVE_FILE_KINDS[kind].service } : {}),
     });
     return { denial: textResult(parsed.reason) };
   }
@@ -1367,18 +1469,17 @@ function resolveDriveFileId(kind: 'sheet' | 'doc' | 'file', raw: string): { id: 
   return { id: parsed.id };
 }
 
-/** Map a sheets denial onto an approvable action matching the access level
- * the denied operation requires (see sheetsApprovalAction in googleApiPolicy). */
-function sheetsDenialAction(perm: SheetsPermission, spreadsheetId: string, isMutating: boolean): ApprovalAction | null {
+/** Map a per-file denial onto an approvable action matching the access level
+ * the denied operation requires (see fileApprovalAction in googleApiPolicy),
+ * for any kind — the action's id key follows the kind's descriptor. */
+function fileDenialAction(kind: DriveFileKind, perm: FilePermission, fileId: string, isMutating: boolean): ApprovalAction | null {
   if (perm.allowed) return null;
-  return sheetsApprovalAction(perm.denial, spreadsheetId, isMutating);
+  return fileApprovalAction(kind, perm.denial, fileId, isMutating);
 }
-
-/** Docs twin of sheetsDenialAction. */
-function docsDenialAction(perm: FilePermission, documentId: string, isMutating: boolean): ApprovalAction | null {
-  if (perm.allowed) return null;
-  return docsApprovalAction(perm.denial, documentId, isMutating);
-}
+const sheetsDenialAction = (perm: SheetsPermission, spreadsheetId: string, isMutating: boolean) =>
+  fileDenialAction('sheet', perm, spreadsheetId, isMutating);
+const docsDenialAction = (perm: FilePermission, documentId: string, isMutating: boolean) =>
+  fileDenialAction('doc', perm, documentId, isMutating);
 
 /**
  * Per-file check for calls that address a file by bare Drive file id (Drive
@@ -1405,9 +1506,7 @@ async function checkResolvedDriveFile(
 ): Promise<{ denial: Awaited<ReturnType<typeof policyDenialWithLink>> } | { kind: DriveFileKind; perm: FilePermission }> {
   const perm = await checkFilePermission(kind, conn.user.id, proxyKeyId, fileId, isMutating);
   if (!perm.allowed) {
-    const action = kind === 'doc'
-      ? docsApprovalAction(perm.denial, fileId, isMutating)
-      : sheetsApprovalAction(perm.denial, fileId, isMutating);
+    const action = fileApprovalAction(kind, perm.denial, fileId, isMutating);
     return { denial: await policyDenialWithLink(conn, proxyKeyId, perm.reason, action) };
   }
   return { kind, perm };
@@ -1422,7 +1521,7 @@ async function checkDriveFilePermission(
   const kind = await driveFileKindFromRules(conn.user.id, fileId);
   if (!kind) {
     addToolCallProps({ denial_code: 'file_not_exposed' });
-    return { denial: textResult(`🚫 Access Denied: File '${fileId}' is not exposed in your FGAC rules. Ask the user to expose the document or spreadsheet via the dashboard picker, or call request_access with the file id.`) };
+    return { denial: textResult(`🚫 Access Denied: File '${fileId}' is not exposed in your FGAC rules. Ask the user to expose the file (spreadsheet, document, or presentation) via the dashboard picker, or call request_access with the file id.`) };
   }
   return checkResolvedDriveFile(conn, proxyKeyId, kind, fileId, isMutating);
 }
@@ -1434,12 +1533,12 @@ async function checkDriveFilePermission(
  * the file decides (Blocked denies; mutations need Read & Write; reads pass
  * with any rule). Where the two differ is a file NO rule names. The proxy
  * denies it outright; that is wrong here because FGAC has rule types only
- * for Sheets and Docs, so a flat denial would strand every other kind
- * forever — the agent's own `text/plain` creations (drive_create,
- * `file_created_kind: 'other'`), PDFs the user picked, Slides until that kind
- * ships. So the route asks Google what the file IS (one metadata GET with the
+ * for Sheets, Docs, and Slides, so a flat denial would strand every other
+ * kind forever — the agent's own `text/plain` creations (drive_create,
+ * `file_created_kind: 'other'`), PDFs the user picked, forms. So the route
+ * asks Google what the file IS (one metadata GET with the
  * account's own drive.file token) and lets the answer decide:
- *   - a Sheets/Docs mimeType → the standard not-exposed denial WITH the
+ *   - a Sheets/Docs/Slides mimeType → the standard not-exposed denial WITH the
  *     approval action for the denied level (read → expose, write → write),
  *     exactly as the typed tools answer — so trashing an unexposed
  *     spreadsheet is refused and the fix is one click;
@@ -2010,9 +2109,9 @@ async function autoGrantAgentCreatedFile(
  * drive/v3/files). The Drive File resource names the product only by
  * mimeType; a caller's `fields` mask can strip it, so fetch the metadata when
  * it is missing rather than skip the grant. Files FGAC has no per-file rule
- * model for (folders, PDFs, presentations while Slides is stubbed) are
- * stamped `file_created_kind: 'other'` and left ungated — the same
- * scope-backstop posture every other Drive call has.
+ * model for (folders, PDFs, plain uploads) are stamped
+ * `file_created_kind: 'other'` and left ungated — the same scope-backstop
+ * posture every other Drive call has.
  */
 async function grantDriveCreatedFile(
   conn: ConnectionApproved,
@@ -2160,42 +2259,33 @@ async function executeRawGoogleCall(
   // Slides, and Forms live on their own subdomains (www.googleapis.com does
   // NOT serve the latter two — routing them there returned bare 404s that
   // read as missing resources); everything else rides www.googleapis.com.
-  const rawUrl = (p: string) =>
-    p.includes('spreadsheets') ? `https://sheets.googleapis.com/${p.replace(/^sheets\//, '')}`
-    : p.includes('documents') ? `https://docs.googleapis.com/${p.replace(/^docs\//, '')}`
-    : p.includes('presentations') ? `https://slides.googleapis.com/${p.replace(/^slides\//, '')}`
-    : /(^|\/)forms(\/|$)/.test(p) ? `https://forms.googleapis.com/${p.replace(/^forms\//, '')}`
-    : `https://www.googleapis.com/${p}`;
+  const rawUrl = (p: string) => {
+    const k = driveFileKindForPath(p);
+    if (k) {
+      const d = DRIVE_FILE_KINDS[k];
+      const prefix = `${d.apiPathPrefix}/`;
+      const rest = p.startsWith(prefix) ? p.slice(prefix.length) : p;
+      // The bare `presentations/{id}` / `spreadsheets/{id}` spelling the
+      // classifier accepts has no version segment; Google needs one.
+      return `https://${d.apiHost}/${rest.startsWith(`${d.apiVersion}/`) ? rest : `${d.apiVersion}/${rest}`}`;
+    }
+    return /(^|\/)forms(\/|$)/.test(p)
+      ? `https://forms.googleapis.com/${p.replace(/^forms\//, '')}`
+      : `https://www.googleapis.com/${p}`;
+  };
 
-  if (cls.kind === 'sheets_create') {
-    // Agent-created sheets are allowed and auto-granted to the calling key
-    // (read & write): the Sheets policy protects the user's EXISTING sheets,
+  if (cls.kind === 'file_create') {
+    // Agent-created files (POST v4/spreadsheets / v1/documents /
+    // v1/presentations) are allowed and auto-granted to the calling key
+    // (read & write): the per-file policy protects the user's EXISTING files,
     // not the agent's own output. The drive.file scope already limits the app
     // to picked files + files it created, so no new Google-side exposure.
-    const url = `https://sheets.googleapis.com/${cleanPath.replace(/^sheets\//, '')}`;
-    const result = await googleFetch(url, resolved.token, method, serializeBody(body), resolved.targetEmail);
-    if (!result.ok) return errorResult(result.error);
-    const created = result.data as { spreadsheetId?: unknown; properties?: { title?: unknown } };
-    const newId = typeof created?.spreadsheetId === 'string' ? created.spreadsheetId : null;
-    if (newId) {
-      const title = typeof created?.properties?.title === 'string' ? created.properties.title : null;
-      await autoGrantAgentCreatedFile(conn, resolved.proxyKeyId, 'sheet', newId, title, 'create');
-    }
-    return jsonResult(result.data);
-  }
-
-  if (cls.kind === 'docs_create') {
-    // Agent-created docs are allowed and auto-granted to the calling key
-    // (read & write), mirroring sheets_create: the Docs policy protects the
-    // user's EXISTING documents, not the agent's own output. drive.file
-    // already limits the app to picked files + files it created.
+    // The descriptor knows where each API puts the new id and title.
     const result = await googleFetch(rawUrl(cleanPath), resolved.token, method, serializeBody(body), resolved.targetEmail);
     if (!result.ok) return errorResult(result.error);
-    const created = result.data as { documentId?: unknown; title?: unknown };
-    const newId = typeof created?.documentId === 'string' ? created.documentId : null;
-    if (newId) {
-      const title = typeof created?.title === 'string' ? created.title : null;
-      await autoGrantAgentCreatedFile(conn, resolved.proxyKeyId, 'doc', newId, title, 'create');
+    const created = DRIVE_FILE_KINDS[cls.fileKind].createdFile(result.data);
+    if (created.id) {
+      await autoGrantAgentCreatedFile(conn, resolved.proxyKeyId, cls.fileKind, created.id, created.title, 'create');
     }
     return jsonResult(result.data);
   }
@@ -2208,7 +2298,7 @@ async function executeRawGoogleCall(
     // this branch the copy was scope-only passthrough: Google allowed it, no
     // rule was written, and the agent could rename/share/trash the copy
     // through Drive while every Sheets write on it denied (2026-09-16).
-    const fid = resolveDriveFileId('file', cls.fileId);
+    const fid = resolveDriveFileId(null, cls.fileId);
     if ('denial' in fid) return fid.denial;
     const check = await checkDriveFilePermission(conn, resolved.proxyKeyId, fid.id, false);
     if ('denial' in check) return check.denial;
@@ -2233,7 +2323,7 @@ async function executeRawGoogleCall(
     // rule (comment writes need Read & Write) instead of scope-only
     // passthrough. Same enforcement as the comments_read / comments_add
     // typed tools.
-    const fid = resolveDriveFileId('file', cls.fileId);
+    const fid = resolveDriveFileId(null, cls.fileId);
     if ('denial' in fid) return fid.denial;
     const check = await checkDriveFilePermission(conn, resolved.proxyKeyId, cls.fileId, cls.isMutating);
     if ('denial' in check) return check.denial;
@@ -2253,7 +2343,7 @@ async function executeRawGoogleCall(
     // REST proxy's Drive guard — see checkDriveFileAccess for the no-rule
     // policy. Before 2026-09-16 this was scope-only passthrough and a Blocked
     // spreadsheet could still be trashed via PATCH {trashed:true}.
-    const fid = resolveDriveFileId('file', cls.fileId);
+    const fid = resolveDriveFileId(null, cls.fileId);
     if ('denial' in fid) return fid.denial;
     const access = await checkDriveFileAccess(conn, resolved, fid.id, cls.isMutating);
     if ('denial' in access) return access.denial;
@@ -2278,25 +2368,17 @@ async function executeRawGoogleCall(
     return jsonResult(result.data);
   }
 
-  if (cls.kind === 'sheets') {
-    const sid = resolveDriveFileId('sheet', cls.spreadsheetId);
-    if ('denial' in sid) return sid.denial;
-    const perm = await checkSheetsPermission(conn.user.id, resolved.proxyKeyId, cls.spreadsheetId, cls.isMutating);
-    if (!perm.allowed) return policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, sheetsDenialAction(perm, cls.spreadsheetId, cls.isMutating));
+  if (cls.kind === 'file') {
+    // Id-addressed Sheets / Docs / Slides call: the kind's per-file rule
+    // decides, a denial mints the kind's approval action, and a post-policy
+    // 403/404 gets the kind's grant-recovery answer.
+    const fid = resolveDriveFileId(cls.fileKind, cls.fileId);
+    if ('denial' in fid) return fid.denial;
+    const perm = await checkFilePermission(cls.fileKind, conn.user.id, resolved.proxyKeyId, cls.fileId, cls.isMutating);
+    if (!perm.allowed) return policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, fileDenialAction(cls.fileKind, perm, cls.fileId, cls.isMutating));
 
-    const result = await withSheetsGrace(perm, () => googleFetch(rawUrl(cleanPath), resolved.token, method, serializeBody(body), resolved.targetEmail));
-    if (!result.ok) return sheetsErrorResult(result, cls.spreadsheetId);
-    return jsonResult(result.data);
-  }
-
-  if (cls.kind === 'docs') {
-    const did = resolveDriveFileId('doc', cls.documentId);
-    if ('denial' in did) return did.denial;
-    const perm = await checkDocsPermission(conn.user.id, resolved.proxyKeyId, cls.documentId, cls.isMutating);
-    if (!perm.allowed) return policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, docsDenialAction(perm, cls.documentId, cls.isMutating));
-
-    const result = await withDocsGrace(perm, () => googleFetch(rawUrl(cleanPath), resolved.token, method, serializeBody(body), resolved.targetEmail));
-    if (!result.ok) return docsErrorResult(result, cls.documentId);
+    const result = await withGrantGrace(cls.fileKind, perm, () => googleFetch(rawUrl(cleanPath), resolved.token, method, serializeBody(body), resolved.targetEmail));
+    if (!result.ok) return fileGrantErrorResult(cls.fileKind, result, cls.fileId);
     return jsonResult(result.data);
   }
 
@@ -2470,12 +2552,14 @@ const handler = createMcpHandler(
               reconnect: `'${tokenBroken.email}' has no working Google grant (${tokenBroken.google_token_failure}) — EVERY call on it will fail until it is reconnected, so do not retry. Give the user this one-click link, to be opened by ${tokenBroken.reconnect_by}: ${tokenBroken.reconnect_url}`,
             } : {}),
             gmail: "Read a mailbox with gmail_list (pass account: '<address>' to target a specific one; defaults to the primary). Reads work out of the box.",
-            sheets: driveMissing
-              ? `'${driveMissing.email}' is connected WITHOUT the drive.file scope — every Sheets call on it will fail until the account owner reconnects: ${driveMissing.reconnect_url}`
-              : 'Spreadsheet access is granted per sheet: call sheets_get_spreadsheet with a spreadsheetId, or request_access — a denial returns a one-click approval link for the user.',
-            docs: driveMissing
-              ? `'${driveMissing.email}' is connected WITHOUT the drive.file scope — every Docs call on it will fail until the account owner reconnects: ${driveMissing.reconnect_url}`
-              : 'Google Docs access is granted per document: call docs_read_document with a documentId, or request_access — a denial returns a one-click approval link for the user.',
+            // One entry per per-file kind (sheets / docs / slides), keyed by
+            // its service name, so the agent sees every file type it can reach.
+            ...Object.fromEntries(ACTIVE_DRIVE_FILE_KINDS.map(k => {
+              const d = DRIVE_FILE_KINDS[k];
+              return [d.service, driveMissing
+                ? `'${driveMissing.email}' is connected WITHOUT the drive.file scope — every ${d.productName} call on it will fail until the account owner reconnects: ${driveMissing.reconnect_url}`
+                : `${d.productName} access is granted per ${d.noun}: call ${d.tools.read} with a ${d.idKey}, or request_access — a denial returns a one-click approval link for the user.`];
+            })),
             sending: 'Email sending is off by default; the first gmail_send returns a one-click approval link the user can use to whitelist the recipient.',
             raw_api: "Anything the typed tools can't express — Gmail mailbox writes (labels, drafts, archive/mark-read, trash) and threads, Drive listing and export, creating new docs, sheets, or slides — is reachable via google_api_get / google_api_modify under the same rules (see their descriptions). The Google grant covers ONLY Gmail plus per-file Drive access (Sheets/Docs/Slides/Drive files the user picked or this agent created); People/Contacts, Calendar, Tasks, and other Google APIs are not available and calls to them are refused.",
           },
@@ -2523,8 +2607,8 @@ const handler = createMcpHandler(
       TOOL_DEFS.gmail_read.name,
       toolConfig(TOOL_DEFS.gmail_read, {
         account: z.string().optional().describe('Email account to use (see list_accounts; defaults to the primary). Ids are mailbox-specific: an id obtained on one account must be read with that same account passed here.'),
-        messageId: z.string().describe('Gmail message ID'),
-        format: z.enum(['full', 'metadata', 'minimal']).optional().describe('Response format. "full" (default) returns parsed headers, body text, and attachment metadata.'),
+        messageId: z.string().describe('Gmail message ID — the "id" of an entry returned by gmail_list (not the threadId). The parameter is named messageId.'),
+        format: z.enum(['full', 'metadata', 'minimal']).optional().describe('Response format, lowercase: "full" (default) returns parsed headers, body text, and attachment metadata; "metadata" and "minimal" are the Gmail API equivalents.'),
         offset: z.number().int().min(0).optional().describe('Start position (chars into the serialized response, body UNtruncated) for a windowed read of a long message. Use the next_offset from the previous response to continue; start at 0.'),
         limit: z.number().int().min(1).optional().describe('Max chars to return in this response (server caps at 200000). Size this to YOUR tool-result budget. Passing offset or limit switches to the windowed envelope.'),
       }),
@@ -2859,7 +2943,7 @@ const handler = createMcpHandler(
       TOOL_DEFS.sheets_read_range.name,
       toolConfig(TOOL_DEFS.sheets_read_range, {
         spreadsheetId: z.string().describe('Google Spreadsheet ID'),
-        range: z.string().describe("Cell range (e.g. 'Sheet1'!A1:D20 or 'Sheet1')"),
+        range: z.string().describe("A1 range: 'Tab name'!A1:D20 (single quotes around a tab name with spaces), or a bare tab name for the whole tab. Tab names must match an existing tab exactly — take them from sheets_get_spreadsheet rather than assuming 'Sheet1'."),
         account: z.string().optional().describe('Email account to use.'),
         offset: z.number().int().min(0).optional().describe('Start position (chars into the serialized JSON response) for a windowed read of a large range. Prefer narrowing the range first. Use the next_offset from the previous response to continue; start at 0.'),
         limit: z.number().int().min(1).optional().describe('Max chars to return in this response (server caps at 200000). Size this to YOUR tool-result budget. Passing offset or limit switches to the windowed envelope.'),
@@ -2881,7 +2965,7 @@ const handler = createMcpHandler(
 
         const encodedRange = encodeURIComponent(range);
         const result = await withSheetsGrace(perm, () => sheetsFetch(resolved.token, `${spreadsheetId}/values/${encodedRange}`, 'GET', undefined, resolved.targetEmail));
-        if (!result.ok) return sheetsErrorResult(result, spreadsheetId);
+        if (!result.ok) return sheetsErrorResult(result, spreadsheetId, resolved);
         if (offset !== undefined || limit !== undefined) {
           return windowedResult(JSON.stringify(result.data, null, 2), offset, limit, { spreadsheetId, range });
         }
@@ -2894,8 +2978,8 @@ const handler = createMcpHandler(
       TOOL_DEFS.sheets_update_range.name,
       toolConfig(TOOL_DEFS.sheets_update_range, {
         spreadsheetId: z.string().describe('Google Spreadsheet ID'),
-        range: z.string().describe("Cell range (e.g. 'Sheet1'!A1:B2)"),
-        values: z.array(z.array(z.any())).describe('2D array of cell values'),
+        range: z.string().describe("A1 range to overwrite: 'Tab name'!A1:B2 (single quotes around a tab name with spaces). The range must cover every row and column in values. Tab names must match an existing tab exactly — take them from sheets_get_spreadsheet rather than assuming 'Sheet1'."),
+        values: z.array(z.array(z.any())).describe('2D array of cell values: an array of rows, each row an array of cells, e.g. [["Name","Qty"],["Apples",3]]. Pass a real JSON array — not a JSON-encoded string, not a flat list.'),
         account: z.string().optional().describe('Email account to use.'),
       }),
       async ({ spreadsheetId, range, values, account }, { authInfo }) => {
@@ -2916,7 +3000,7 @@ const handler = createMcpHandler(
         const encodedRange = encodeURIComponent(range);
         const body = JSON.stringify({ values, range });
         const result = await withSheetsGrace(perm, () => sheetsFetch(resolved.token, `${spreadsheetId}/values/${encodedRange}?valueInputOption=USER_ENTERED`, 'PUT', body, resolved.targetEmail));
-        if (!result.ok) return sheetsErrorResult(result, spreadsheetId);
+        if (!result.ok) return sheetsErrorResult(result, spreadsheetId, resolved);
         return jsonResult({
           ...(result.data as Record<string, unknown>),
           fgac_hint: 'Values written. Formatting, charts, and structural changes: sheets_edit (same rule authorizes both).',
@@ -2929,8 +3013,8 @@ const handler = createMcpHandler(
       TOOL_DEFS.sheets_append_rows.name,
       toolConfig(TOOL_DEFS.sheets_append_rows, {
         spreadsheetId: z.string().describe('Google Spreadsheet ID'),
-        range: z.string().describe("Sheet tab or range to append to (e.g. 'Sheet1')"),
-        values: z.array(z.array(z.any())).describe('2D array of rows to append'),
+        range: z.string().describe("Tab to append to, as its exact name ('Q3 Budget') or a range on it ('Q3 Budget'!A:D). Tab names come from sheets_get_spreadsheet — do not assume a tab called 'Sheet1' exists."),
+        values: z.array(z.array(z.any())).describe('2D array of rows to append: each row an array of cells, e.g. [["Apples",3],["Pears",5]] — one inner array per row, even for a single row. Pass a real JSON array, not a JSON-encoded string.'),
         account: z.string().optional().describe('Email account to use.'),
       }),
       async ({ spreadsheetId, range, values, account }, { authInfo }) => {
@@ -2951,7 +3035,7 @@ const handler = createMcpHandler(
         const encodedRange = encodeURIComponent(range);
         const body = JSON.stringify({ values });
         const result = await withSheetsGrace(perm, () => sheetsFetch(resolved.token, `${spreadsheetId}/values/${encodedRange}:append?valueInputOption=USER_ENTERED`, 'POST', body, resolved.targetEmail));
-        if (!result.ok) return sheetsErrorResult(result, spreadsheetId);
+        if (!result.ok) return sheetsErrorResult(result, spreadsheetId, resolved);
         return jsonResult({
           ...(result.data as Record<string, unknown>),
           fgac_hint: 'Rows appended as values. Formatting or structural changes: sheets_edit (same rule authorizes both).',
@@ -2984,7 +3068,7 @@ const handler = createMcpHandler(
 
         const body = JSON.stringify({ requests });
         const result = await withSheetsGrace(perm, () => sheetsFetch(resolved.token, `${spreadsheetId}:batchUpdate`, 'POST', body, resolved.targetEmail));
-        if (!result.ok) return sheetsErrorResult(result, spreadsheetId);
+        if (!result.ok) return sheetsErrorResult(result, spreadsheetId, resolved);
         return jsonResult(result.data);
       }
     );
@@ -3070,11 +3154,83 @@ const handler = createMcpHandler(
       }
     );
 
+    // ── slides_get_presentation ───────────────────────────────────────
+    // Same shape as docs_read_document (Docs plan D4): the raw Slides API
+    // presentation resource, verbatim, with the optional `fields` mask and
+    // the windowed envelope as the size levers. Per-file rule + grant
+    // recovery ride the shared kind plumbing.
+    server.registerTool(
+      TOOL_DEFS.slides_get_presentation.name,
+      toolConfig(TOOL_DEFS.slides_get_presentation, {
+        presentationId: z.string().describe('Google Slides presentation ID — the segment after /d/ in the presentation URL; a full URL is accepted and the id extracted'),
+        fields: z.string().optional().describe('Optional Slides API field mask to trim the response (e.g. "title,slides(objectId,pageElements(shape(text)))"). Use when a full read is too large.'),
+        account: z.string().optional().describe('Email account to use.'),
+        offset: z.number().int().min(0).optional().describe('Start position (chars into the serialized JSON response) for a windowed read of a large presentation. Use the next_offset from the previous response to continue; start at 0.'),
+        limit: z.number().int().min(1).optional().describe('Max chars to return in this response (server caps at 200000). Size this to YOUR tool-result budget. Passing offset or limit switches to the windowed envelope.'),
+      }),
+      async ({ presentationId, fields, account, offset, limit }, { authInfo }) => {
+        const conn = await requireApproval(authInfo);
+        if ('content' in conn) return conn;
+
+        const resolved = await resolveAccountAndToken(conn, account);
+        if ('error' in resolved) return textResult(resolved.error);
+        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        if (scopeDenial) return scopeDenial;
+
+        const pid = resolveDriveFileId('slide', presentationId);
+        if ('denial' in pid) return pid.denial;
+        presentationId = pid.id;
+        const perm = await checkFilePermission('slide', conn.user.id, resolved.proxyKeyId, presentationId, false);
+        if (!perm.allowed) return policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, fileDenialAction('slide', perm, presentationId, false));
+
+        const query = fields ? `?fields=${encodeURIComponent(fields)}` : '';
+        const result = await withGrantGrace('slide', perm, () => slidesFetch(resolved.token, `${encodeURIComponent(presentationId)}${query}`, 'GET', undefined, resolved.targetEmail));
+        if (!result.ok) return fileGrantErrorResult('slide', result, presentationId);
+        if (offset !== undefined || limit !== undefined) {
+          return windowedResult(JSON.stringify(result.data, null, 2), offset, limit, { presentationId });
+        }
+        return jsonResult(result.data);
+      }
+    );
+
+    // ── slides_edit ───────────────────────────────────────────────────
+    // Byte-faithful presentations.batchUpdate passthrough under a Read & Write
+    // rule, like docs_edit / sheets_edit. No read-back verification: Slides
+    // has no body-index model, and Google's reply names every created object.
+    server.registerTool(
+      TOOL_DEFS.slides_edit.name,
+      toolConfig(TOOL_DEFS.slides_edit, {
+        presentationId: z.string().describe('Google Slides presentation ID'),
+        requests: z.array(z.record(z.string(), z.any())).min(1).describe('Slides API batchUpdate request objects, applied in order (e.g. createSlide, createShape, insertText, deleteText, replaceAllText, createImage, updateTextStyle, deleteObject)'),
+        account: z.string().optional().describe('Email account to use.'),
+      }),
+      async ({ presentationId, requests, account }, { authInfo }) => {
+        const conn = await requireApproval(authInfo);
+        if ('content' in conn) return conn;
+
+        const resolved = await resolveAccountAndToken(conn, account);
+        if ('error' in resolved) return textResult(resolved.error);
+        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        if (scopeDenial) return scopeDenial;
+
+        const pid = resolveDriveFileId('slide', presentationId);
+        if ('denial' in pid) return pid.denial;
+        presentationId = pid.id;
+        const perm = await checkFilePermission('slide', conn.user.id, resolved.proxyKeyId, presentationId, true);
+        if (!perm.allowed) return policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, fileDenialAction('slide', perm, presentationId, true));
+
+        const body = JSON.stringify({ requests });
+        const result = await withGrantGrace('slide', perm, () => slidesFetch(resolved.token, `${encodeURIComponent(presentationId)}:batchUpdate`, 'POST', body, resolved.targetEmail));
+        if (!result.ok) return fileGrantErrorResult('slide', result, presentationId);
+        return jsonResult(result.data);
+      }
+    );
+
     // ── comments_read ─────────────────────────────────────────────────
     server.registerTool(
       TOOL_DEFS.comments_read.name,
       toolConfig(TOOL_DEFS.comments_read, {
-        fileId: z.string().describe('Google Docs document ID or Google Sheets spreadsheet ID'),
+        fileId: z.string().describe('Google Docs document ID, Google Sheets spreadsheet ID, or Google Slides presentation ID'),
         pageToken: z.string().optional().describe('nextPageToken from a previous page of results'),
         account: z.string().optional().describe('Email account to use.'),
       }),
@@ -3087,7 +3243,7 @@ const handler = createMcpHandler(
         const scopeDenial = driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
-        const fid = resolveDriveFileId('file', fileId);
+        const fid = resolveDriveFileId(null, fileId);
         if ('denial' in fid) return fid.denial;
         fileId = fid.id;
         const check = await checkDriveFilePermission(conn, resolved.proxyKeyId, fileId, false);
@@ -3104,7 +3260,7 @@ const handler = createMcpHandler(
     server.registerTool(
       TOOL_DEFS.comments_add.name,
       toolConfig(TOOL_DEFS.comments_add, {
-        fileId: z.string().describe('Google Docs document ID or Google Sheets spreadsheet ID'),
+        fileId: z.string().describe('Google Docs document ID, Google Sheets spreadsheet ID, or Google Slides presentation ID'),
         content: z.string().describe('Comment or reply text'),
         commentId: z.string().optional().describe('Existing comment ID to reply to (from comments_read). Omit to create a new file-level comment.'),
         resolve: z.boolean().optional().describe('With commentId: also mark the comment resolved (Drive reply action "resolve")'),
@@ -3122,7 +3278,7 @@ const handler = createMcpHandler(
         const scopeDenial = driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
-        const fid = resolveDriveFileId('file', fileId);
+        const fid = resolveDriveFileId(null, fileId);
         if ('denial' in fid) return fid.denial;
         fileId = fid.id;
         const check = await checkDriveFilePermission(conn, resolved.proxyKeyId, fileId, true);
@@ -3188,8 +3344,8 @@ const handler = createMcpHandler(
         // Derived from RAW_MODIFY_METHODS so the schema, the catalog's
         // freeformMethods, the classifier and the executor cannot drift —
         // DELETE is refused at every one of them (test-raw-method-guard.ts).
-        method: z.enum(RAW_MODIFY_METHODS).optional().describe('HTTP method (default: POST)'),
-        body: z.union([z.string(), z.record(z.string(), z.any())]).optional().describe('Request body (JSON object or string)'),
+        method: z.enum(RAW_MODIFY_METHODS).optional().describe('HTTP method, uppercase: "POST" (default), "PUT", or "PATCH". Reads (GET) go through google_api_get; DELETE is never available.'),
+        body: z.union([z.string(), z.record(z.string(), z.any())]).optional().describe('Request body: a JSON object (preferred) or a pre-serialized JSON string — never a bare array. batchUpdate endpoints take {"requests":[...]}; Gmail messages/send takes {"raw":"<base64url RFC 2822>"}.'),
         account: z.string().optional().describe('Email account to use (see list_accounts; defaults to the primary). Ids are mailbox-specific: an id obtained on one account must be read with that same account passed here.'),
       }),
       async ({ path: rawPath, method = 'POST', body, account }, { authInfo }) => {
@@ -3212,56 +3368,54 @@ const handler = createMcpHandler(
     server.registerTool(
       TOOL_DEFS.request_access.name,
       toolConfig(TOOL_DEFS.request_access, {
-        type: z.enum(['send', 'sheets_read', 'sheets_write', 'docs_read', 'docs_write']).describe('What to request: permission to send email to a recipient, or read / read-write access to a spreadsheet or document'),
+        type: z.enum(['send', 'sheets_read', 'sheets_write', 'docs_read', 'docs_write', 'slides_read', 'slides_write']).describe('What to request: permission to send email to a recipient, or read / read-write access to a spreadsheet, document, or presentation'),
         recipient: z.string().optional().describe('Email address to whitelist (required for type "send")'),
         spreadsheetId: z.string().optional().describe('Google Spreadsheet ID (required for sheets types) — the segment after /d/ in the sheet URL; a full URL is accepted'),
         documentId: z.string().optional().describe('Google Docs document ID (required for docs types) — the segment after /d/ in the doc URL; a full URL is accepted'),
-        resourceName: z.string().max(200).optional().describe('Title of the spreadsheet or document, when you know it (from the user\'s message or an earlier call). Shown on the approval page so the user can find the file by name in Google\'s picker — without it they only see the file id.'),
+        presentationId: z.string().optional().describe('Google Slides presentation ID (required for slides types) — the segment after /d/ in the presentation URL; a full URL is accepted'),
+        resourceName: z.string().max(200).optional().describe('Title of the spreadsheet, document, or presentation, when you know it (from the user\'s message or an earlier call). Shown on the approval page so the user can find the file by name in Google\'s picker — without it they only see the file id.'),
       }),
-      async ({ type, recipient, spreadsheetId, documentId, resourceName }, { authInfo }) => {
+      async ({ type, recipient, spreadsheetId, documentId, presentationId, resourceName }, { authInfo }) => {
         const conn = await requireApproval(authInfo);
         if ('content' in conn) return conn;
         if (!conn.proxyKeyId) {
           return textResult('❌ No proxy key assigned to this connection.');
         }
 
-        const REQUESTABLE = 'Requestable permissions: sending to a specific recipient, or read/read-write access to a specific spreadsheet or document.';
+        const REQUESTABLE = 'Requestable permissions: sending to a specific recipient, or read/read-write access to a specific spreadsheet, document, or presentation.';
         const title = cleanResourceName(resourceName);
         const named = title ? { resourceName: title } : {};
+        // Per-file requests, any kind: the descriptor maps the request type
+        // to the kind, the id param to read, and the approval action to mint.
+        const fileKind = kindForRequestType(type);
+        const fileIdParams: Record<string, string | undefined> = { spreadsheetId, documentId, presentationId };
+        let fileId: string | undefined;
         let action: ApprovalAction;
         if (type === 'send') {
           if (!recipient || !/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(recipient)) {
             return textResult(`🚫 A valid "recipient" email address is required to request send access. ${REQUESTABLE}`);
           }
           action = { action: 'send_whitelist', recipient };
-        } else if (type === 'docs_read' || type === 'docs_write') {
-          if (!documentId) {
-            return textResult(`🚫 A "documentId" is required to request document access. ${REQUESTABLE}`);
+        } else if (fileKind) {
+          const d = DRIVE_FILE_KINDS[fileKind];
+          const raw = fileIdParams[d.idKey];
+          if (!raw) {
+            return textResult(`🚫 A "${d.idKey}" is required to request ${d.noun} access. ${REQUESTABLE}`);
           }
-          const did = resolveDriveFileId('doc', documentId);
-          if ('denial' in did) return did.denial;
-          documentId = did.id;
-          action = type === 'docs_read'
-            ? { action: 'docs_expose', documentId, ...named }
-            : { action: 'docs_write', documentId, ...named };
+          const fid = resolveDriveFileId(fileKind, raw);
+          if ('denial' in fid) return fid.denial;
+          fileId = fid.id;
+          action = fileApprovalActionFor(fileKind, type === d.requestTypes.write ? 'write' : 'expose', fileId, title ?? undefined);
         } else {
-          if (!spreadsheetId) {
-            return textResult(`🚫 A "spreadsheetId" is required to request spreadsheet access. ${REQUESTABLE}`);
-          }
-          const sid = resolveDriveFileId('sheet', spreadsheetId);
-          if ('denial' in sid) return sid.denial;
-          spreadsheetId = sid.id;
-          action = type === 'sheets_read'
-            ? { action: 'sheets_expose', spreadsheetId, ...named }
-            : { action: 'sheets_write', spreadsheetId, ...named };
+          return textResult(`🚫 Unknown request type '${type}'. ${REQUESTABLE}`);
         }
 
-        const { url, requestId, targetHash } = await mintApprovalLink(DASHBOARD_URL, conn.user.id, conn.proxyKeyId, action);
+        const { url, query, requestId, targetHash } = await mintApprovalLink(DASHBOARD_URL, conn.user.id, conn.proxyKeyId, action);
         // The title rides in the request ledger, never in the URL (the link
         // stays deterministic); the approve page reads it back by request_id.
         const mintCount = await recordApprovalMint({
           requestId, userId: conn.user.id, proxyKeyId: conn.proxyKeyId, action: action.action, targetHash,
-          ...named,
+          linkQuery: query, ...named,
         });
         // A re-request without a title still has one if an earlier mint stored
         // it — the response should say so rather than ask the agent again
@@ -3284,9 +3438,7 @@ const handler = createMcpHandler(
           status: 'approval_required',
           summary: action.action === 'send_whitelist'
             ? `Requesting permission to send email to ${recipient}`
-            : action.action.startsWith('docs')
-              ? `Requesting ${type === 'docs_read' ? 'read-only' : 'read & write'} access to document ${storedTitle ? `"${storedTitle}" (${documentId})` : documentId}`
-              : `Requesting ${type === 'sheets_read' ? 'read-only' : 'read & write'} access to spreadsheet ${storedTitle ? `"${storedTitle}" (${spreadsheetId})` : spreadsheetId}`,
+            : `Requesting ${type.endsWith('_read') ? 'read-only' : 'read & write'} access to ${DRIVE_FILE_KINDS[fileKind!].noun} ${storedTitle ? `"${storedTitle}" (${fileId})` : fileId}`,
           approvalUrl: url,
           ...(emailed ? { emailed } : {}),
           note: 'Nothing has been granted. Show the approval link to the user VERBATIM as a clickable URL — only they can approve it. The link does not expire and stays valid, so re-requesting produces the same URL rather than a new one. Do not retry the original operation until they confirm.'
@@ -3337,26 +3489,28 @@ const handler = createMcpHandler(
             gmailRead: 'ALLOWED by default for every accessible email; read-block rules (label/content) below restrict it',
             gmailSend: 'DENIED unless a send_whitelist rule matches the recipient (applies to messages/send AND drafts/send — draft recipients are resolved server-side)',
             gmailWrite: 'ALLOWED by default via google_api_modify: labels, drafts, messages modify/trash/untrash/batchModify, insert/import — everything the gmail.modify grant covers except sending (whitelisted above), settings writes (Google scopes FGAC does not hold), and permanent deletion (below)',
-            sheets: 'DENIED unless a per-spreadsheet rule below exposes the sheet',
-            docs: 'DENIED unless a per-document rule below exposes the document',
+            ...Object.fromEntries(ACTIVE_DRIVE_FILE_KINDS.map(k => {
+              const d = DRIVE_FILE_KINDS[k];
+              return [d.service, `DENIED unless a per-${d.noun} rule below exposes the ${d.shortNoun}`];
+            })),
             deletion: 'NEVER available through any tool — DELETE is rejected by the tool schema and again server-side, and Gmail messages/batchDelete is refused; trash (reversible) is allowed where the file or message rule permits writes',
-            rawApi: 'google_api_get / google_api_modify expose the Google API surface the grant covers under these same rules; Drive calls addressed to a file by id (drive/v3/files/{id} metadata, rename/trash, permissions, revisions, export) follow that file\'s rule — a Sheet or Doc needs a rule (Read & Write for changes), other file kinds ride the per-file drive.file scope the user granted; Drive listing is never gated; Slides calls are forwarded under drive.file; POST v4/spreadsheets, POST v1/documents, POST drive/v3/files and POST drive/v3/files/{id}/copy create new files auto-granted Read & Write to this key (a copy requires the source file to be exposed); APIs outside the grant (People/Contacts, Calendar, Tasks, …) are refused with a clear denial',
+            rawApi: 'google_api_get / google_api_modify expose the Google API surface the grant covers under these same rules; Drive calls addressed to a file by id (drive/v3/files/{id} metadata, rename/trash, permissions, revisions, export) follow that file\'s rule — a Sheet, Doc, or Slides presentation needs a rule (Read & Write for changes), other file kinds ride the per-file drive.file scope the user granted; Drive listing is never gated; POST v4/spreadsheets, POST v1/documents, POST v1/presentations, POST drive/v3/files and POST drive/v3/files/{id}/copy create new files auto-granted Read & Write to this key (a copy requires the source file to be exposed); APIs outside the grant (People/Contacts, Calendar, Tasks, …) are refused with a clear denial',
           },
-          rules: applicableRules.map(r => ({
+          rules: applicableRules.map(r => {
+            const fileKind = kindForService(r.service);
+            return {
             name: r.ruleName,
             type: r.actionType,
             pattern: r.regexPattern,
             email: r.targetEmail || 'all',
             scope: rulesWithAssignments.has(r.id) ? 'this-key' : 'global',
             // Per-file rules: without the file id an agent cannot locate
-            // the file it was granted access to.
-            ...(r.service === 'sheets'
-              ? { spreadsheetId: r.targetResourceId, resourceName: r.resourceName }
+            // the file it was granted access to. The key is the kind's own
+            // (spreadsheetId / documentId / presentationId).
+            ...(fileKind
+              ? { [DRIVE_FILE_KINDS[fileKind].idKey]: r.targetResourceId, resourceName: r.resourceName }
               : {}),
-            ...(r.service === 'docs'
-              ? { documentId: r.targetResourceId, resourceName: r.resourceName }
-              : {}),
-          })),
+          }; }),
         });
       }
     );
@@ -3381,14 +3535,14 @@ const handler = createMcpHandler(
     // claiming it cannot access the user's mail despite the connector, and
     // a just-connected user never being shown what a first use looks like.
     instructions:
-      "These tools give live access to the Gmail, Google Docs, and Google Sheets accounts the user has already connected — mailbox reads work immediately, with no further setup. " +
-      "When the user mentions their email, documents, or spreadsheets, reach for these tools instead of saying you cannot access their data. " +
+      "These tools give live access to the Gmail, Google Docs, Google Sheets, and Google Slides accounts the user has already connected — mailbox reads work immediately, with no further setup. " +
+      "When the user mentions their email, documents, spreadsheets, or presentations, reach for these tools instead of saying you cannot access their data. " +
       "If this connector has not been used yet, call list_accounts first: it returns the reachable mailboxes plus next-step guidance, and makes an easy first demonstration to offer (e.g. summarizing recent unread mail). " +
       'FGAC proxies Google Workspace behind per-user access rules enforced upstream at the proxy — every tool passes through the same enforcement. ' +
-      'The typed tools are shortcuts for common operations: docs_edit and sheets_edit accept native Google batchUpdate requests (tables, text styles, ' +
-      'cell formatting, charts, sheet tabs), comments_read and comments_add cover Drive-API comments on docs and sheets, and the values/gmail tools ' +
+      'The typed tools are shortcuts for common operations: docs_edit, sheets_edit, and slides_edit accept native Google batchUpdate requests (tables, text styles, ' +
+      'cell formatting, charts, sheet tabs, slides and shapes), comments_read and comments_add cover Drive-API comments on docs, sheets, and slides, and the values/gmail tools ' +
       'handle the simple cases. The full Google API surface is available through google_api_get (reads) and google_api_modify (writes) — Gmail threads, ' +
-      'drafts, labels, and mailbox organization (archive, mark read, trash), Drive file listing and export, creating new documents or spreadsheets. Fall back to them instead of treating an operation as ' +
+      'drafts, labels, and mailbox organization (archive, mark read, trash), Drive file listing and export, creating new documents, spreadsheets, or presentations. Fall back to them instead of treating an operation as ' +
       'unsupported. A denied call is not a dead end: it returns a one-click approval link — show it to the user and retry after they approve.',
   },
   {
@@ -3786,7 +3940,8 @@ const MAX_REJECT_BODY_CHARS = 100_000;
  *   - mcp_input_validation_failed: SDK-emitted `isError` results for
  *     -32602 (invalid arguments / unknown tool), detected from a tee of the
  *     POST response body AFTER it has been returned, so the client is never
- *     delayed. GET (the long-lived SSE stream) is never buffered.
+ *     delayed, and decoded into per-argument props (parseValidationFailure).
+ *     GET (the long-lived SSE stream) is never buffered.
  */
 type AuthedRequest = Request & { auth?: { clientId?: string; extra?: { userId?: string } } };
 
@@ -3844,10 +3999,16 @@ const withTransportObservability =
         try {
           const body = await tee.text();
           if (!/"isError"\s*:\s*true/.test(body)) return;
-          const m = body.match(/MCP error -32602: (Input validation error|Tool [^"\\]{1,64} not found)[^"\\]{0,300}/);
-          if (!m) return;
+          // Decoded, not regex-matched: the SDK's text embeds Zod's JSON issue
+          // array, which the earlier `[^"\\]` capture cut at its first escape
+          // — every production row ended at `: [` (2026-09-17). The props now
+          // name the failing argument (first_issue_path / issue_paths), what
+          // the schema expected vs. what arrived, and the KEYS the agent sent
+          // (never values), so the runbook can rank fields per tool (7.10).
+          const failure = parseValidationFailure(body);
+          if (!failure) return;
           captureServerEvent(distinctId, 'mcp_input_validation_failed', {
-            ...base(), tool, kind: m[1].startsWith('Tool') ? 'unknown_tool' : 'invalid_arguments', message: m[0].slice(0, 300),
+            ...base(), tool, ...validationFailureProps(failure, envelope?.argumentKeys),
           });
         } catch { /* tee read failed — nothing to record */ }
       });

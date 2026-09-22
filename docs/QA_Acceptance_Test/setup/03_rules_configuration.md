@@ -122,9 +122,9 @@ All rules are managed from the **"Access Rules"** section at the bottom of the d
 
 ---
 
-## Per-File Fixtures (Sheets & Docs)
+## Per-File Fixtures (Sheets, Docs & Slides)
 
-Capabilities 09/17 (sheets) and 19 (docs) need per-file fixtures owned by
+Capabilities 09/17 (sheets), 19 (docs), and 21 (slides) need per-file fixtures owned by
 USER_A. Record the actual ids in the local, gitignored QA state
 (`test/qa-envs/*/state.json` or the run notes) — **never in these public
 docs**:
@@ -140,6 +140,15 @@ docs**:
   capability 19 A6/A11/A12. If a run consumes it (by picking it), create a
   fresh one; note Google's Picker/Drive search can lag minutes behind on
   brand-new files, so create fixtures ahead of the run.
+- **Exposed presentation**: a Google Slides deck picked at least once through
+  the FGAC Picker (Presentations view), or created by the agent through FGAC
+  (`POST drive/v3/files` with the presentation mimeType, or `POST
+  v1/presentations`) — app-created files are covered by drive.file without a
+  pick. Create one at slides.google.com as USER_A if none exists and pick it
+  via `/dashboard/accounts` → "Add Google Slides +".
+- **External (never-picked) presentation**: a Google Slides deck created
+  directly at slides.google.com and NEVER picked — the negative-control fixture
+  for capability 21 A6/A11/A12. Same lag caveat as the external doc.
 - A fresh Neon branch resets FGAC rules but NOT Google-side drive.file
   grants — "exposed" fixtures stay granted across branches; the external doc
-  must simply never be picked.
+  and presentation must simply never be picked.

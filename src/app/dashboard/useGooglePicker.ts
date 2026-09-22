@@ -58,6 +58,21 @@ export interface GooglePickerOptions {
  * rides the round trip in `pickerKind`, so the auto-reopened picker shows the
  * same view the user started from.
  */
+let gapiPickerReady: Promise<void> | null = null;
+function loadGapiPicker(): Promise<void> {
+  if (!gapiPickerReady) {
+    gapiPickerReady = new Promise<void>(resolve => {
+      const loadPicker = () => window.gapi.load('picker', () => resolve());
+      if (window.gapi) { loadPicker(); return; }
+      const script = document.createElement('script');
+      script.src = 'https://apis.google.com/js/api.js';
+      script.onload = loadPicker;
+      document.body.appendChild(script);
+    });
+  }
+  return gapiPickerReady;
+}
+
 export function useGooglePicker(
   onSheetsPicked: (sheets: PickedFile[], context?: string) => void,
   kind: DriveFileKind = 'sheet',
@@ -91,22 +106,17 @@ export function useGooglePicker(
     setIsLoading(false);
   }, [posthog]);
 
-  // Dynamically load Google API script (api.js)
+  // Load the Google API script + picker module ONCE per page, however many
+  // hook instances mount (one per file kind on the dashboard). A per-instance
+  // loader raced: every instance mounted while `window.gapi` was still
+  // undefined appended its own script, and a late-mounting instance that saw
+  // `window.gapi` present skipped `gapi.load('picker')` entirely — a dead
+  // "Expose" button.
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    if (window.gapi) {
-      setGapiLoaded(true);
-      return;
-    }
-
-    const script = document.createElement('script');
-    script.src = 'https://apis.google.com/js/api.js';
-    script.onload = () => {
-      window.gapi.load('picker', () => {
-        setGapiLoaded(true);
-      });
-    };
-    document.body.appendChild(script);
+    let cancelled = false;
+    loadGapiPicker().then(() => { if (!cancelled) setGapiLoaded(true); });
+    return () => { cancelled = true; };
   }, []);
 
   const openPickerFlow = useCallback(async (context?: string, fromOAuthReturn = false) => {
@@ -158,7 +168,7 @@ export function useGooglePicker(
       if (!tokenData.hasDriveFileScope) {
         if (fromOAuthReturn) {
           failFlow('oauth_return_scope_missing', 'drive.file still missing after consent',
-            `Google did not grant ${kind === 'sheet' ? 'Sheets' : 'Docs'} access on that pass — this usually means the consent screen was closed early, or a second authorization round is needed. Click the pick button again to retry; if it keeps happening, reconnect Google from Dashboard → Accounts.`);
+            `Google did not grant ${kindDesc.productName} access on that pass — this usually means the consent screen was closed early, or a second authorization round is needed. Click the pick button again to retry; if it keeps happening, reconnect Google from Dashboard → Accounts.`);
           return;
         }
 
@@ -192,7 +202,7 @@ export function useGooglePicker(
         return;
       }
 
-      const fallbackNoun = kindDesc.noun.charAt(0).toUpperCase() + kindDesc.noun.slice(1);
+      const fallbackNoun = kindDesc.nounCap;
       const pickerCallback = (data: any) => {
         if (data.action === window.google.picker.Action.PICKED) {
           const docs = data.docs.map((doc: any) => ({

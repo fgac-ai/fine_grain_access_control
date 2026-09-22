@@ -45,7 +45,21 @@ export async function verifyFileGrant(
     // Sheets nests the title under properties; Docs/Slides return it top-level.
     return { state: 'ok', title: data?.properties?.title ?? data?.title ?? null };
   }
-  if (res.status === 403 || res.status === 404) return { state: 'missing' };
+  if (res.status === 403) {
+    // A disabled product API (SERVICE_DISABLED) is a project configuration
+    // gap, not a missing per-file grant: reporting it as `missing` would send
+    // the user into a Picker loop that can never verify. Treat it as
+    // `unknown` so no chip or recovery page claims a pick will fix it.
+    const body = await res.json().catch(() => null) as
+      { error?: { details?: Array<{ reason?: unknown }>; errors?: Array<{ reason?: unknown }> } } | null;
+    const reasons = [
+      ...(body?.error?.details ?? []).map(d => d?.reason),
+      ...(body?.error?.errors ?? []).map(e => e?.reason),
+    ];
+    if (reasons.includes('SERVICE_DISABLED')) return { state: 'unknown', status: 403 };
+    return { state: 'missing' };
+  }
+  if (res.status === 404) return { state: 'missing' };
   return { state: 'unknown', status: res.status };
 }
 

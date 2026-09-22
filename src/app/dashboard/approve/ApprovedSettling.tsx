@@ -26,8 +26,8 @@ export function ApprovedSettling({ kind, fileId, message }: { kind: DriveFileKin
   const [state, setState] = useState<SettleState>("settling");
   const startedAt = useRef(Date.now());
   const d = DRIVE_FILE_KINDS[kind];
-  const short = kind === "sheet" ? "sheet" : d.noun;
-  const verifyPath = kind === "sheet" ? "/api/rules/verify-sheets-access" : "/api/rules/verify-docs-access";
+  const short = d.shortNoun;
+  const verifyPath = d.verifyPath;
 
   useEffect(() => {
     let cancelled = false;

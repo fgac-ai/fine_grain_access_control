@@ -1,3 +1,4 @@
+import { kindForService } from '@/lib/driveFileKinds';
 import { proxyKeys, keyEmailAccess, accessRules, keyRuleAssignments } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import { getActiveDelegationsToEmail, filterLiveDelegatedAccess } from '@/db/delegationQueries';
@@ -34,6 +35,8 @@ export interface DashboardData {
   lastSignInAt: number | null;
   /** FGAC users.id — the owner key the approval ledger is filed under. */
   userId: string;
+  /** Clerk user id — the distinct id for server-side PostHog events. */
+  clerkUserId: string;
 }
 
 /**
@@ -122,10 +125,10 @@ export async function loadDashboardData(): Promise<DashboardData | null> {
   // Sheets/Docs rules are what drive.file is for; a user without any can lose
   // the scope to a Google sign-in and notice nothing, while one with them has
   // every Sheets/Docs call failing.
-  const needsDriveFile = userRules.some(r => r.service === 'sheets' || r.service === 'docs');
+  const needsDriveFile = userRules.some(r => kindForService(r.service) !== null);
 
   return {
     profiles, rules, accessibleEmails, mcpEndpoint, hasCompleteGoogleAccess,
-    googleAccess, needsDriveFile, lastSignInAt: user.lastSignInAt, userId: dbUser.id,
+    googleAccess, needsDriveFile, lastSignInAt: user.lastSignInAt, userId: dbUser.id, clerkUserId: user.id,
   };
 }

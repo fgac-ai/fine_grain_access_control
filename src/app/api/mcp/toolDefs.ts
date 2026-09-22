@@ -37,8 +37,8 @@ export const TOOL_DEFS = {
   },
   gmail_list: {
     name: 'gmail_list',
-    title: 'List Gmail messages',
-    description: 'List recent Gmail message IDs, optionally filtered by a Gmail search query (e.g. "is:unread"). Works across every connected or delegated Gmail inbox — pass the "account" parameter to target a specific mailbox (see list_accounts). Other Gmail read endpoints (threads, drafts, history, settings) are available via google_api_get.',
+    title: 'Search or list Gmail messages',
+    description: 'Search or list Gmail messages: returns recent message IDs, optionally filtered by a Gmail search query (e.g. "is:unread", "from:alice newer_than:7d") — this is the Gmail search tool; read a result with gmail_read. Works across every connected or delegated Gmail inbox — pass the "account" parameter to target a specific mailbox (see list_accounts). Other Gmail read endpoints (threads, drafts, history, settings) are available via google_api_get.',
     readOnly: true,
   },
   gmail_read: {
@@ -113,30 +113,43 @@ export const TOOL_DEFS = {
     readOnly: false,
     destructive: true,
   },
+  slides_get_presentation: {
+    name: 'slides_get_presentation',
+    title: 'Read a Google Slides presentation',
+    description: 'Read a Google Slides presentation exposed by the user\'s FGAC rules. Returns the raw Slides API presentation resource (title, slides, page elements with their text and shapes as structured JSON). Large decks: trim with the optional "fields" mask (e.g. "title,slides(objectId,pageElements(shape(text)))"), or read in windows by passing offset and a limit sized to YOUR tool-result budget (chars of serialized JSON, max 200000/call) — each response reports total_chars and next_offset; concatenate data strings in offset order. To edit the presentation use slides_edit; comments live in the Drive API — use comments_read.',
+    readOnly: true,
+  },
+  slides_edit: {
+    name: 'slides_edit',
+    title: 'Edit a Google Slides presentation (batchUpdate)',
+    description: 'Apply Google Slides batchUpdate requests to edit presentations — add or delete slides, create shapes, text boxes, images and tables, insert/replace/delete text, restyle text and shapes (https://developers.google.com/slides/api/reference/rest/v1/presentations/batchUpdate). Examples: add a blank slide {"createSlide":{"slideLayoutReference":{"predefinedLayout":"BLANK"}}}, replace text everywhere {"replaceAllText":{"containsText":{"text":"old","matchCase":true},"replaceText":"new"}}, or insert text into a shape {"insertText":{"objectId":"<shapeId>","text":"..."}} (object ids come from slides_get_presentation). Requires Read & Write FGAC access. Comments live in the Drive API — use comments_read / comments_add. Create new presentations with google_api_modify (POST v1/presentations).',
+    readOnly: false,
+    destructive: true,
+  },
   comments_read: {
     name: 'comments_read',
     title: 'Read file comments',
-    description: 'List the comments on a Google Docs document or Google Sheets spreadsheet — content, resolution state, author names, quoted anchor text, and replies — via the Drive API comments endpoint (https://developers.google.com/drive/api/reference/rest/v3/comments). Works for any file exposed by an FGAC rule.',
+    description: 'List the comments on a Google Docs document, Google Sheets spreadsheet, or Google Slides presentation — content, resolution state, author names, quoted anchor text, and replies — via the Drive API comments endpoint (https://developers.google.com/drive/api/reference/rest/v3/comments). Works for any file exposed by an FGAC rule.',
     readOnly: true,
   },
   comments_add: {
     name: 'comments_add',
     title: 'Add a comment or reply',
-    description: 'Add a comment to a Google Docs document or Google Sheets spreadsheet, or reply to an existing comment (pass commentId; set resolve to also mark it resolved), via the Drive API (https://developers.google.com/drive/api/reference/rest/v3/replies). Requires a Read & Write FGAC rule for the file. New comments are file-level (unanchored); anchoring to a specific range is not supported.',
+    description: 'Add a comment to a Google Docs document, Google Sheets spreadsheet, or Google Slides presentation, or reply to an existing comment (pass commentId; set resolve to also mark it resolved), via the Drive API (https://developers.google.com/drive/api/reference/rest/v3/replies). Requires a Read & Write FGAC rule for the file. New comments are file-level (unanchored); anchoring to a specific range is not supported.',
     readOnly: false,
     destructive: false,
   },
   google_api_get: {
     name: 'google_api_get',
     title: 'Raw Google API read',
-    description: 'Perform a read-only GET request against any Google API endpoint by path — the full read surface behind the typed convenience tools. Gmail (https://developers.google.com/gmail/api/reference/rest): messages, threads, drafts, labels, history, settings — reads are allowed by default and filtered by the user\'s read-block rules if any. Google Sheets (https://developers.google.com/sheets/api/reference/rest) and Google Docs (https://developers.google.com/docs/api/reference/rest): require a per-file FGAC rule. Drive (https://developers.google.com/drive/api/reference/rest/v3): listing (drive/v3/files) is never gated; any call addressed to a file by id (metadata, export, revisions, permissions, comments) follows that file\'s FGAC rule — a Sheet or Doc needs a rule, other kinds ride the per-file drive.file grant (files the user picked or this agent created; 404 = not granted). comments_read is the comments shortcut. Slides (slides/v1) is forwarded under drive.file. APIs outside the grant — People/Contacts, Calendar, Tasks, YouTube, and other non-Workspace-file APIs — can NEVER work through FGAC and are refused; do not probe them. Batch endpoints are denied. Use this whenever no typed read tool covers the endpoint you need. Large responses: pass offset and a limit sized to your tool-result budget (chars, max 200000/call) — the windowed envelope reports total_chars and next_offset; concatenate data strings in offset order.',
+    description: 'Perform a read-only GET request against any Google API endpoint by path — the full read surface behind the typed convenience tools. Gmail (https://developers.google.com/gmail/api/reference/rest): messages, threads, drafts, labels, history, settings — reads are allowed by default and filtered by the user\'s read-block rules if any. Google Sheets (https://developers.google.com/sheets/api/reference/rest), Google Docs (https://developers.google.com/docs/api/reference/rest), and Google Slides (https://developers.google.com/slides/api/reference/rest): require a per-file FGAC rule. Drive (https://developers.google.com/drive/api/reference/rest/v3): listing (drive/v3/files) is never gated; any call addressed to a file by id (metadata, export, revisions, permissions, comments) follows that file\'s FGAC rule — a Sheet, Doc, or Slides deck needs a rule, other kinds ride the per-file drive.file grant (files the user picked or this agent created; 404 = not granted). comments_read is the comments shortcut. APIs outside the grant — People/Contacts, Calendar, Tasks, YouTube, and other non-Workspace-file APIs — can NEVER work through FGAC and are refused; do not probe them. Batch endpoints are denied. Use this whenever no typed read tool covers the endpoint you need. Large responses: pass offset and a limit sized to your tool-result budget (chars, max 200000/call) — the windowed envelope reports total_chars and next_offset; concatenate data strings in offset order.',
     readOnly: true,
     freeformMethods: RAW_READ_METHODS,
   },
   google_api_modify: {
     name: 'google_api_modify',
     title: 'Raw Google API write',
-    description: 'Perform a POST, PUT, or PATCH request against a Google API endpoint by path; the full write surface behind the typed tools. Docs v1/documents/{id}:batchUpdate and Sheets write endpoints incl. v4/spreadsheets/{id}:batchUpdate need a Read & Write rule for the file. Creating files is allowed and auto-granted Read & Write to this connection: POST v1/documents, v4/spreadsheets, slides/v1/presentations, drive/v3/files, and drive/v3/files/{id}/copy (the source must be exposed to this connection by any non-blocked rule). Gmail (https://developers.google.com/gmail/api/reference/rest): mailbox writes are allowed by default — labels, drafts, messages/{id}/modify, trash/untrash, batchModify, insert/import. Sends are whitelisted: messages/send (base64url raw RFC 2822 body) and drafts/send (recipients read from the stored draft) check every recipient against the user\'s send whitelist. Gmail settings writes need Google scopes FGAC does not hold and are refused; permanent deletion (batchDelete) is never available. Drive writes addressed to a file by id (PATCH drive/v3/files/{id} rename/trash, permissions, comments) follow the file\'s FGAC rule: a Sheet or Doc needs a Read & Write rule (comments_add is the comments shortcut); other file kinds ride the per-file drive.file grant. APIs outside the grant (People/Contacts, Calendar, Tasks, …) NEVER work and are refused; do not probe them. Batch endpoints are denied. DELETE is never available. Denied calls return a one-click approval link.',
+    description: 'POST, PUT, or PATCH any Google API endpoint by path; the full write surface behind the typed tools. Docs v1/documents/{id}:batchUpdate, Slides v1/presentations/{id}:batchUpdate, and Sheets write endpoints incl. v4/spreadsheets/{id}:batchUpdate need a Read & Write rule for the file. Creating files is allowed and auto-granted Read & Write to this connection: POST v1/documents, v4/spreadsheets, v1/presentations, drive/v3/files, and drive/v3/files/{id}/copy (the source must be exposed to this connection by any non-blocked rule). Gmail (https://developers.google.com/gmail/api/reference/rest): mailbox writes are allowed by default — labels, drafts, messages/{id}/modify, trash/untrash, batchModify, insert/import. Sends are whitelisted: messages/send (base64url raw RFC 2822 body) and drafts/send (recipients read from the stored draft) check every recipient against the send whitelist. Gmail settings writes need scopes FGAC does not hold and are refused; permanent deletion (batchDelete) is never available. Drive writes addressed to a file by id (PATCH drive/v3/files/{id} rename/trash, permissions, comments) follow the file\'s FGAC rule: a Sheet, Doc, or Slides deck needs a Read & Write rule (comments_add is the comments shortcut); other file kinds ride the per-file drive.file grant. APIs outside the grant (People/Contacts, Calendar, Tasks, …) never work and are refused. Batch endpoints are denied; DELETE is never available. Denied calls return a one-click approval link.',
     readOnly: false,
     destructive: true,
     openWorld: true,
@@ -145,7 +158,7 @@ export const TOOL_DEFS = {
   request_access: {
     name: 'request_access',
     title: 'Request a permission upgrade',
-    description: 'Ask the user to grant this agent a specific permission: sending email to a recipient, or read/write access to a Google Spreadsheet or Google Docs document. Returns a permanent approval link for the user — calling this tool grants nothing by itself; the user must open the link and approve. For a spreadsheet or document, pass resourceName (the file\'s title) whenever you know it: the approval page shows it, and without it the user only sees Google\'s file id while Google\'s picker lists files by name.',
+    description: 'Ask the user to grant this agent a specific permission: sending email to a recipient, or read/write access to a Google Spreadsheet, Google Docs document, or Google Slides presentation. Returns a permanent approval link for the user — calling this tool grants nothing by itself; the user must open the link and approve. For a spreadsheet, document, or presentation, pass resourceName (the file\'s title) whenever you know it: the approval page shows it, and without it the user only sees Google\'s file id while Google\'s picker lists files by name.',
     readOnly: true,
   },
   get_my_permissions: {

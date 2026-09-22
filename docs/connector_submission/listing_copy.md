@@ -34,6 +34,14 @@ we get surfaced.
 >
 > More Google Workspace Connections Coming Soon!
 
+> **PENDING UPDATE (Google Slides support, 2026-09-17)**: the connector now
+> also serves Google Slides (per-presentation rules, same `drive.file` grant,
+> typed tools `slides_get_presentation`, `slides_edit`; comments via the
+> existing `comments_*` pair). Tool count 19 → 21. Tagline candidate (≤55):
+> `Gmail, Sheets, Docs & Slides — on your terms` (43). Blocked on the
+> Google Slides API being enabled on the production GCP project — do not
+> resubmit the listing before that is confirmed live.
+>
 > **PENDING UPDATE (Google Docs support, 2026-08-20; tool reshape
 > 2026-08-23)**: the connector now also serves Google Docs (per-document
 > read and full batchUpdate editing behind the same per-file rules — tools

@@ -28,21 +28,25 @@ export default async function LandingPage() {
             </span>
             <span className="inline-flex items-center gap-1.5 rounded-full border border-docs-border bg-docs-bg px-3 py-1 text-[13px] font-semibold text-docs">
               <span className="h-[7px] w-[7px] rounded-full bg-docs" />
-              Google Docs — new
+              Google Docs
+            </span>
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-slides-border bg-slides-bg px-3 py-1 text-[13px] font-semibold text-slides">
+              <span className="h-[7px] w-[7px] rounded-full bg-slides" />
+              Google Slides — new
             </span>
           </div>
 
           <h1 className="text-[40px] font-extrabold leading-[1.05] tracking-[-0.03em] text-foreground sm:text-[60px]">
             Your agents can work your{' '}
-            <span className="text-primary">Docs, Sheets and Gmail.</span>
+            <span className="text-primary">Docs, Sheets, Slides and Gmail.</span>
             <br />
             You hold the keys.
           </h1>
 
           <p className="mx-auto max-w-[640px] text-[17px] leading-[1.55] text-muted-foreground sm:text-[19px]">
-            Read and write Google Sheets and Docs. Send email from Gmail — even
-            across multiple accounts. Every request passes through your rules
-            first.
+            Read and write Google Sheets, Docs and Slides. Send email from Gmail —
+            even across multiple accounts. Every request passes through your
+            rules first.
           </p>
 
           <div className="flex flex-col gap-3 pt-1 sm:flex-row sm:justify-center">
@@ -241,9 +245,9 @@ export default async function LandingPage() {
               How we use Google Data
             </h2>
             <p className="mx-auto max-w-[720px] text-[15px] leading-[1.65] text-muted-foreground">
-              FGAC.ai requests Gmail and per-file Drive scopes — covering Sheets
-              and Docs — to act as a secure proxy between Google and your AI
-              agents. Every request is checked against your rules before it is
+              FGAC.ai requests Gmail and per-file Drive scopes — covering Sheets,
+              Docs and Slides — to act as a secure proxy between Google and your
+              AI agents. Every request is checked against your rules before it is
               forwarded — verbatim — to Google.
             </p>
           </div>

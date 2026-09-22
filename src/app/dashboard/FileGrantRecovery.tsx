@@ -41,10 +41,10 @@ export function FileGrantRecovery({
   const [level, setLevel] = useState<"read" | "read_write">("read");
   const [grantedLevel, setGrantedLevel] = useState<"read" | "read_write">("read");
   const d = DRIVE_FILE_KINDS[kind];
-  const short = kind === "sheet" ? "sheet" : d.noun;
-  const verifyPath = kind === "sheet" ? "/api/rules/verify-sheets-access" : "/api/rules/verify-docs-access";
-  const grantPath = kind === "sheet" ? "/api/rules/grant-sheets-access" : "/api/rules/grant-docs-access";
-  const rulesKey = kind === "sheet" ? "sheetsRules" : "docsRules";
+  const short = d.shortNoun;
+  const verifyPath = d.verifyPath;
+  const grantPath = d.grantPath;
+  const rulesKey = d.rulesKey;
 
   const verify = useCallback(async (recovery: boolean): Promise<boolean> => {
     if (!fileId) return false;
@@ -187,7 +187,7 @@ export function FileGrantRecovery({
         )}
       </div>
 
-      {status !== "verified" && status !== "verified_other" && kind === "sheet" && (
+      {status !== "verified" && status !== "verified_other" && d.hasSetupVideo && (
         <div className="mt-6 rounded-lg border border-border bg-card p-2.5">
           <div className="px-1.5 pb-2 pt-1 text-sm font-semibold text-foreground">
             Watch how it works (2 min)

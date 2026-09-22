@@ -76,7 +76,7 @@ export const approvalRequests = pgTable('approval_requests', {
   // never emailed (owner lacks the Gmail scope, cap hit, send failed, or
   // the row predates the feature).
   notifiedAt: timestamp('notified_at'),
-  // Human-readable title of the file behind a sheets/docs request, when the
+  // Human-readable title of the file behind a sheets/docs/slides request, when the
   // agent supplied one via request_access. The approve page can only show
   // Google's file id for a file Google does not share with FGAC yet, and the
   // Picker lists files by NAME — so without this the user has to map an
@@ -94,6 +94,22 @@ export const approvalRequests = pgTable('approval_requests', {
   wallHitAt: timestamp('wall_hit_at'),
   wallQuery: text('wall_query'),
   routedAt: timestamp('routed_at'),
+  // Pending-approvals banner (2026-09-20, src/lib/approvalPending.ts). The
+  // link's own a/k/r/s query, stored at EVERY mint (latest wins) so the
+  // dashboard can list this owner's open requests with a working link --
+  // the ledger never stores the target in the clear, and the approve page
+  // needs the signed query. wallQuery is the same string for the subset of
+  // rows that hit the sign-in wall; rows minted before this column exists
+  // and never walled cannot be listed. dismissedAt hides a row from the
+  // banner until the agent mints it again (last_minted_at moves past it).
+  linkQuery: text('link_query'),
+  dismissedAt: timestamp('dismissed_at'),
+  // Every owner render of the approve page (openedAt keeps the FIRST open
+  // for the funnel). The wall router's "not seen since the hit" rule reads
+  // this one: a request first opened before a wall hit and reached again
+  // after it (Clerk's redirect_url, the banner, the link itself) must not be
+  // routed back to (preview QA 2026-09-21, F3).
+  lastOpenedAt: timestamp('last_opened_at'),
 }, (table) => [
   // The per-owner hourly email cap counts this owner's recent notified_at
   // stamps on every first mint; keep that a range scan as the ledger grows.
@@ -177,10 +193,10 @@ export const accessRules = pgTable('access_rules', {
   userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
   targetEmail: text('target_email'), // NULL = applies to all emails, or specific email address
   ruleName: text('rule_name').notNull(), // e.g., "Block Project X" or "Q3 Financials Read Only"
-  service: text('service').notNull(), // 'gmail', 'sheets', 'docs'
-  actionType: text('action_type').notNull(), // Gmail: 'read_blacklist', 'send_whitelist', etc. | Sheets: 'sheet_read', 'sheet_read_write', 'sheet_block' | Docs: 'doc_read', 'doc_read_write', 'doc_block'
+  service: text('service').notNull(), // 'gmail', 'sheets', 'docs', 'slides'
+  actionType: text('action_type').notNull(), // Gmail: 'read_blacklist', 'send_whitelist', etc. | Sheets: 'sheet_read', 'sheet_read_write', 'sheet_block' | Docs: 'doc_read', 'doc_read_write', 'doc_block' | Slides: 'slide_read', 'slide_read_write', 'slide_block'
   regexPattern: text('regex_pattern'), // Optional: Gmail regex pattern or label ID
-  targetResourceId: text('target_resource_id'), // e.g. spreadsheetId (sheets) or documentId (docs)
+  targetResourceId: text('target_resource_id'), // e.g. spreadsheetId (sheets), documentId (docs), presentationId (slides)
   resourceName: text('resource_name'), // e.g. human-readable document title "Q3 Financials"
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),

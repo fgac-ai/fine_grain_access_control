@@ -616,10 +616,48 @@ WHERE event = 'mcp_input_validation_failed' AND timestamp > now() - INTERVAL 7 D
 GROUP BY tool, kind, client ORDER BY n DESC
 ```
 
+**7.10a — Validation failures by tool and field, 7 d.** Since 2026-09-17 the
+event decodes the Zod issue array the SDK embeds in its error text (rows
+before that carry a `message` cut at `: [` and no field — see
+`analytics.md`). `first_issue_path` is the argument the schema rejected;
+`first_issue_received = 'undefined'` on a required field means the agent
+sent the value under another name (Zod strips unknown keys), and
+`sent_keys` says which — `['id', 'account']` against `messageId` is the
+rename to make in the description, `['messageId', 'format']` with
+`invalid_value` on `format` is a casing miss, `values` received `string` is
+a JSON-encoded array. `invalid_union` on `google_api_modify.body` with
+`received = 'array'` is a batchUpdate requests array sent bare.
+
+```sql
+SELECT properties.tool AS tool, properties.first_issue_path AS field,
+       properties.first_issue_code AS code, properties.first_issue_expected AS expected,
+       properties.first_issue_received AS received,
+       any(properties.sent_keys) AS sent_keys_example,
+       uniq(distinct_id) AS users, count() AS n
+FROM events
+WHERE event = 'mcp_input_validation_failed' AND properties.kind = 'invalid_arguments'
+  AND properties.environment = 'production' AND timestamp > now() - INTERVAL 7 DAY
+GROUP BY tool, field, code, expected, received ORDER BY n DESC
+```
+
+`issues_parsed = false` rows are failures whose text carried no JSON issue
+array (a custom message or an SDK format change) — if they appear after an
+SDK bump, `scripts/test-validation-failure-capture.ts` is the first thing
+to re-run, since it drives the real SDK.
+
 Healthy: near zero. A single user repeating the same `invalid_arguments` on
 one tool is an agent stuck on a schema misunderstanding — the tool's
-description is the fix, not the user. `unknown_tool` bursts after a release
-mean a client cached an old tool list.
+description is the fix, not the user. Read it with the next-outcome
+sequence (does the same person's next call on that tool succeed?): in the 30
+days to 2026-09-17, `gmail_read` failures were followed by a success within
+~3 s for 10 of 10 people at least once (the SDK's own message got them
+there), while the `google_api_modify` and `sheets_update_range` runs were
+one person each repeating the same rejected shape 20+ times with no
+in-session success — the shape those two agents kept sending is what 7.10a
+now records. `unknown_tool` bursts after a release mean a client cached an
+old tool list; a steady trickle of one name (`gmail_search`, 2026-09) is a
+tool the agent expected to exist — the nearest tool's title/description
+should claim that word.
 
 **7.11 — Support lookup: "gmail_read fails on message X".** `$mcp_tool_call`
 now carries a request fingerprint (`message_id_hash` on `gmail_read` /
@@ -915,10 +953,10 @@ stuck user, check:
 -- Gate-hit persons: denied ids vs ids they later used successfully, 7 d.
 SELECT cityHash64(person.properties.email) % 100000 AS u,
        groupUniqArrayIf(cityHash64(toString(properties.file_id)) % 10000,
-         event = '$mcp_tool_call' AND properties.denial_code IN ('sheets_not_exposed','docs_not_exposed')) AS denied_ids,
+         event = '$mcp_tool_call' AND properties.denial_code IN ('sheets_not_exposed','docs_not_exposed','slides_not_exposed')) AS denied_ids,
        groupUniqArrayIf(cityHash64(toString(properties.file_id)) % 10000,
          event = '$mcp_tool_call' AND properties.outcome = 'success'
-         AND (properties.$mcp_tool_name LIKE 'sheets%' OR properties.$mcp_tool_name LIKE 'docs%')) AS ok_ids,
+         AND (properties.$mcp_tool_name LIKE 'sheets%' OR properties.$mcp_tool_name LIKE 'docs%' OR properties.$mcp_tool_name LIKE 'slides%')) AS ok_ids,
        countIf(event IN ('agent_sheet_created','agent_doc_created')) AS agent_created,
        countIf(event = 'approval_link_opened')   AS opened,
        countIf(event = 'approval_link_approved') AS approved
@@ -927,7 +965,7 @@ WHERE properties.environment = 'production'
   AND person.properties.email NOT IN (/* internal + QA accounts */)
   AND timestamp > now() - INTERVAL 7 DAY
   AND (event IN ('approval_link_opened','approval_link_approved','agent_sheet_created','agent_doc_created')
-       OR (event = '$mcp_tool_call' AND (properties.$mcp_tool_name LIKE 'sheets%' OR properties.$mcp_tool_name LIKE 'docs%')))
+       OR (event = '$mcp_tool_call' AND (properties.$mcp_tool_name LIKE 'sheets%' OR properties.$mcp_tool_name LIKE 'docs%' OR properties.$mcp_tool_name LIKE 'slides%')))
 GROUP BY u HAVING length(denied_ids) > 0
 ORDER BY approved, agent_created DESC
 ```
@@ -1108,12 +1146,12 @@ WITH per AS (
          countIf(event = 'google_scope_missing' AND properties.scope = 'gmail') AS gmail_scope_denied,
          countIf(event = '$mcp_tool_call' AND properties.$mcp_tool_name LIKE 'gmail_%') AS gmail_tried,
          countIf(event = '$mcp_tool_call' AND properties.$mcp_tool_name LIKE 'gmail_%' AND properties.outcome = 'success') AS gmail_ok,
-         countIf(event = '$mcp_tool_call' AND (properties.$mcp_tool_name LIKE 'sheets_%' OR properties.$mcp_tool_name LIKE 'docs_%')) AS sd_tried,
-         countIf(event = '$mcp_tool_call' AND properties.denial_code IN ('sheets_not_exposed', 'docs_not_exposed')) AS sd_not_exposed,
+         countIf(event = '$mcp_tool_call' AND (properties.$mcp_tool_name LIKE 'sheets_%' OR properties.$mcp_tool_name LIKE 'docs_%' OR properties.$mcp_tool_name LIKE 'slides_%')) AS sd_tried,
+         countIf(event = '$mcp_tool_call' AND properties.denial_code IN ('sheets_not_exposed', 'docs_not_exposed', 'slides_not_exposed')) AS sd_not_exposed,
          countIf(event = 'approval_link_opened')   AS link_opened,
          countIf(event = 'approval_link_approved') AS link_approved,
          countIf(event = 'picker_picked')          AS picked,
-         countIf(event = '$mcp_tool_call' AND (properties.$mcp_tool_name LIKE 'sheets_%' OR properties.$mcp_tool_name LIKE 'docs_%') AND properties.outcome = 'success') AS sd_ok,
+         countIf(event = '$mcp_tool_call' AND (properties.$mcp_tool_name LIKE 'sheets_%' OR properties.$mcp_tool_name LIKE 'docs_%' OR properties.$mcp_tool_name LIKE 'slides_%') AND properties.outcome = 'success') AS sd_ok,
          countIf(event = '$mcp_tool_call' AND properties.outcome = 'success') AS any_ok
   FROM events
   WHERE properties.environment = 'production'
@@ -1859,6 +1897,119 @@ LEFT JOIN routed ro ON ro.rid = r.rid
 LEFT JOIN opened o ON o.rid = r.rid
 ```
 
+**Read 2026-09-20, four days after the router shipped (production, 2026-09-16
+13:24Z → 09-20 22:45Z).** The first query above was mis-run in the 2026-09-19
+review as a join of wall hits to `approval_link_opened` on `action` +
+`target_hash` — `approval_link_opened` does not carry `target_hash`, so that
+join is 0 by construction. Joined as written here (wall → mint → open on
+`request_id`) the picture inverts:
+
+| signal | value |
+| --- | --- |
+| `approval_sign_in_wall`, `navigation = true`, people | 25 hits on 18 requests (11 `claude_desktop`, 7 `browser`) |
+| `approval_wall_recorded {recorded: true}` | 25, all 17 ledger rows stamped |
+| walled requests opened by their owner afterwards | 16 of 17 (median 12 s after the hit; `claude_desktop` walls are re-opened in the person's real browser 5–95 s later) |
+| walled requests approved | 14 of 17 |
+| `approval_wall_routed` | 0 — and `routed_at` is NULL on every ledger row |
+| `sign_in_completed {after_approval_wall: true}` | 0 |
+
+So the router's fix half never fired because it had nothing to do: a
+same-browser sign-in comes straight back to the approve page through Clerk's
+own `redirect_url` (the approve page renders, `opened_at` stamps, the router's
+"not seen since" rule correctly declines), and a Claude-desktop bounce is
+repaired by the person themselves. The `browser` class over-counts people:
+every `browser` wall hit whose owner was on the approve page at the time
+carried the owner's EXACT user-agent and fired within 150 ms of that owner's
+own signed-in `approval_link_opened` — a cookie-less duplicate load of the
+link (a link scanner or preview fetch riding the click), not a person losing
+context; two more `browser` hits came from a Windows Chrome 151 UA whose
+owner uses a different machine entirely. Read `client = 'browser'` wall rows
+as an upper bound, and read recovery per request from the query above.
+
+A local reproduction (dev build, USER_A, 2026-09-21) confirmed the router
+itself works — five of six signed-in `/dashboard` loads with a routable row
+redirected to the approve page — and produced one unexplained miss with a
+provably routable row and a clean log, the exact production signature. The
+page now emits `approval_wall_route_skipped {reason, candidates, stale,
+routed_already, opened_since, no_query, future}` whenever an owner had
+wall-hit rows on file and none routed, so the next such miss names its rule:
+
+```sql
+-- why wall hits on file did not route (per owner render), last 30 d
+SELECT toString(properties.reason) AS reason, count() AS renders,
+       sum(toFloat64OrNull(toString(properties.candidates))) AS candidates,
+       sum(toFloat64OrNull(toString(properties.stale))) AS stale,
+       sum(toFloat64OrNull(toString(properties.routed_already))) AS routed_already,
+       sum(toFloat64OrNull(toString(properties.opened_since))) AS opened_since,
+       sum(toFloat64OrNull(toString(properties.no_query))) AS no_query,
+       sum(toFloat64OrNull(toString(properties.future))) AS future
+FROM events
+WHERE event = 'approval_wall_route_skipped' AND properties.environment = 'production'
+  AND timestamp >= now() - INTERVAL 30 DAY
+GROUP BY reason
+```
+
+A `skip` render whose counts are all zero is the unexplained case (every rule
+passed and the pick still returned nothing) — that cannot happen by
+construction and would mean the row changed between the read and the pick.
+
+The lost context that IS real sits outside the wall: 47 of the 87 requests
+minted in the same window were never opened at all (21 owners), and 5 of
+those had the owner on a dashboard page within the week — every one shown the
+profile page with nothing about the request. That is what the pending-
+approvals banner (shipped 2026-09-20, `src/lib/approvalPending.ts`) is for:
+every dashboard page lists the owner's open requests from the ledger alone,
+in whatever browser they sign in with. Its funnel, per request:
+
+```sql
+-- pending-approvals banner: owners shown → requests clicked → opened via the banner → dismissed
+SELECT 'owners_shown' AS metric, count(DISTINCT distinct_id) AS n
+FROM events WHERE event = 'approval_banner_shown' AND properties.environment = 'production' AND timestamp >= now() - INTERVAL 30 DAY
+UNION ALL
+SELECT 'banner_renders', count()
+FROM events WHERE event = 'approval_banner_shown' AND properties.environment = 'production' AND timestamp >= now() - INTERVAL 30 DAY
+UNION ALL
+SELECT 'requests_clicked', count(DISTINCT toString(properties.request_id))
+FROM events WHERE event = 'approval_banner_clicked' AND properties.environment = 'production' AND timestamp >= now() - INTERVAL 30 DAY
+UNION ALL
+SELECT 'requests_opened_via_banner', count(DISTINCT toString(properties.request_id))
+FROM events WHERE event = 'approval_link_opened' AND properties.environment = 'production'
+  AND toString(properties.link_source) = 'banner' AND timestamp >= now() - INTERVAL 30 DAY
+UNION ALL
+SELECT 'requests_dismissed', count(DISTINCT toString(properties.request_id))
+FROM events WHERE event = 'approval_banner_dismissed' AND properties.environment = 'production' AND timestamp >= now() - INTERVAL 30 DAY
+```
+
+```sql
+-- requests approved after a banner open (the banner's converted share)
+WITH opened AS (
+  SELECT toString(properties.request_id) AS rid, min(timestamp) AS first_open
+  FROM events
+  WHERE event = 'approval_link_opened' AND properties.environment = 'production'
+    AND toString(properties.link_source) = 'banner' AND timestamp >= now() - INTERVAL 30 DAY
+  GROUP BY rid
+),
+approved AS (
+  SELECT toString(properties.request_id) AS rid, min(timestamp) AS first_approved
+  FROM events
+  WHERE event = 'approval_link_approved' AND properties.environment = 'production'
+    AND timestamp >= now() - INTERVAL 30 DAY
+  GROUP BY rid
+)
+SELECT count() AS opened_via_banner,
+       countIf(a.first_approved > o.first_open) AS approved_after,
+       round(100.0 * countIf(a.first_approved > o.first_open) / count(), 1) AS pct_converted
+FROM opened o
+LEFT JOIN approved a ON a.rid = o.rid
+```
+
+The banner is judged working if `requests_opened_via_banner` grows out of
+the never-opened pool (the 47/87 above), and `pct_converted` sits near the
+agent-link rate in 7.26. A high `requests_dismissed` with low clicks means
+the entries read as noise — check `oldest_pending_s` on the shown rows
+before shortening the 7-day window. Rows minted before 2026-09-20 have no
+stored link and never appear; the banner's population starts at the deploy.
+
 **7.26 — Approval-link reminder email: does the emailed link get more
 interaction than the one the agent was handed?** Added 2026-09-15 with the
 repeat-request reminder (`src/lib/approvalNotify.ts`; sender = FGAC's
@@ -1958,7 +2109,7 @@ SELECT person.properties.email AS who,
        toString(properties.$mcp_tool_name) AS tool,
        toString(properties.account_requested) AS requested,
        count() AS refusals, uniq(toDate(timestamp)) AS days,
-       max(toInt32OrNull(toString(properties.account_refusal_count))) AS max_in_window,
+       max(toFloat64OrNull(toString(properties.account_refusal_count))) AS max_in_window,
        groupUniqArray(toString(properties.notify_status)) AS notify,
        min(timestamp) AS first, max(timestamp) AS last
 FROM events
@@ -2001,3 +2152,123 @@ requests, 30 re-minted). The reminder cannot reach the other 131; if
 rows, the email is not being read either and the next lever is the
 dashboard, not more mail.
 
+**7.27 — Slides adoption and the SERVICE_DISABLED cliff.** Added 2026-09-17
+with the Slides per-file feature (`docs/implementation_plans/claude_practical-meninsky-d8c66c_v1.md`).
+Slides rides the same `drive.file` grant as Sheets/Docs, but the Google
+Slides API must be enabled on the production GCP project (727876597677) for
+any call to succeed; until it is, every Slides call — typed or raw — fails at
+Google with 403 `SERVICE_DISABLED` (`error_status=403`,
+`error_reason=SERVICE_DISABLED`), which the route surfaces as the per-file
+grant-recovery 🚫 (it cannot tell a disabled API from a missing grant at the
+status level). Watch for it explicitly:
+
+```sql
+SELECT toDate(timestamp) AS day,
+       countIf(properties.outcome = 'success') AS ok,
+       countIf(properties.error_reason = 'SERVICE_DISABLED') AS api_disabled,
+       countIf(properties.denial_code IN ('slides_not_exposed','slides_read_only','slides_blocked')) AS rule_denied,
+       countIf(properties.denial_code = 'file_grant_missing_at_google') AS grant_missing,
+       uniq(distinct_id) AS users
+FROM events
+WHERE event = '$mcp_tool_call'
+  AND timestamp > now() - INTERVAL 14 DAY
+  AND (properties.$mcp_tool_name LIKE 'slides_%'
+       OR properties.file_service = 'slides'
+       OR properties.raw_api_family IN ('slides', 'presentations'))
+GROUP BY day ORDER BY day
+```
+
+`api_disabled > 0` after the feature ships means the console step was not
+done (or was done on the wrong project — dev is 627660126377, prod is
+727876597677); it is a Ken action, not a code fix. `ok = 0` with
+`rule_denied > 0` is the normal pre-approval funnel (7.13 applies, with
+`slides_expose` / `slides_write` as the actions). Note the family rename in
+`docs/analytics.md`: pre-2026-09-17 Slides rows carry `raw_api_family='slides'`,
+enforced rows carry `'presentations'`.
+
+**7.28 — Google 400 INVALID_ARGUMENT per tool (wrong range / wrong body).**
+Added 2026-09-18 with the bad-request copy change
+(`src/lib/googleBadRequestCopy.ts`,
+`docs/implementation_plans/claude_sheets-400-invalid-argument_v1.md`). In the
+7 d to 2026-09-18 this was the largest tool-error class among external users:
+
+| tool | 400s | people |
+| --- | --- | --- |
+| `sheets_update_range` | 29 | 9 |
+| `sheets_read_range` | 27 | 11 |
+| `sheets_edit` | 9 | 8 |
+| `sheets_append_rows` | 7 | 2 |
+| `docs_read_document` | 7 | 1 |
+| `docs_edit` | 6 | 3 |
+| `google_api_modify` | 6 | 3 |
+
+Every one landed on a file the same person was otherwise using successfully
+(the approval had worked — the argument was wrong), and nearly every one was
+followed within seconds by a success on the same file, usually after the
+agent's own `sheets_get_spreadsheet` read to learn the tab names — repeated
+in every new conversation, because a guessed `'Sheet1'` never learns. The
+route's 400 text used to be Google's message and nothing else; it now merges
+the `fieldViolations` cause Google hides under "Request contains an invalid
+argument", adds a per-kind remedy (the tab list on range errors, the
+rejected `requests[N]` on batchUpdate errors, the `fields` example on mask
+errors) and a STOP line. Outcome stays `error` — a 400 is a real tool error
+and the directory rate must keep counting it.
+
+```sql
+-- 7.28a: the before/after measure — daily 400s per tool
+SELECT toDate(timestamp) AS day,
+       properties.$mcp_tool_name AS tool,
+       count() AS bad_requests,
+       uniq(person.properties.email) AS people,
+       countIf(toInt(properties.sheet_tabs_listed) > 0) AS tab_list_shown
+FROM events
+WHERE event = '$mcp_tool_call'
+  AND properties.environment = 'production'
+  AND toInt(properties.error_status) = 400
+  AND properties.error_reason = 'INVALID_ARGUMENT'
+  AND timestamp >= now() - INTERVAL 14 DAY
+  AND person.properties.email NOT IN (/* internal + QA accounts: the same list every query in §7 uses */)
+GROUP BY day, tool ORDER BY day, bad_requests DESC
+```
+
+```sql
+-- 7.28b: what the argument problem was (kinds are FGAC's enum, never customer data)
+SELECT properties.bad_request_kind AS kind,
+       properties.$mcp_tool_name AS tool,
+       count() AS n,
+       uniq(person.properties.email) AS people
+FROM events
+WHERE event = '$mcp_tool_call'
+  AND properties.environment = 'production'
+  AND toInt(properties.error_status) = 400
+  AND timestamp >= now() - INTERVAL 7 DAY
+GROUP BY kind, tool ORDER BY n DESC
+```
+
+```sql
+-- 7.28c: the unchanged-retry signature — same person, tool and file, 400s inside one minute
+SELECT person.properties.email AS who,
+       properties.$mcp_tool_name AS tool,
+       substring(properties.file_id, 1, 8) AS file8,
+       toStartOfMinute(timestamp) AS minute,
+       count() AS n
+FROM events
+WHERE event = '$mcp_tool_call'
+  AND properties.environment = 'production'
+  AND toInt(properties.error_status) = 400
+  AND properties.error_reason = 'INVALID_ARGUMENT'
+  AND timestamp >= now() - INTERVAL 7 DAY
+GROUP BY who, tool, file8, minute
+HAVING n >= 2 ORDER BY n DESC
+```
+
+Healthy: `bad_requests` per tool trends down from the table above with
+`tab_list_shown` tracking the `range_parse` + `grid_limits` share (a gap
+means the metadata read is failing — `sheet_tabs_listed = 0` rows say so);
+7.28c returns nothing (before the change it held 1-s bursts of three
+identical `sheets_update_range` payloads and a scripted 2-then-success
+cadence); `unknown` in 7.28b stays a small tail — a growing `unknown` is a
+Google message the classifier has not seen, and the fixture list in
+`scripts/test-google-bad-request-copy.ts` is where it gets added. The
+fetch layer stamps the props, so raw `google_api_get` / `google_api_modify`
+400s appear in 7.28b too; only the sheets typed tools list tabs.

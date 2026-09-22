@@ -222,6 +222,20 @@ tmux kill-session -t fgac-qa
 
 ---
 
+## Capability: Slides Management (→ capabilities/21_slides_management.md)
+
+- Drive the slides tools conversationally through Claude Code MCP: ask for a
+  read of the exposed fixture presentation (expect the raw presentation JSON),
+  the external presentation (expect the FGAC denial + slides_expose link
+  relayed verbatim), a createSlide / insertText edit under each permission
+  level, and a raw `v1/presentations` POST for the auto-grant assertion (A10).
+- Dashboard/browser halves (A1–A4, A12) run via `/browser-agent` per
+  capability 09's harness note, slides variant (`grant-slides-access` seam).
+- A14: a 403 `SERVICE_DISABLED` on any Slides call is the GCP-console
+  blocker — record it as `blocked`, never as a rule or grant failure.
+
+---
+
 ## Capability: Windowed Large Responses (→ capabilities/20_attachment_reading.md)
 
 - Fixtures: an under-150 KB attachment, an over-160 KB attachment, and a
