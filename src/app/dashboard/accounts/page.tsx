@@ -66,13 +66,18 @@ export default async function AccountsPage({
       state,
       account_age_s: accountAgeSeconds(dbUser.createdAt),
     });
-    delegateLanding = state === 'offer' && target ? (
+    // 'offer' and 'already_active' render the SAME component at the same
+    // position (done view for the latter): the action that creates the
+    // delegation revalidates this page, and the confirming client must keep
+    // its done state through that re-render.
+    delegateLanding = (state === 'offer' || state === 'already_active') && target ? (
       <DelegateToPanel
         targetMasked={target.maskedEmail}
         signedInEmail={dbUser.email}
         surface="accounts_link"
         target={{ kind: 'user', userId: target.userId }}
         prominent
+        initialDone={state === 'already_active'}
       />
     ) : (
       <div
@@ -86,13 +91,6 @@ export default async function AccountsPage({
             another Gmail account to <strong className="text-foreground">{dbUser.email}</strong> — open it
             signed in as the account you want to add (sign out, then sign in with that Google account),
             or paste it into the browser profile where that account is signed in.
-          </>
-        )}
-        {state === 'already_active' && target && (
-          <>
-            <strong className="text-foreground">{dbUser.email}</strong> is already attached to{' '}
-            <strong className="text-foreground">{target.maskedEmail}</strong>&apos;s account — nothing more
-            to do here. Manage it under Delegations You&apos;ve Granted below.
           </>
         )}
         {state === 'missing' && (

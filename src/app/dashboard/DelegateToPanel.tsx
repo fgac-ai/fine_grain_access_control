@@ -40,6 +40,7 @@ export function DelegateToPanel({
   onDone,
   returnTo,
   dismissible = false,
+  initialDone = false,
 }: {
   targetMasked: string;
   signedInEmail: string;
@@ -52,10 +53,15 @@ export function DelegateToPanel({
   /** approve_wall: the approve URL to come back to after switching accounts. */
   returnTo?: string;
   dismissible?: boolean;
+  /** The server already knows the delegation is active: render the done
+   *  view straight away. Same component, same tree position as the offer,
+   *  so a client that just confirmed keeps its state through the RSC
+   *  re-render a server action can trigger. */
+  initialDone?: boolean;
 }) {
   const posthog = usePostHog();
   const { signOut } = useClerk();
-  const [step, setStep] = useState<"offer" | "confirm" | "done" | "hidden">("offer");
+  const [step, setStep] = useState<"offer" | "confirm" | "done" | "hidden">(initialDone ? "done" : "offer");
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
   const [switching, setSwitching] = useState(false);
@@ -93,8 +99,8 @@ export function DelegateToPanel({
 
   if (step === "done") {
     return (
-      <div className="rounded-md border border-success-foreground/30 bg-success px-4 py-3 text-sm text-success-foreground" data-testid="delegate-panel-done">
-        <p className="font-semibold">✓ {signedInEmail} is now attached to {targetMasked}</p>
+      <div className="rounded-md border border-success-foreground/30 bg-success px-4 py-3 text-sm text-success-foreground" data-testid="delegate-panel-done" data-surface={surface} data-initial={initialDone ? "true" : "false"}>
+        <p className="font-semibold">✓ {signedInEmail} is {initialDone ? "already" : "now"} attached to {targetMasked}</p>
         <p className="mt-1">
           {surface === "approve_wall"
             ? "That account's agents can read this mailbox from now on. The approval link itself still belongs to "

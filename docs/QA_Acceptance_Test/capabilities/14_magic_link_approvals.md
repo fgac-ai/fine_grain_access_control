@@ -324,14 +324,18 @@
   Accessible Gmail Accounts; `list_accounts` on USER_A's connection lists
   it) and the card shows `[data-testid=delegate-panel-done]` with a
   **Switch to `k•••••2@example.com`** button that signs out and returns to the
-  same approve URL; the done state STAYS on screen (the action revalidates
-  only the Accounts page — a layout revalidation replaced it with the
-  "already attached" card after ~250 ms in local QA 2026-09-21) — the
-  approval itself still requires USER_A (opening it
+  same approve URL; the done state STAYS on screen — poll the DOM for 3 s
+  after the click: it must remain `delegate-panel-done` (the action
+  revalidates nothing, because ANY revalidation inside a server action
+  re-renders the current route in the action response, and the page renders
+  the same panel component in both states so a re-render cannot unmount
+  it; local QA 2026-09-21 rounds 1–2 saw it replaced within 250–400 ms
+  before this) — the approval itself still requires USER_A (opening it
   as USER_A then shows the normal approve/pick flow). Re-opening the link
-  as USER_B afterwards renders `[data-testid=delegate-panel-active]`
-  ("already attached") and no offer. No rule is created on either account
-  by any of this
+  as USER_B afterwards renders the same panel already in its done view —
+  `[data-testid=delegate-panel-done][data-initial=true]` ("… is already
+  attached to …", with the Switch button) and no offer. No rule is created
+  on either account by any of this
 - **Why**: measured 30 d to 2026-09-21, 33 wrong-account opens by 10
   people (11 requests) and none recovered on the card; the 2026-09-17 case
   opened one link eleven times as a just-created second account. The

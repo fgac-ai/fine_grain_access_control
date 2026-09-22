@@ -75,10 +75,13 @@
   **Attach this mailbox** on the confirm step (the step names the recipient,
   the mailbox and how to revoke): `[data-testid=delegate-panel-done]`
   appears, and USER_B's "Delegations You've Granted" lists USER_A as Active
-  without a reload. Signed back in as USER_A, USER_B appears under
+  without a reload, and the done panel stays on screen through that
+  refresh. Signed back in as USER_A, USER_B appears under
   Accessible Gmail Accounts with "Delegated to you", and `list_accounts` on
   USER_A's connection returns it (A6/A7). Opening the same link again as
-  USER_B renders `[data-testid=delegate-link-notice][data-state=already_active]`;
+  USER_B renders the panel already in its done view
+  (`[data-testid=delegate-panel-done][data-initial=true]`, "… is already
+  attached to …");
   opening it as USER_A renders `data-state=self` ("This is your own account
   link"); a link with a garbage or unknown uuid renders nothing / `missing`
 - **Why**: measured 14 d to 2026-09-21, the old instructional dialog was

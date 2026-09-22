@@ -166,7 +166,14 @@ export async function delegateToUser(
     return { ok: false, error: 'This is your own account link — open it signed in as the account you want to add.' };
   }
   await grantDelegation(dbUser, target, { via, ...props });
-  revalidateDashboard();
+  // Revalidate ONLY for the Accounts-page landing, whose "Delegations You've
+  // Granted" list sits on the same page and must update in place. Any
+  // revalidatePath/Tag inside a server action makes Next re-render the
+  // CURRENT route in the action response, which replaced the dashboard
+  // prompt's done state with nothing (the banner correctly hides once the
+  // delegation exists). Dynamic dashboard pages refetch on the next
+  // navigation anyway.
+  if (via === 'accounts_link') revalidatePath("/dashboard/accounts");
   return { ok: true, maskedEmail: maskEmail(target.email) };
 }
 
@@ -193,12 +200,14 @@ export async function delegateToApprovalOwner(
     .limit(1).then(res => res[0]);
   if (!target) return { ok: false, error: 'That FGAC account no longer exists.' };
   await grantDelegation(dbUser, target, { via: 'approve_wall', ...props, action: owner.action });
-  // Accounts page only — NOT the 'layout' scope. Revalidating the layout
-  // re-renders /dashboard/approve inside this action's response, and the
-  // server now says "already attached": the card's done state (with its
-  // "Switch to <owner>" button) was replaced after ~250 ms (local QA
-  // 2026-09-21). The visitor's own Accounts page is what changed.
-  revalidatePath("/dashboard/accounts");
+  // No revalidation here. ANY revalidatePath/Tag inside a server action
+  // makes Next re-render the current route (/dashboard/approve) in the
+  // action response — a layout-scoped one AND a plain
+  // revalidatePath('/dashboard/accounts') both replaced the card's done
+  // state within ~400 ms (local QA 2026-09-21, two rounds). The visitor's
+  // own Accounts page is dynamic and refetches on its next navigation. The
+  // approve page also renders the same panel component in its "already
+  // attached" state, so even a re-render keeps the done view.
   return { ok: true, maskedEmail: maskEmail(target.email) };
 }
 

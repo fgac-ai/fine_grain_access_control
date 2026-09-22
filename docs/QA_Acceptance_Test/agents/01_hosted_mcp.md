@@ -129,7 +129,8 @@ curl -s $BASE_URL/api/mcp -X POST \
   `delegate-panel` (`data-surface=accounts_link`) → **Attach this mailbox**
   → `delegate-panel-done`; back as USER_A the mailbox shows "Delegated to
   you" and `list_accounts` (A6) returns it. Re-open as USER_B →
-  `delegate-link-notice[data-state=already_active]`; as USER_A → `self`.
+  `delegate-panel-done[data-initial=true]`; as USER_A →
+  `delegate-link-notice[data-state=self]`.
 - [ ] A10: needs NO active USER_B → USER_A delegation (revoke on USER_B's
   Accounts page first — override `window.confirm`). As USER_A load
   `/dashboard`, sign out, sign in as USER_B within minutes →
@@ -261,7 +262,8 @@ curl -s $BASE_URL/api/mcp -X POST \
   USER_A history the sign-out button leads. Take the offer → confirm →
   `delegate-panel-done` with **Switch to …**; verify USER_B under USER_A's
   Accessible Gmail Accounts (and `list_accounts`); re-open as USER_B →
-  `delegate-panel-active`. No rule created for either account. Revoke
+  `delegate-panel-done[data-initial=true]`. No rule created for either
+  account. Revoke
   afterwards if the baseline should not keep it.
 
 ## Capability: Sheets Grant Recovery (→ capabilities/17_sheets_grant_recovery.md)

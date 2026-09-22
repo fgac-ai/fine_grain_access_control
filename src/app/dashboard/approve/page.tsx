@@ -228,13 +228,10 @@ export default async function ApprovePage({
         this link stays valid and will bring you right back here.
       </p>
     );
-    const panel = w.delegationActive ? (
-      <div className="rounded-md border border-border bg-card px-4 py-3 text-sm text-muted-foreground" data-testid="delegate-panel-active">
-        <strong className="text-foreground">{w.signedInEmail}</strong> is already attached to{" "}
-        <strong className="text-foreground">{w.maskedOwnerEmail}</strong>&apos;s account, so its agents can
-        use this mailbox. Approving this request still takes that account.
-      </div>
-    ) : (
+    // ONE component for both states, at ONE tree position whatever the
+    // server knows: a client that just confirmed keeps its done view through
+    // the re-render, and a return visit renders the same view server-side.
+    const panel = (
       <DelegateToPanel
         targetMasked={w.maskedOwnerEmail}
         signedInEmail={w.signedInEmail}
@@ -242,6 +239,7 @@ export default async function ApprovePage({
         target={{ kind: "approval", link, priorSessionMatches: priorMatches }}
         prominent={priorMatches}
         returnTo={returnTo}
+        initialDone={w.delegationActive}
       />
     );
     return (
@@ -254,7 +252,7 @@ export default async function ApprovePage({
           (profile &ldquo;{w.keyLabel}&rdquo;), but you are signed in as{" "}
           <strong>{w.signedInEmail}</strong>.
         </div>
-        {priorMatches && !w.delegationActive ? (
+        {priorMatches ? (
           <>
             {panel}
             <div className="mt-5 border-t border-border pt-4">
