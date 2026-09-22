@@ -156,6 +156,10 @@ export function deadGrantEmailBody(opts: DeadGrantNotice & { now: Date }): strin
     opts.reconnectUrl,
     '',
     `Open the link while signed in to FGAC as ${account}; it will not run for any other account.`,
+    // Sent the moment the agent is first refused — an owner who is driving the
+    // agent interactively may have reconnected before reading this (one
+    // production owner recovered 99 s after the first refusal, 2026-09-21).
+    'If you have already reconnected, no action is needed — this email was sent the moment the agent was first refused.',
   );
   if (opts.delegated) {
     lines.push(

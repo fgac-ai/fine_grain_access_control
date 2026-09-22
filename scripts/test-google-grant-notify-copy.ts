@@ -74,6 +74,7 @@ check('names the mailbox on its own line', own.includes('\n    owner@example.com
 check('carries the reconnect link exactly as minted', own.includes(`\n${reconnect}\n`));
 check('says who may open it', own.includes('Open the link while signed in to FGAC as owner@example.com; it will not run for any other account.'));
 check('says the agent was told to stop retrying', /told to stop retrying/.test(own));
+check('tells a fast self-recoverer to ignore it', /If you have already reconnected, no action is needed/.test(own));
 check('no delegate paragraph on an own-mailbox notice', !/copied on this email/.test(own));
 check('says it is the only email unless the grant is repaired and dies again', /This is the only email FGAC will send about this account unless it is repaired and disconnects again/.test(own));
 check('never promises a repeat', !/again only if|at most|in a week/.test(own));
