@@ -71,7 +71,7 @@ async function main() {
   }
 
   const link = await mintApprovalLink(args.base, owner.id, key.id, action);
-  console.log(JSON.stringify({ owner: owner.email, profile: key.label, action: action.action, url: link.url, request_id: link.requestId }, null, 2));
+  console.log(JSON.stringify({ owner: owner.email, owner_id: owner.id, profile: key.label, proxy_key_id: key.id, action: action.action, url: link.url, request_id: link.requestId }, null, 2));
 }
 
 main().catch(err => { console.error(err); process.exit(1); });
