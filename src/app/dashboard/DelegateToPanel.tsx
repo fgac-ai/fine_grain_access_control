@@ -62,6 +62,12 @@ export function DelegateToPanel({
   const posthog = usePostHog();
   const { signOut } = useClerk();
   const [step, setStep] = useState<"offer" | "confirm" | "done" | "hidden">(initialDone ? "done" : "offer");
+  // Whether THIS client did the confirming. The approve page re-renders
+  // after the action regardless of revalidation (measured 2026-09-21: the
+  // server-side `initialDone` prop flips to true ~1.1 s after the click), so
+  // the done view keys its wording and test attributes on client state,
+  // which survives the re-render — never on the prop.
+  const [confirmedHere, setConfirmedHere] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
   const [switching, setSwitching] = useState(false);
@@ -77,6 +83,7 @@ export function DelegateToPanel({
           : await delegateToUser(target.userId, surface === "approve_wall" ? "accounts_link" : surface, { prior_gap_s: target.priorGapS });
         if (!result.ok) { setError(result.error); return; }
         clearPrevMarker();
+        setConfirmedHere(true);
         setStep("done");
         onDone?.(result.maskedEmail ?? targetMasked);
       } catch {
@@ -99,8 +106,8 @@ export function DelegateToPanel({
 
   if (step === "done") {
     return (
-      <div className="rounded-md border border-success-foreground/30 bg-success px-4 py-3 text-sm text-success-foreground" data-testid="delegate-panel-done" data-surface={surface} data-initial={initialDone ? "true" : "false"}>
-        <p className="font-semibold">✓ {signedInEmail} is {initialDone ? "already" : "now"} attached to {targetMasked}</p>
+      <div className="rounded-md border border-success-foreground/30 bg-success px-4 py-3 text-sm text-success-foreground" data-testid="delegate-panel-done" data-surface={surface} data-initial={confirmedHere ? "false" : "true"}>
+        <p className="font-semibold">✓ {signedInEmail} is {confirmedHere ? "now" : "already"} attached to {targetMasked}</p>
         <p className="mt-1">
           {surface === "approve_wall"
             ? "That account's agents can read this mailbox from now on. The approval link itself still belongs to "
