@@ -543,7 +543,8 @@ attributable to it.
   signed out. Toggle the interval to Annual, click **Get Pro**, then click
   **Sign up free** in the dialog (the Clerk modal opens — close it, do not
   complete it), click **Contact sales**, fill the form with a QA address,
-  pick a team size and one need, and press **Send**. Then sign in as
+  pick a team size and one need, and press **Send** (type the address —
+  the field capture is part of the assertion). Then sign in as
   `USER_A`, return to `/pricing`, click
   **Upgrade to Pro** and press **Count me in**. (Signed out, **Start for free**
   is also a real Clerk sign-up — its click is enough for the click event.)
@@ -557,14 +558,21 @@ attributable to it.
   false}` followed by `sign_up_started {cta_location: 'pricing_pro'}` and
   NO `pricing_interest_submitted` (signed-out visitors are never asked for
   an email); one `pricing_plan_clicked {plan: 'enterprise', interval:
-  'contract'}` followed by `pricing_interest_submitted {plan: 'enterprise',
-  interval: 'contract', signed_in: false, team_size: '<the bucket>', needs:
-  ['<the need>']}`; then `pricing_plan_clicked {plan: 'pro', signed_in: true}`
+  'contract'}` followed by at least one `pricing_sales_form_field {field:
+  'email', value: '<the typed address>'}`, one `{field: 'team_size'}` and
+  one `{field: 'needs'}`, then `pricing_interest_submitted {plan:
+  'enterprise', interval: 'contract', signed_in: false, team_size: '<the
+  bucket>', needs: ['<the need>']}` and a server `sales_lead_emailed
+  {status: 'disabled', source: 'pricing'}` on local/preview (the sender
+  vars are Production-only; on production `status: 'sent'` and the QA
+  address receives a confirmation with the sales inbox in Cc); then `pricing_plan_clicked {plan: 'pro', signed_in: true}`
   and `pricing_interest_submitted {plan: 'pro', signed_in: true}`. Every
   row carries `pricing_variant` (`v3-2026-09` today). The signed-out
   submitter's person carries `pricing_interest_plan = 'enterprise'` and the
   submitted `email`; `USER_A`'s person carries `pricing_interest_plan =
-  'pro'`. No new rows appear
+  'pro'`. Re-open Contact sales, type a company name, close with Escape:
+  one `pricing_sales_form_abandoned {fields_filled: ['email','company']}`
+  (the email is prefilled when signed in). No new rows appear
   in any application table — the door writes to PostHog only.
 - **Regression guard**: `pricing_plan_clicked` must fire BEFORE the dialog
   opens (it is the click-through measure; the dialog can be dismissed), and

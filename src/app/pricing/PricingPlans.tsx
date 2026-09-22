@@ -436,12 +436,16 @@ function ProDoor({
 }
 
 /* ─── Contact sales ──────────────────────────────────────────────────────────
-   Captured to PostHog like the Pro door (pricing_interest_submitted with
-   plan 'enterprise' plus person properties), so sales leads are a PostHog
-   query until a server-side email to the sales mailbox is wired. */
+   Typeform-style capture (Ken, 2026-09-21): every field is captured to
+   PostHog as it is filled, not only on Send, so a partial form is still a
+   lead; closing without sending records which fields were filled. Send
+   also POSTs to /api/sales-lead, which emails the submitter with the sales
+   inbox in copy (src/lib/salesLead.ts) and reports whether it went out. */
 
 const TEAM_SIZES = ['2–10', '11–50', '51–250', '250+'] as const
 const NEEDS = ['BAA', 'SOC 2 report', 'SSO / SAML', 'Self-hosted', 'DPA / security review', 'Invoicing'] as const
+const FIELD_DEBOUNCE_MS = 700
+const EMAIL_LOOKS_VALID = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/
 
 function EnterpriseDoor({ signedIn, onClose }: { signedIn: boolean; onClose: () => void }) {
   const { user } = useUser()
@@ -453,25 +457,79 @@ function EnterpriseDoor({ signedIn, onClose }: { signedIn: boolean; onClose: () 
   const [company, setCompany] = useState('')
   const [teamSize, setTeamSize] = useState<(typeof TEAM_SIZES)[number] | ''>('')
   const [needs, setNeeds] = useState<string[]>([])
-  const [done, setDone] = useState(false)
+  const [website, setWebsite] = useState('') // honeypot — hidden, must stay empty
+  const [phase, setPhase] = useState<'form' | 'sending' | 'done'>('form')
+  const [emailed, setEmailed] = useState(false)
   const firstField = useRef<HTMLInputElement>(null)
+  const openedAt = useRef(Date.now())
+  const submitted = useRef(false)
+  const timers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+
+  /* Field-level capture. Text fields debounce so a person typing is one
+     event per pause, not per keystroke; choices capture at once. A
+     plausible email also goes on the person, so a lead who never presses
+     Send is still reachable in PostHog. */
+  const trackField = (field: string, value: string | string[], immediate = false) => {
+    const fire = () => {
+      capture('pricing_sales_form_field', { plan: 'enterprise', field, value, signed_in: signedIn })
+      if (field === 'email' && typeof value === 'string' && EMAIL_LOOKS_VALID.test(value) && !knownEmail) {
+        posthog.setPersonProperties({ email: value, pricing_interest_plan: 'enterprise' })
+      }
+      if (field === 'company' && typeof value === 'string' && value) {
+        posthog.setPersonProperties({ pricing_interest_company: value })
+      }
+    }
+    clearTimeout(timers.current[field])
+    if (immediate) fire()
+    else timers.current[field] = setTimeout(fire, FIELD_DEBOUNCE_MS)
+  }
+
+  const close = () => {
+    if (!submitted.current) {
+      const filled = [
+        email.trim() ? 'email' : null,
+        company.trim() ? 'company' : null,
+        teamSize ? 'team_size' : null,
+        needs.length ? 'needs' : null,
+      ].filter(Boolean)
+      capture('pricing_sales_form_abandoned', {
+        plan: 'enterprise',
+        fields_filled: filled,
+        seconds_open: Math.round((Date.now() - openedAt.current) / 1000),
+        signed_in: signedIn,
+      })
+    }
+    onClose()
+  }
 
   useEffect(() => {
     firstField.current?.focus()
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') close()
     }
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+    const pending = timers.current
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      Object.values(pending).forEach(clearTimeout)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const toggleNeed = (n: string) =>
-    setNeeds((cur) => (cur.includes(n) ? cur.filter((x) => x !== n) : [...cur, n]))
+    setNeeds((cur) => {
+      const next = cur.includes(n) ? cur.filter((x) => x !== n) : [...cur, n]
+      trackField('needs', next, true)
+      return next
+    })
 
-  const submit = (e: React.FormEvent) => {
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     const submittedEmail = email.trim()
-    if (!submittedEmail) return
+    if (!submittedEmail || phase !== 'form') return
+    submitted.current = true
+    Object.values(timers.current).forEach(clearTimeout)
+    setPhase('sending')
     capture('pricing_interest_submitted', {
       plan: 'enterprise',
       interval: 'contract',
@@ -487,7 +545,18 @@ function EnterpriseDoor({ signedIn, onClose }: { signedIn: boolean; onClose: () 
       ...(company.trim() ? { pricing_interest_company: company.trim() } : {}),
       ...(knownEmail ? {} : { email: submittedEmail }),
     })
-    setDone(true)
+    try {
+      const res = await fetch('/api/sales-lead', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: submittedEmail, company: company.trim(), teamSize, needs, website }),
+      })
+      const data = (await res.json().catch(() => ({}))) as { emailed?: boolean }
+      setEmailed(Boolean(data.emailed))
+    } catch {
+      setEmailed(false)
+    }
+    setPhase('done')
   }
 
   const field =
@@ -496,7 +565,7 @@ function EnterpriseDoor({ signedIn, onClose }: { signedIn: boolean; onClose: () 
   return (
     <div
       className="fixed inset-0 z-50 flex items-end justify-center bg-surface-inverse/60 p-4 sm:items-center"
-      onClick={onClose}
+      onClick={close}
     >
       <div
         role="dialog"
@@ -508,11 +577,11 @@ function EnterpriseDoor({ signedIn, onClose }: { signedIn: boolean; onClose: () 
       >
         <div className="mb-4 flex items-start justify-between gap-4">
           <h2 id="pricing-sales-title" className="text-lg font-bold text-foreground">
-            {done ? 'Thanks — we’ll be in touch' : 'Talk to sales'}
+            {phase === 'done' ? 'Thanks — we’ll be in touch' : 'Talk to sales'}
           </h2>
           <button
             type="button"
-            onClick={onClose}
+            onClick={close}
             aria-label="Close"
             className="rounded-sm p-1 text-muted-foreground hover:text-foreground"
           >
@@ -520,12 +589,23 @@ function EnterpriseDoor({ signedIn, onClose }: { signedIn: boolean; onClose: () 
           </button>
         </div>
 
-        {done ? (
+        {phase === 'done' ? (
           <>
             <p className="text-sm leading-relaxed text-muted-foreground">
-              We’ll reply to{' '}
-              <span className="font-semibold text-foreground">{email.trim()}</span> within one
-              business day. Prefer email? Write to{' '}
+              {emailed ? (
+                <>
+                  We’ve emailed a confirmation to{' '}
+                  <span className="font-semibold text-foreground">{email.trim()}</span> with a copy
+                  to our sales team, and we’ll reply within one business day.
+                </>
+              ) : (
+                <>
+                  We’ll reply to{' '}
+                  <span className="font-semibold text-foreground">{email.trim()}</span> within one
+                  business day.
+                </>
+              )}{' '}
+              Prefer email? Write to{' '}
               <a href={`mailto:${SALES_EMAIL}`} className="text-primary underline underline-offset-2">
                 {SALES_EMAIL}
               </a>
@@ -556,7 +636,10 @@ function EnterpriseDoor({ signedIn, onClose }: { signedIn: boolean; onClose: () 
                 required
                 autoComplete="email"
                 value={email}
-                onChange={(e) => setEmailEdit(e.target.value)}
+                onChange={(e) => {
+                  setEmailEdit(e.target.value)
+                  trackField('email', e.target.value)
+                }}
                 placeholder="you@company.com"
                 className={field}
               />
@@ -568,7 +651,10 @@ function EnterpriseDoor({ signedIn, onClose }: { signedIn: boolean; onClose: () 
                 type="text"
                 autoComplete="organization"
                 value={company}
-                onChange={(e) => setCompany(e.target.value)}
+                onChange={(e) => {
+                  setCompany(e.target.value)
+                  trackField('company', e.target.value)
+                }}
                 placeholder="Optional"
                 className={field}
               />
@@ -578,7 +664,11 @@ function EnterpriseDoor({ signedIn, onClose }: { signedIn: boolean; onClose: () 
               Team size
               <select
                 value={teamSize}
-                onChange={(e) => setTeamSize(e.target.value as (typeof TEAM_SIZES)[number])}
+                onChange={(e) => {
+                  const v = e.target.value as (typeof TEAM_SIZES)[number]
+                  setTeamSize(v)
+                  trackField('team_size', v, true)
+                }}
                 className={field}
               >
                 <option value="">Select…</option>
@@ -614,6 +704,18 @@ function EnterpriseDoor({ signedIn, onClose }: { signedIn: boolean; onClose: () 
               </div>
             </fieldset>
 
+            {/* Honeypot: invisible to people, filled by naive bots. */}
+            <input
+              type="text"
+              name="website"
+              tabIndex={-1}
+              autoComplete="off"
+              aria-hidden
+              value={website}
+              onChange={(e) => setWebsite(e.target.value)}
+              className="hidden"
+            />
+
             <div className="flex items-center justify-between gap-3 pt-1">
               <a
                 href={`mailto:${SALES_EMAIL}?subject=${encodeURIComponent('FGAC.ai Enterprise')}`}
@@ -624,16 +726,17 @@ function EnterpriseDoor({ signedIn, onClose }: { signedIn: boolean; onClose: () 
               <div className="flex items-center gap-3">
                 <button
                   type="button"
-                  onClick={onClose}
+                  onClick={close}
                   className="rounded-sm px-3 py-2 text-sm font-semibold text-muted-foreground hover:text-foreground"
                 >
                   Not now
                 </button>
                 <button
                   type="submit"
-                  className="rounded-sm bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90"
+                  disabled={phase === 'sending'}
+                  className="rounded-sm bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-60"
                 >
-                  Send
+                  {phase === 'sending' ? 'Sending…' : 'Send'}
                 </button>
               </div>
             </div>

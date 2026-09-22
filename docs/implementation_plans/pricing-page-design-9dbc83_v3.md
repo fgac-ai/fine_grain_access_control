@@ -123,3 +123,9 @@ cap if the free/paid split lands far from the 82/71 the data predicts.
   size, company and needs; the sales address is a fallback link inside the
   dialog. Follow-up: a server-side email to the sales mailbox via the
   support sender so leads are not PostHog-only.
+- **Contact-sales form captures every field as filled** (Typeform-style;
+  Ken 2026-09-21) and **emails on Send**: confirmation to the submitter with
+  the sales inbox in Cc and Reply-To, from the support sender through FGAC's
+  own proxy (`src/lib/salesLead.ts`, `/api/sales-lead`). Sender vars are
+  Production-only, so local/preview record `sales_lead_emailed {status:
+  'disabled'}`. Honeypot field drops naive bots.
