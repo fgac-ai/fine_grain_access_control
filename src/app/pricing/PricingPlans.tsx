@@ -463,7 +463,7 @@ function EnterpriseDoor({ signedIn, onClose }: { signedIn: boolean; onClose: () 
   const firstField = useRef<HTMLInputElement>(null)
   const openedAt = useRef(Date.now())
   const submitted = useRef(false)
-  const timers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+  const timers = useRef<Record<string, { handle: ReturnType<typeof setTimeout>; fire: () => void }>>({})
   // The Escape listener is registered once, so it reads the form through a
   // ref that every render refreshes — otherwise it sees the first render's
   // empty values and the abandonment event lists no fields.
@@ -484,12 +484,25 @@ function EnterpriseDoor({ signedIn, onClose }: { signedIn: boolean; onClose: () 
         posthog.setPersonProperties({ pricing_interest_company: value })
       }
     }
-    clearTimeout(timers.current[field])
+    const pending = timers.current[field]
+    if (pending) clearTimeout(pending.handle)
+    delete timers.current[field]
     if (immediate) fire()
-    else timers.current[field] = setTimeout(fire, FIELD_DEBOUNCE_MS)
+    else timers.current[field] = { handle: setTimeout(() => { delete timers.current[field]; fire() }, FIELD_DEBOUNCE_MS), fire }
+  }
+
+  /* A value typed just before Send or close must not be lost to the
+     debounce — fire whatever is still pending, in field order. */
+  const flushFields = () => {
+    for (const [field, pending] of Object.entries(timers.current)) {
+      clearTimeout(pending.handle)
+      delete timers.current[field]
+      pending.fire()
+    }
   }
 
   const close = () => {
+    flushFields()
     if (!submitted.current) {
       const cur = latest.current
       const filled = [
@@ -517,7 +530,7 @@ function EnterpriseDoor({ signedIn, onClose }: { signedIn: boolean; onClose: () 
     const pending = timers.current
     return () => {
       window.removeEventListener('keydown', onKey)
-      Object.values(pending).forEach(clearTimeout)
+      Object.values(pending).forEach((p) => clearTimeout(p.handle))
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -533,7 +546,7 @@ function EnterpriseDoor({ signedIn, onClose }: { signedIn: boolean; onClose: () 
     const submittedEmail = email.trim()
     if (!submittedEmail || phase !== 'form') return
     submitted.current = true
-    Object.values(timers.current).forEach(clearTimeout)
+    flushFields()
     setPhase('sending')
     capture('pricing_interest_submitted', {
       plan: 'enterprise',
