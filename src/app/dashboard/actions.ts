@@ -193,7 +193,12 @@ export async function delegateToApprovalOwner(
     .limit(1).then(res => res[0]);
   if (!target) return { ok: false, error: 'That FGAC account no longer exists.' };
   await grantDelegation(dbUser, target, { via: 'approve_wall', ...props, action: owner.action });
-  revalidateDashboard();
+  // Accounts page only — NOT the 'layout' scope. Revalidating the layout
+  // re-renders /dashboard/approve inside this action's response, and the
+  // server now says "already attached": the card's done state (with its
+  // "Switch to <owner>" button) was replaced after ~250 ms (local QA
+  // 2026-09-21). The visitor's own Accounts page is what changed.
+  revalidatePath("/dashboard/accounts");
   return { ok: true, maskedEmail: maskEmail(target.email) };
 }
 

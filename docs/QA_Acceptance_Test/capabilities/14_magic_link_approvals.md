@@ -324,7 +324,10 @@
   Accessible Gmail Accounts; `list_accounts` on USER_A's connection lists
   it) and the card shows `[data-testid=delegate-panel-done]` with a
   **Switch to `k•••••2@example.com`** button that signs out and returns to the
-  same approve URL — the approval itself still requires USER_A (opening it
+  same approve URL; the done state STAYS on screen (the action revalidates
+  only the Accounts page — a layout revalidation replaced it with the
+  "already attached" card after ~250 ms in local QA 2026-09-21) — the
+  approval itself still requires USER_A (opening it
   as USER_A then shows the normal approve/pick flow). Re-opening the link
   as USER_B afterwards renders `[data-testid=delegate-panel-active]`
   ("already attached") and no offer. No rule is created on either account

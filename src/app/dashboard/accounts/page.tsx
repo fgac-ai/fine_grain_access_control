@@ -138,7 +138,11 @@ export default async function AccountsPage({
 
   return (
     <>
-    <SecondAccountBanner currentClerkUserId={user.id} currentEmail={dbUser.email} accountCreatedAt={dbUser.createdAt} />
+    {/* One offer at a time: a delegate-link landing already IS the prompt
+        (local QA 2026-09-21 saw both render together). */}
+    {!delegateLanding && (
+      <SecondAccountBanner currentClerkUserId={user.id} currentUserId={dbUser.id} currentEmail={dbUser.email} accountCreatedAt={dbUser.createdAt} />
+    )}
     <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-8 space-y-6">
       {delegateLanding && <div className="max-w-2xl">{delegateLanding}</div>}
       <div className="max-w-2xl">

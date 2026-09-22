@@ -86,7 +86,9 @@
   second FGAC account and clicked the same button there. The link is the
   action the second account can take (`src/lib/secondAccount.ts`)
 - **Never**: the link never carries an email; the confirm step is never
-  skipped (two clicks, always); a self-open never writes anything
+  skipped (two clicks, always); a self-open never writes anything; the
+  landing never renders alongside the A10 dashboard prompt (one offer at a
+  time — local QA 2026-09-21 saw both before the fix)
 
 ### A10: A fresh account whose browser just held another FGAC session is offered the merge
 - Signed in as USER_A, load `/dashboard` (any dashboard page stamps the
@@ -103,7 +105,13 @@
   (the `fgac_prev_account` cookie is cleared). Signing in as USER_B again
   more than two hours after USER_A's last dashboard request shows no banner
   (adjacency window); signing back in as USER_A after USER_B shows USER_A a
-  banner about USER_B (last account wins), never about itself
+  banner about USER_B (last account wins), never about itself — and because
+  USER_A is the OLDER account it is the switch variant
+  (`[data-testid=second-account-banner][data-direction=switch]`,
+  `[data-testid=switch-and-attach-panel]`): "Switch to `k•••••h@example.com`
+  and attach it here" signs out and lands on USER_A's delegate link, where
+  USER_B confirms exactly as in A9. The newer account always gets the
+  delegate offer (`data-direction=delegate`), the older one the switch offer
 - **Why**: the 2026-09-19 case — sign out of A, create B four seconds
   later, repeat the same clicks on B. Nothing on B's dashboard knew A had
   just been here. Unit rules: `scripts/test-second-account.ts`

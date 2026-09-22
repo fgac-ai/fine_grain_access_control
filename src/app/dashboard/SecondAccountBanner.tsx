@@ -5,6 +5,7 @@ import {
 } from '@/lib/secondAccount';
 import { accountAgeSeconds, delegationAlreadyActive, delegationTargetByClerkId } from '@/lib/delegationTargets';
 import { DelegateToPanel } from './DelegateToPanel';
+import { SwitchAndAttachPanel } from './SwitchAndAttachPanel';
 
 /**
  * "You were signed in as <other account> a moment ago — is that also you?"
@@ -25,10 +26,13 @@ import { DelegateToPanel } from './DelegateToPanel';
  */
 export async function SecondAccountBanner({
   currentClerkUserId,
+  currentUserId,
   currentEmail,
   accountCreatedAt,
 }: {
   currentClerkUserId: string;
+  /** users.id — the target of this account's delegate link (switch direction). */
+  currentUserId: string;
   currentEmail: string;
   accountCreatedAt: Date;
 }) {
@@ -45,25 +49,43 @@ export async function SecondAccountBanner({
     const target = await delegationTargetByClerkId(prior.clerkUserId);
     if (!target || target.clerkUserId === currentClerkUserId) return null;
     if (target.email.toLowerCase() === currentEmail.toLowerCase()) return null;
-    if (await delegationAlreadyActive(currentEmail, target.email)) return null;
+    // Direction. The NEWER account is the accidental one: when that is the
+    // account signed in now, offer to attach its mailbox to the older one
+    // (a delegation this account can grant right here). When the person is
+    // back on the OLDER account — their primary, the one agents are
+    // connected to — delegating it away is the wrong direction; offer to
+    // switch to the newer account and attach it here via the delegate link.
+    const direction: 'delegate' | 'switch' =
+      target.createdAt.getTime() > accountCreatedAt.getTime() ? 'switch' : 'delegate';
+    if (direction === 'delegate' && await delegationAlreadyActive(currentEmail, target.email)) return null;
+    if (direction === 'switch' && await delegationAlreadyActive(target.email, currentEmail)) return null;
 
     captureServerEvent(currentClerkUserId, 'delegation_prompt_shown', {
       surface: 'dashboard_banner',
+      direction,
       prior_gap_s: prior.gapS,
       since_switch_s: prior.sinceSwitchS,
       account_age_s: accountAgeSeconds(accountCreatedAt, now),
     });
 
     return (
-      <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 pt-8" data-testid="second-account-banner">
-        <DelegateToPanel
-          targetMasked={target.maskedEmail}
-          signedInEmail={currentEmail}
-          surface="dashboard_banner"
-          target={{ kind: 'user', userId: target.userId, priorGapS: prior.gapS }}
-          prominent
-          dismissible
-        />
+      <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 pt-8" data-testid="second-account-banner" data-direction={direction}>
+        {direction === 'delegate' ? (
+          <DelegateToPanel
+            targetMasked={target.maskedEmail}
+            signedInEmail={currentEmail}
+            surface="dashboard_banner"
+            target={{ kind: 'user', userId: target.userId, priorGapS: prior.gapS }}
+            prominent
+            dismissible
+          />
+        ) : (
+          <SwitchAndAttachPanel
+            targetMasked={target.maskedEmail}
+            currentEmail={currentEmail}
+            currentUserId={currentUserId}
+          />
+        )}
       </div>
     );
   } catch (err) {

@@ -2324,6 +2324,7 @@ GROUP BY prior_matched
 -- 7.29c: second accounts created from a browser that just held another FGAC session
 SELECT toStartOfWeek(timestamp) AS wk,
        uniq(person_id) AS fresh_accounts_prompted,
+       uniqIf(person_id, properties.direction = 'switch') AS back_on_the_older_account,
        uniqIf(person_id, toInt(properties.account_age_s) < 3600) AS under_an_hour_old,
        uniqIf(person_id, event = 'delegation_prompt_dismissed') AS said_someone_else
 FROM events

@@ -224,7 +224,7 @@ through the steps above:
 > **You never need a second FGAC account for a second Gmail.** If you end up
 > with one anyway, FGAC notices: signing in as the new account right after the
 > old one in the same browser shows *"You were signed in as … a moment ago —
-> is that also you?"* with the same one-click attach; and opening the first
+> is that also you?"* — the newer account gets the one-click attach, the older one a *Switch to … and attach it here* button that takes you through the same confirm as the other account; and opening the first
 > account's approval link while signed in as the second offers to attach the
 > second mailbox to the first before you switch back. Both name the other
 > account masked (e.g. `k•••••h@example.com`) and never write anything without

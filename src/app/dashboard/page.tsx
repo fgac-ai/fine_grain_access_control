@@ -75,7 +75,7 @@ export default async function DashboardPage({
         needsDriveFile={data.needsDriveFile}
       />
       <PendingApprovalsBanner userId={data.userId} clerkUserId={data.clerkUserId} profiles={data.profiles} />
-      <SecondAccountBanner currentClerkUserId={data.clerkUserId} currentEmail={data.email} accountCreatedAt={data.accountCreatedAt} />
+      <SecondAccountBanner currentClerkUserId={data.clerkUserId} currentUserId={data.userId} currentEmail={data.email} accountCreatedAt={data.accountCreatedAt} />
       {!data.hasCompleteGoogleAccess && (
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 pt-8">
           <ConnectGoogleWarning
