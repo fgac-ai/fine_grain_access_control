@@ -2,9 +2,10 @@
  * Contact-sales leads from /pricing.
  *
  * A submission does two things: the client captures it to PostHog (the
- * lead list), and this module emails it — one message to the submitter,
- * copied to the sales inbox, sent from FGAC's own support mailbox through
- * FGAC's own proxy exactly like the approval reminders (`approvalNotify.ts`):
+ * lead list), and this module emails it — one message from the sales
+ * alias to the submitter, copied to the sales inbox, sent through FGAC's
+ * own support mailbox (which owns the alias) via FGAC's own proxy exactly
+ * like the approval reminders (`approvalNotify.ts`):
  * same key, same send-allowlist enforcement, same `proxy_request` analytics.
  * The confirmation carries what the person told us, so the copy in the
  * sales inbox IS the lead.
@@ -71,10 +72,11 @@ export function salesLeadBody(lead: SalesLead): string {
 }
 
 /**
- * RFC 5322 message: To the submitter, Cc the sales inbox, Reply-To sales.
- * `from` is the support mailbox unless SALES_SENDER_EMAIL names an address
- * that mailbox is allowed to send as (a Gmail "send mail as" alias); Google
- * rewrites or rejects a From it does not own, so the default is the safe one.
+ * RFC 5322 message: From the sales alias, To the submitter, Cc the sales
+ * inbox, Reply-To sales. The sales address is an alias of the support
+ * mailbox the proxy key belongs to (Ken, 2026-09-21), so Gmail accepts it
+ * as From; SALES_SENDER_EMAIL overrides it, and Google rewrites a From the
+ * mailbox does not own, so any override must also be one of its aliases.
  */
 export function salesLeadEmailRaw(opts: { from: string; to: string; cc: string; replyTo: string; subject: string; body: string }): string {
   return `From: FGAC.ai Sales <${sanitizeLine(opts.from, 254)}>\r\n` +
@@ -116,7 +118,7 @@ export async function emailSalesLead(lead: SalesLead, opts: EmailSalesLeadOpts =
     return { status: 'disabled' };
   }
 
-  const from = env.SALES_SENDER_EMAIL?.trim() || sender.address;
+  const from = env.SALES_SENDER_EMAIL?.trim() || SALES_INBOX;
   const raw = Buffer.from(
     salesLeadEmailRaw({
       from,
