@@ -1990,9 +1990,12 @@ GROUP BY status ORDER BY mints DESC
 -- `account_requested` did not exist and the refused value was recorded
 -- nowhere (a scheduled job: 53 refusals in 6 days, inferred from the
 -- response length). The email fires once EVER per (key, requested value) on
--- the 3rd refusal in a rolling 24 h; `not_due` on every row of a person
--- with ≥ 3 refusals in a day means the window reset between them (cadence
--- > 24 h) or the sender is off (`disabled`). Pair with:
+-- the 3rd refusal in a rolling 24 h, and since PR #156 at most once per
+-- OWNER per 14-day episode whatever the value (`skipped_episode` on the later
+-- values — before that an agent guessing three addresses earned three emails
+-- in 16.7 h, 2026-09-20/21); `not_due` on every row of a person with ≥ 3
+-- refusals in a day means the window reset between them (cadence > 24 h) or
+-- the sender is off (`disabled`). The per-recipient spam watch is 7.29d. Pair with:
 --   SELECT * FROM account_refusals ORDER BY last_refused_at DESC LIMIT 20
 -- (branch DB or a read-only production query) for the ledger itself.
 SELECT person.properties.email AS who,

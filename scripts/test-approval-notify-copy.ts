@@ -16,7 +16,7 @@
 import {
   accountRefusalDenialLine, accountRefusalEmailBody, accountRefusalEmailSubject,
   approvalEmailBody, approvalEmailRaw, approvalEmailSubject, emailLinkUrl, encodeHeaderWord, notifyDenialLine, sanitizeLine, shortGrant,
-  ACCOUNT_REFUSAL_NOTIFY_AFTER, NOTIFY_MAX_PER_DAY, NOTIFY_MIN_GAP_MS, type NotifyLink,
+  ACCOUNT_REFUSAL_EPISODE_GAP_MS, ACCOUNT_REFUSAL_NOTIFY_AFTER, NOTIFY_MAX_PER_DAY, NOTIFY_MIN_GAP_MS, type NotifyLink,
 } from '../src/lib/approvalNotifyCopy';
 import { normalizeRequestedEmail } from '../src/lib/accountRefusals';
 
@@ -110,6 +110,8 @@ check('agent label is capped', !pluralBody.includes('x'.repeat(100)));
 check('refusal denial line: sent', accountRefusalDenialLine('sent', {}).startsWith('📧') && accountRefusalDenialLine('sent', {}).includes('emailed the user just now'));
 check('refusal denial line: already_sent names the time', accountRefusalDenialLine('already_sent', { notifiedAt: new Date('2026-09-09T03:37:00Z') }).includes('at 2026-09-09 03:37 UTC'));
 check('refusal denial line: nothing for not_due / disabled / failed / capped', ['not_due', 'disabled', 'failed', 'skipped_rate_capped'].every(s => accountRefusalDenialLine(s as never, {}) === ''));
+check('refusal denial line: nothing for skipped_episode (the refusal text already names the value)', accountRefusalDenialLine('skipped_episode', {}) === '');
+check('one refusal email per owner per 14-day episode', ACCOUNT_REFUSAL_EPISODE_GAP_MS === 14 * 24 * 60 * 60_000);
 
 if (failures) { console.error(`\n${failures} approval-notify copy check(s) failed`); process.exit(1); }
 console.log('\nAll approval-notify copy checks passed');

@@ -17,6 +17,7 @@ import { db } from '@/db';
 import { accountRefusals } from '@/db/schema';
 import { and, eq, isNull, sql } from 'drizzle-orm';
 import { recentNotificationCountSql } from './approvalRequests';
+import { ACCOUNT_REFUSAL_EPISODE_GAP_MS } from './approvalNotifyCopy';
 
 /** The window that decides "the same wrong value keeps coming": refusals
  * older than this restart the count. Rolling, not calendar. */
@@ -79,16 +80,28 @@ export async function recordAccountRefusal(opts: {
   }
 }
 
+/** Has this owner been emailed about ANY refused account inside the current
+ * episode? (Any row of theirs stamped within the episode gap.) */
+function ownerEpisodeNotifiedSql(userId: string) {
+  const gapSeconds = Math.round(ACCOUNT_REFUSAL_EPISODE_GAP_MS / 1000);
+  return sql`EXISTS (SELECT 1 FROM ${accountRefusals} AS episode_rows
+                     WHERE episode_rows.user_id = ${userId}
+                       AND episode_rows.notified_at > now() - ${sql.raw(`interval '${gapSeconds} seconds'`)})`;
+}
+
 /**
  * Claim the right to email the owner about this row: flips `notified_at`
- * from NULL to now() atomically, and only while the owner is under
- * `maxPerDay` reminder emails in the last 24 h across both ledgers. Once
- * claimed, the row is never emailed again (released only on a definite
- * non-send).
+ * from NULL to now() atomically, and only while (a) this row was never
+ * emailed, (b) the owner has NOT been emailed about any refused account in
+ * the current episode (one email per owner per ACCOUNT_REFUSAL_EPISODE_GAP_MS
+ * — a crawler guessing N addresses used to earn N emails), and (c) the owner
+ * is under `maxPerDay` reminder emails in the last 24 h across all three
+ * ledgers. Once claimed, the row is never emailed again (released only on a
+ * definite non-send).
  */
 export async function claimAccountRefusalNotification(id: string, userId: string, maxPerDay: number): Promise<
   { claimed: true; notifiedAt: Date | null }
-  | { claimed: false; notifiedAt: Date | null; reason: 'already' | 'capped' | 'missing' | 'error' }
+  | { claimed: false; notifiedAt: Date | null; reason: 'already' | 'episode' | 'capped' | 'missing' | 'error' }
 > {
   try {
     const [row] = await db.update(accountRefusals)
@@ -96,16 +109,23 @@ export async function claimAccountRefusalNotification(id: string, userId: string
       .where(and(
         eq(accountRefusals.id, id),
         isNull(accountRefusals.notifiedAt),
+        sql`NOT ${ownerEpisodeNotifiedSql(userId)}`,
         sql`${recentNotificationCountSql(userId)} < ${maxPerDay}`,
       ))
       .returning({ notifiedAt: accountRefusals.notifiedAt });
     if (row) return { claimed: true, notifiedAt: row.notifiedAt };
-    const existing = await db.select({ notifiedAt: accountRefusals.notifiedAt })
+    const [existing] = await db.select({
+      notifiedAt: accountRefusals.notifiedAt,
+      episodeNotified: ownerEpisodeNotifiedSql(userId),
+    })
       .from(accountRefusals)
       .where(eq(accountRefusals.id, id))
-      .limit(1).then(r => r[0]);
+      .limit(1);
     if (!existing) return { claimed: false, notifiedAt: null, reason: 'missing' };
     if (existing.notifiedAt) return { claimed: false, notifiedAt: existing.notifiedAt, reason: 'already' };
+    if (existing.episodeNotified === true || existing.episodeNotified === 't') {
+      return { claimed: false, notifiedAt: null, reason: 'episode' };
+    }
     return { claimed: false, notifiedAt: null, reason: 'capped' };
   } catch (err) {
     console.error('[accountRefusals] notification claim failed:', err);

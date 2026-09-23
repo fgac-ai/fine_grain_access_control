@@ -37,9 +37,11 @@
  * repeat-mint rule above can never fire for it; a scheduled job was refused
  * 53 times in 6 days that way with its owner off the dashboard. The
  * ACCOUNT_REFUSAL_NOTIFY_AFTER-th refusal of the same value on one key in
- * 24 h emails the owner once (ever, per key + value) from the same sender,
- * under the same per-person daily cap (both ledgers count), naming the value
- * the task passes and the accounts that would work.
+ * 24 h emails the owner once from the same sender, under the same per-person
+ * daily cap, naming the value the task passes and the accounts that would
+ * work. Since 2026-09-22 also once per OWNER per 14-day episode whatever the
+ * value: an agent guessing three wrong addresses earned three emails in
+ * 16.7 h (production, 09-20/21) and only the daily cap stopped a fourth.
  *
  * Third trigger (2026-09-20) — `notifyOwnerOfDeadGrant`: a Google grant that
  * a reconnect would repair (`no_token` / `refresh_failed` / `grant_revoked`)
@@ -237,8 +239,9 @@ export interface NotifyAccountRefusalResult {
 /**
  * Record a caller-chosen `account_not_permitted` refusal and, on the
  * ACCOUNT_REFUSAL_NOTIFY_AFTER-th one for the same value on the same key
- * within 24 h, email the owner ONCE (ever, per key + value) from the support
- * mailbox under the shared daily cap. The ledger row is written whether or
+ * within 24 h, email the owner ONCE — per key + value, and per owner per
+ * 14-day episode across all values — from the support mailbox under the
+ * shared daily cap. The ledger row is written whether or
  * not the sender is configured — the refused value is the diagnosis
  * analytics never carried. Never throws.
  */
@@ -268,6 +271,10 @@ async function attemptRefusalNotice(
   const claim = await claimAccountRefusalNotification(row.id, opts.owner.id, NOTIFY_MAX_PER_DAY);
   if (!claim.claimed) {
     if (claim.reason === 'already') return { status: 'already_sent', notifiedAt: claim.notifiedAt, refusalCount: row.windowCount };
+    // The owner was emailed about a different refused value inside this
+    // episode: no second email, and no 📧 line — the refusal text already
+    // names this value and the fixes.
+    if (claim.reason === 'episode') return { status: 'skipped_episode', notifiedAt: null, refusalCount: row.windowCount };
     if (claim.reason === 'capped') return { status: 'skipped_rate_capped', notifiedAt: null, refusalCount: row.windowCount };
     return { status: 'failed', notifiedAt: null, refusalCount: row.windowCount };
   }

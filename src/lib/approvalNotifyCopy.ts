@@ -29,6 +29,9 @@ export type NotifyStatus =
   | 'skipped_rate_capped'
   /** Dead-grant notice only: the global hourly circuit breaker tripped. */
   | 'skipped_global_capped'
+  /** Account-refusal notice only: the owner was already emailed about a
+   * refused account inside the current episode (ACCOUNT_REFUSAL_EPISODE_GAP_MS). */
+  | 'skipped_episode'
   | 'skipped_no_links'
   | 'failed'
   | 'disabled';
@@ -176,6 +179,15 @@ export function notifyDenialLine(status: NotifyStatus, opts: { notifiedAt?: Date
  * at 7–11 a day, six one-offs at 1–2 in the month — any threshold from 3 to
  * 7 separates them; 3 emails earliest. */
 export const ACCOUNT_REFUSAL_NOTIFY_AFTER = 3;
+
+/** One refusal email per OWNER per episode, whatever the refused value. The
+ * once-per-(key, value) rule alone let an agent that guessed three wrong
+ * addresses earn three emails in 16.7 h (production, 2026-09-20/21 — only
+ * the daily cap stopped a fourth). The 🚫 refusal still names every value and
+ * the fixes on every call; the owner is told once, and again only if refusals
+ * recur after a fortnight with none in between (same gap as the dead-grant
+ * episode). Ken, 2026-09-21: one email per event, no repeat cadence. */
+export const ACCOUNT_REFUSAL_EPISODE_GAP_MS = 14 * 24 * 60 * 60_000;
 
 export interface AccountRefusalNotice {
   agentLabel: string;
