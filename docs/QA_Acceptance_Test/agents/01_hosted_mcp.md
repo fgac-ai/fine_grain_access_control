@@ -122,6 +122,24 @@ curl -s $BASE_URL/api/mcp -X POST \
   `reconnect_url` only on accounts with a definitive problem, bound with
   `&for=<email>`
 
+### A9–A10: One-click delegation (browser, both QA accounts)
+- [ ] A9: as USER_A, Accounts → **+ Add account** → read the
+  `[data-testid=delegate-link]` value (a `?delegate_to=<uuid>` URL on this
+  deployment's origin); sign out, sign in as USER_B, open it → confirm the
+  `delegate-panel` (`data-surface=accounts_link`) → **Attach this mailbox**
+  → `delegate-panel-done`; back as USER_A the mailbox shows "Delegated to
+  you" and `list_accounts` (A6) returns it. Re-open as USER_B →
+  `delegate-panel-done[data-initial=true]`; as USER_A →
+  `delegate-link-notice[data-state=self]`.
+- [ ] A10: needs NO active USER_B → USER_A delegation (revoke on USER_B's
+  Accounts page first — override `window.confirm`). As USER_A load
+  `/dashboard`, sign out, sign in as USER_B within minutes →
+  `second-account-banner` names USER_A masked; **No, that's someone else**
+  hides it and it stays hidden on reload; repeat the switch and take the
+  offer → delegation created, banner gone on the next load.
+- Order these BEFORE the delegation baseline (setup 02 Test 3) or revoke and
+  re-grant around them; the typed-email form (A2) is unchanged.
+
 ---
 
 ## Capability: Connection Lifecycle (→ capabilities/06_connection_lifecycle.md)
@@ -229,6 +247,24 @@ curl -s $BASE_URL/api/mcp -X POST \
 - A10: Detach via browser agent; email again → silence.
 - A11: unauthenticated POST to `/api/webhooks/gmail` → 401.
 - A12: `setup-gmail-push.ts --project dev-fgac-ai` dry run → all ✔.
+
+## Capability: Magic-Link Approvals — wrong-account repair (→ capabilities/14_magic_link_approvals.md)
+
+- A19: needs NO active USER_B → USER_A delegation. Mint a USER_A link
+  without an MCP token: `npm run qa:mint-link -- --email <USER_A_EMAIL>
+  --base <this deployment's origin>` (deterministic, signs with this
+  checkout's `CLERK_SECRET_KEY`; on a preview use the preview host as
+  `--base` — the signature covers only `a/k/r/s`). Sign in as USER_B in the
+  built-in browser and open it → wrong-account card with
+  `delegate-panel[data-surface=approve_wall]` naming USER_A masked. Check
+  ordering: after signing out of USER_A on that very card and back in as
+  USER_B the panel is `data-prominent=true` and leads; in a browser with no
+  USER_A history the sign-out button leads. Take the offer → confirm →
+  `delegate-panel-done` with **Switch to …**; verify USER_B under USER_A's
+  Accessible Gmail Accounts (and `list_accounts`); re-open as USER_B →
+  `delegate-panel-done[data-initial=true]`. No rule created for either
+  account. Revoke
+  afterwards if the baseline should not keep it.
 
 ## Capability: Sheets Grant Recovery (→ capabilities/17_sheets_grant_recovery.md)
 

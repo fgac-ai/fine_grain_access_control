@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { headers } from "next/headers";
+import { cookies, headers } from "next/headers";
+import { LAST_ACCOUNT_COOKIE, PREV_ACCOUNT_COOKIE, decodeLastAccount, decodePrevAccount, priorSessionMatches } from "@/lib/secondAccount";
+import { DelegateToPanel } from "../DelegateToPanel";
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { classifyApproveClient, type ApproveClient } from "@/lib/approveClientClass";
 import { EMAIL_LINK_SOURCE_PARAM, EMAIL_LINK_SOURCE_VALUE } from "@/lib/approvalNotifyCopy";
@@ -156,7 +158,30 @@ export default async function ApprovePage({
   // it converts near 58%.
   const { userId: clerkUserId } = await auth();
   const client = await clientClassification();
+  // Wrong account: did this browser hold the OWNER's session just before the
+  // current one (src/lib/secondAccount.ts)? If so the visitor is almost
+  // certainly the owner's other identity — the 2026-09-17 case signed out of
+  // the owner account on this very card and came back as a new account
+  // eleven times — and the card leads with the repair instead of sign-out.
+  let priorMatches = false;
+  if (resolved.status === "wrong_account" && clerkUserId) {
+    try {
+      const jar = await cookies();
+      priorMatches = priorSessionMatches(
+        decodeLastAccount(jar.get(LAST_ACCOUNT_COOKIE)?.value),
+        decodePrevAccount(jar.get(PREV_ACCOUNT_COOKIE)?.value),
+        clerkUserId,
+        resolved.details.ownerClerkUserId,
+        Date.now(),
+      );
+    } catch { priorMatches = false; }
+  }
   captureServerEvent(clerkUserId ?? "anonymous-approve", "approval_link_opened", {
+    ...(resolved.status === "wrong_account" ? {
+      delegate_offer: !resolved.details.delegationActive,
+      delegation_active: resolved.details.delegationActive,
+      prior_session_matches: priorMatches,
+    } : {}),
     status: resolved.status,
     // wrong_account carries the REAL request id (recomputed against the
     // resolved owner), so these opens join the funnel instead of vanishing
@@ -185,6 +210,38 @@ export default async function ApprovePage({
 
   if (resolved.status === "wrong_account") {
     const w = resolved.details;
+    const returnTo = `/dashboard/approve?${linkQuery(link, params.src)}`;
+    if (!w.delegationActive) {
+      captureServerEvent(clerkUserId ?? "anonymous-approve", "delegation_prompt_shown", {
+        surface: "approve_wall", prior_session_matches: priorMatches, action: w.action, request_id: w.requestId,
+      });
+    }
+    // The visitor's mailbox is already attached to the owner: the repair is
+    // done, only the switch remains. Otherwise offer it — first when the
+    // markers say this browser was the owner moments ago, second (behind the
+    // sign-out) when they do not: a link-holder can put this card in front
+    // of anyone, and delegation is read access to a whole mailbox.
+    const switchCopy = (
+      <p className="text-sm text-muted-foreground">
+        Approval links only work for the account they were issued for.
+        Sign out and sign back in as <strong>{w.maskedOwnerEmail}</strong> —
+        this link stays valid and will bring you right back here.
+      </p>
+    );
+    // ONE component for both states, at ONE tree position whatever the
+    // server knows: a client that just confirmed keeps its done view through
+    // the re-render, and a return visit renders the same view server-side.
+    const panel = (
+      <DelegateToPanel
+        targetMasked={w.maskedOwnerEmail}
+        signedInEmail={w.signedInEmail}
+        surface="approve_wall"
+        target={{ kind: "approval", link, priorSessionMatches: priorMatches }}
+        prominent={priorMatches}
+        returnTo={returnTo}
+        initialDone={w.delegationActive}
+      />
+    );
     return (
       <Card>
         <h1 className="mb-2 text-xl font-bold text-foreground">
@@ -195,12 +252,21 @@ export default async function ApprovePage({
           (profile &ldquo;{w.keyLabel}&rdquo;), but you are signed in as{" "}
           <strong>{w.signedInEmail}</strong>.
         </div>
-        <p className="text-sm text-muted-foreground">
-          Approval links only work for the account they were issued for.
-          Sign out and sign back in as <strong>{w.maskedOwnerEmail}</strong> —
-          this link stays valid and will bring you right back here.
-        </p>
-        <SignOutAndReturn returnTo={`/dashboard/approve?${linkQuery(link, params.src)}`} />
+        {priorMatches ? (
+          <>
+            {panel}
+            <div className="mt-5 border-t border-border pt-4">
+              {switchCopy}
+              <SignOutAndReturn returnTo={returnTo} secondary />
+            </div>
+          </>
+        ) : (
+          <>
+            {switchCopy}
+            <SignOutAndReturn returnTo={returnTo} />
+            <div className="mt-5 border-t border-border pt-4">{panel}</div>
+          </>
+        )}
       </Card>
     );
   }

@@ -61,3 +61,65 @@
   mailbox reports on a Vercel preview, whose database is a copy of production
   with production Clerk ids), or an inactive delegation carries NO link. `next_steps.sheets`/`next_steps.docs` point at
   the link when `drive_file` is `missing`
+
+### A9: The "+ Add account" link attaches a second account in one click
+- Signed in as USER_A, open `/dashboard/accounts`, click **+ Add account**
+- **Expected**: the dialog (`[data-testid=add-account-dialog]`) shows a
+  read-only link (`[data-testid=delegate-link]`) of the form
+  `<origin>/dashboard/accounts?delegate_to=<uuid>` — a `users.id`, never an
+  email — with **Copy** and **Switch account now**; there is no "Got it".
+  Open that link signed in as USER_B (sign out, sign in as USER_B, paste it):
+  the Accounts page renders `[data-testid=delegate-panel]` with
+  `data-surface="accounts_link"` naming USER_A **masked** (e.g.
+  `k•••••2@example.com`) and USER_B in full. Click the offer, then
+  **Attach this mailbox** on the confirm step (the step names the recipient,
+  the mailbox and how to revoke): `[data-testid=delegate-panel-done]`
+  appears, and USER_B's "Delegations You've Granted" lists USER_A as Active
+  without a reload, and the done panel stays on screen through that
+  refresh. Signed back in as USER_A, USER_B appears under
+  Accessible Gmail Accounts with "Delegated to you", and `list_accounts` on
+  USER_A's connection returns it (A6/A7). Opening the same link again as
+  USER_B renders the panel already in its done view
+  (`[data-testid=delegate-panel-done][data-initial=true]`, "… is already
+  attached to …");
+  opening it as USER_A renders `data-state=self` ("This is your own account
+  link"); a link with a garbage or unknown uuid renders nothing / `missing`
+- **Why**: measured 14 d to 2026-09-21, the old instructional dialog was
+  closed 11 times by 6 people and converted none; one person created a
+  second FGAC account and clicked the same button there. The link is the
+  action the second account can take (`src/lib/secondAccount.ts`)
+- **Never**: the link never carries an email; the confirm step is never
+  skipped (two clicks, always); a self-open never writes anything; the
+  landing never renders alongside the A10 dashboard prompt (one offer at a
+  time — local QA 2026-09-21 saw both before the fix)
+
+### A10: A fresh account whose browser just held another FGAC session is offered the merge
+- Signed in as USER_A, load `/dashboard` (any dashboard page stamps the
+  `fgac_last_account` marker). Sign out via the avatar menu and sign in as
+  USER_B within a few minutes (no active USER_B → USER_A delegation:
+  revoke it first if the baseline has one)
+- **Expected**: USER_B's dashboard (and Accounts page) shows
+  `[data-testid=second-account-banner]` — "You were signed in as
+  `k•••••2@example.com` a moment ago — is that also you?" with the offer
+  button and **No, that's someone else**. Clicking the offer then **Attach
+  this mailbox** creates the USER_B → USER_A delegation (visible as in A9)
+  and the banner does not return on the next load. Alternatively **No,
+  that's someone else** hides it at once and it stays hidden on reload
+  (the `fgac_prev_account` cookie is cleared). Signing in as USER_B again
+  more than two hours after USER_A's last dashboard request shows no banner
+  (adjacency window); signing back in as USER_A after USER_B shows USER_A a
+  banner about USER_B (last account wins), never about itself — and because
+  USER_A is the OLDER account it is the switch variant
+  (`[data-testid=second-account-banner][data-direction=switch]`,
+  `[data-testid=switch-and-attach-panel]`): "Switch to `k•••••h@example.com`
+  and attach it here" signs out and lands on USER_A's delegate link, where
+  USER_B confirms exactly as in A9. The newer account always gets the
+  delegate offer (`data-direction=delegate`), the older one the switch offer
+- **Why**: the 2026-09-19 case — sign out of A, create B four seconds
+  later, repeat the same clicks on B. Nothing on B's dashboard knew A had
+  just been here. Unit rules: `scripts/test-second-account.ts`
+- **Never**: the markers hold Clerk user ids and timestamps only (no
+  email); the banner never names an account in full except the visitor's
+  own; a marker naming a deleted or unknown account renders nothing; a
+  failed lookup never fails the dashboard
+

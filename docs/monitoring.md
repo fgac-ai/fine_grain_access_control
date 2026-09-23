@@ -2272,3 +2272,78 @@ Google message the classifier has not seen, and the fixture list in
 `scripts/test-google-bad-request-copy.ts` is where it gets added. The
 fetch layer stamps the props, so raw `google_api_get` / `google_api_modify`
 400s appear in 7.28b too; only the sheets typed tools list tabs.
+
+**7.29 — Second FGAC accounts → delegation (the wall, the link, the prompt).**
+Added 2026-09-21. FGAC's multi-account model is "sign in as the second Google
+account and delegate it to your first FGAC account"; three people in the week
+to 09-21 instead created a SECOND FGAC account minutes after the first and got
+stuck between the two (one opened the first account's approval link eleven
+times as the second account; one clicked "+ Add account" → "Got it" on both
+accounts). Three surfaces now offer the one-click repair
+(`src/lib/secondAccount.ts`): the wrong-account approval card, the delegate
+link the "+ Add account" dialog hands out, and a dashboard prompt for a fresh
+account whose browser held another FGAC session moments ago (middleware
+marker cookies — PostHog itself cannot pair the two accounts, `posthog.reset()`
+on sign-out rotates the device id). Baseline 30 d to 2026-09-21:
+wrong-account opens 33 rows / 11 requests / 10 people, 3 of them accounts
+under 30 min old; "+ Add account" 30 clicks by 17 people; `delegation_created`
+per week 8, 12, 13, 1, 5.
+
+```sql
+-- 7.29a: per surface, people who saw the offer vs people who took it (14 d)
+WITH shown AS (
+  SELECT properties.surface AS surface, person_id FROM events
+  WHERE event = 'delegation_prompt_shown' AND properties.environment = 'production'
+    AND timestamp > now() - INTERVAL 14 DAY
+    AND person.properties.email NOT IN (/* internal / QA accounts */)
+  GROUP BY surface, person_id),
+took AS (
+  SELECT properties.via AS surface, person_id FROM events
+  WHERE event = 'delegation_created' AND properties.environment = 'production'
+    AND timestamp > now() - INTERVAL 14 DAY
+  GROUP BY surface, person_id)
+SELECT s.surface, count() AS people_shown, countIf(t.person_id != '') AS people_delegated
+FROM shown s LEFT JOIN took t ON t.surface = s.surface AND t.person_id = s.person_id
+GROUP BY s.surface ORDER BY s.surface
+```
+
+```sql
+-- 7.29b: the wall — does the offer lead (prior session matched) and does it convert?
+SELECT JSONExtractBool(properties, 'prior_session_matches') AS prior_matched,
+       uniq(properties.request_id) AS requests,
+       uniq(person_id)             AS people,
+       countIf(event = 'delegation_created') AS delegated
+FROM events
+WHERE properties.environment = 'production' AND timestamp > now() - INTERVAL 14 DAY
+  AND ((event = 'delegation_prompt_shown' AND properties.surface = 'approve_wall')
+       OR (event = 'delegation_created' AND properties.via = 'approve_wall'))
+GROUP BY prior_matched
+```
+
+```sql
+-- 7.29c: second accounts created from a browser that just held another FGAC session
+SELECT toStartOfWeek(timestamp) AS wk,
+       uniq(person_id) AS fresh_accounts_prompted,
+       uniqIf(person_id, properties.direction = 'switch') AS back_on_the_older_account,
+       uniqIf(person_id, toInt(properties.account_age_s) < 3600) AS under_an_hour_old,
+       uniqIf(person_id, event = 'delegation_prompt_dismissed') AS said_someone_else
+FROM events
+WHERE properties.environment = 'production' AND timestamp > now() - INTERVAL 6 WEEK
+  AND event IN ('delegation_prompt_shown', 'delegation_prompt_dismissed')
+  AND properties.surface = 'dashboard_banner'
+GROUP BY wk ORDER BY wk
+```
+
+Healthy: 7.29a `people_delegated / people_shown` well above zero on every
+surface (the wall had 0 of 10 people recover by any path before this
+shipped); 7.29b shows most wall offers with `prior_matched = true` (people
+who really are the owner's other identity) and `false` rows converting
+rarely — a `false` row that DOES convert is worth a look (a stranger
+attaching their mailbox to a link-holder's account is the phishing shape the
+two-step confirm exists for; the delegation is visible on their Accounts page
+and revocable there); 7.29c `said_someone_else` small relative to prompted
+(a large share means the 2-hour adjacency window is catching shared
+computers — tighten it in `secondAccount.ts`). The weekly `delegation_created`
+count should recover from the 1–5 of mid-September; `via != 'form'` is the
+share this change created.
+

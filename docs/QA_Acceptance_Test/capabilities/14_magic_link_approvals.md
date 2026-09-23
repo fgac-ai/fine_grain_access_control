@@ -304,3 +304,46 @@
   against that owner before rendering), never shows a request older than 7
   days since its last mint, and never fails the dashboard when the ledger
   read fails (it renders nothing)
+
+### A19: The wrong-account card offers to attach the visitor's mailbox to the owner
+- Take a USER_A approval link (A5 harness). With NO active USER_B → USER_A
+  delegation (revoke it first if present), sign in as USER_B and open it
+- **Expected**: the wrong-account card (A5) now also renders
+  `[data-testid=delegate-panel][data-surface=approve_wall]` — "Is
+  `k•••••2@example.com` also your account?" — with the owner **masked**
+  and USER_B named in full. Ordering follows the browser's evidence:
+  when USER_B signed in right after USER_A held a dashboard session in this
+  browser (A10's markers; e.g. sign out of USER_A via the card's own
+  sign-out button and come back as USER_B) the panel comes FIRST
+  (`data-prominent="true"`) and the sign-out button
+  (`[data-testid=wrong-account-sign-out]`) is the secondary control below
+  a divider; in a browser with no such history the sign-out button leads
+  and the panel sits below the divider (`data-prominent="false"`). The
+  offer opens a confirm step naming recipient, mailbox and revocation;
+  **Attach this mailbox** creates the delegation (USER_B under USER_A's
+  Accessible Gmail Accounts; `list_accounts` on USER_A's connection lists
+  it) and the card shows `[data-testid=delegate-panel-done]` with a
+  **Switch to `k•••••2@example.com`** button that signs out and returns to the
+  same approve URL; the done state STAYS on screen — poll the DOM for 3 s
+  after the click: it must remain `delegate-panel-done` (the action
+  revalidates nothing, because ANY revalidation inside a server action
+  re-renders the current route in the action response, and the page renders
+  the same panel component in both states so a re-render cannot unmount
+  it; local QA 2026-09-21 rounds 1–2 saw it replaced within 250–400 ms
+  before this) — the approval itself still requires USER_A (opening it
+  as USER_A then shows the normal approve/pick flow). Re-opening the link
+  as USER_B afterwards renders the same panel already in its done view —
+  `[data-testid=delegate-panel-done][data-initial=true]` ("… is already
+  attached to …", with the Switch button) and no offer. No rule is created
+  on either account by any of this
+- **Why**: measured 30 d to 2026-09-21, 33 wrong-account opens by 10
+  people (11 requests) and none recovered on the card; the 2026-09-17 case
+  opened one link eleven times as a just-created second account. The
+  signed-in non-owner IS the owner of the mailbox they would need to
+  delegate, so the repair is one write with no new consent
+  (`delegateToApprovalOwner`, actions.ts)
+- **Never**: the owner's email never appears unmasked; a forged/tampered
+  link (A7) never renders the panel (the owner resolves from the key id and
+  the signature is re-verified against them before anything is written);
+  the confirm step is never skipped; the panel never approves the request
+
