@@ -13,6 +13,15 @@ import {
   markerMatchesHit,
 } from '@/lib/approvalWall';
 import { captureEdgeEvent } from '@/lib/posthogEdge';
+import {
+  ACCOUNT_MARKER_MAX_AGE_S,
+  LAST_ACCOUNT_COOKIE,
+  PREV_ACCOUNT_COOKIE,
+  decodeLastAccount,
+  encodeLastAccount,
+  encodePrevAccount,
+  transitionAccountMarkers,
+} from '@/lib/secondAccount';
 
 const isProtectedRoute = createRouteMatcher(['/dashboard(.*)']);
 
@@ -55,6 +64,23 @@ const clerkHandler = clerkMiddleware(async (auth, req, event) => {
   }
 
   if (isProtectedRoute(req)) {
+    const { userId } = await auth();
+    if (userId) {
+      const res = NextResponse.next();
+      // Approval wall: context reached the page, so retire any marker — a
+      // later, unrelated sign-in in this browser must not be attributed to
+      // this wall hit.
+      if (isApprovalWallCandidate(url) && req.cookies.has(APPROVAL_WALL_COOKIE)) {
+        res.cookies.delete(APPROVAL_WALL_COOKIE);
+      }
+      // Second-account markers (src/lib/secondAccount.ts): which account this
+      // browser held last, and which one it held before that. Clerk ids and
+      // timestamps only. The dashboard reads them to offer a fresh account
+      // "attach this mailbox to the account you were just in"; the approve
+      // page reads them to tell the owner's other identity from a stranger.
+      stampAccountMarkers(req, res, userId);
+      return res;
+    }
     // Approval sign-in wall (src/lib/approvalWall.ts). A signed-out visit to
     // an approval link never reaches the page — this redirect is the only
     // place it can be observed. The event carries action + target_hash (the
@@ -63,17 +89,6 @@ const clerkHandler = clerkMiddleware(async (auth, req, event) => {
     // the cookie lets sign_in_completed say "signed in after a wall hit and
     // landed somewhere other than the approve page" in one row.
     if (isApprovalWallCandidate(url)) {
-      const { userId } = await auth();
-      if (userId) {
-        // Context reached the page: retire any marker so a later, unrelated
-        // sign-in in this browser is not attributed to this wall hit.
-        if (req.cookies.has(APPROVAL_WALL_COOKIE)) {
-          const res = NextResponse.next();
-          res.cookies.delete(APPROVAL_WALL_COOKIE);
-          return res;
-        }
-        return;
-      }
       const hit = await describeApprovalWallHit(url, req.headers);
       // One row per wall hit, not per bounce: a browser stuck in a sign-in
       // callback loop re-hits this wall every few seconds (QA 2026-09-16 saw
@@ -101,6 +116,20 @@ const clerkHandler = clerkMiddleware(async (auth, req, event) => {
     await auth.protect();
   }
 });
+
+/** Stamp / rotate the second-account markers on a signed-in dashboard response. */
+function stampAccountMarkers(req: NextRequest, res: NextResponse, clerkUserId: string): void {
+  const last = decodeLastAccount(req.cookies.get(LAST_ACCOUNT_COOKIE)?.value);
+  const next = transitionAccountMarkers(last, clerkUserId, Date.now());
+  const opts = {
+    maxAge: ACCOUNT_MARKER_MAX_AGE_S,
+    path: '/',
+    sameSite: 'lax' as const,
+    secure: req.nextUrl.protocol === 'https:',
+  };
+  if (next.last) res.cookies.set({ name: LAST_ACCOUNT_COOKIE, value: encodeLastAccount(next.last), ...opts });
+  if (next.prev) res.cookies.set({ name: PREV_ACCOUNT_COOKIE, value: encodePrevAccount(next.prev), ...opts });
+}
 
 /** Hand the link's own params to the Node-runtime recorder (fire-and-forget). */
 function recordWallHit(url: URL): Promise<void> {

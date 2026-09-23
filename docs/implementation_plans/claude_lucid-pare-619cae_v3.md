@@ -23,7 +23,7 @@ on a serverless request. The cost of the current rule is one slightly stale
 email to a fast recoverer, which the line addresses. Measured ratio so far: two
 dark owners to one fast recoverer.
 
-Follow-up option if 7.29b shows fast recoverers becoming common: a Vercel cron
+Follow-up option if 7.30b shows fast recoverers becoming common: a Vercel cron
 sweep that sends from the ledger N minutes after `first_failed_at`, re-checking
 the grant with Clerk before sending. Not built here — it is a second delivery
 path with its own failure modes, and the data does not yet call for it.

@@ -62,3 +62,30 @@ export function canonicalWallQuery(searchParams: URLSearchParams): string {
   }
   return q.toString();
 }
+
+/** Why nothing routed, per rule, for a set of candidate rows. Captured as
+ *  `approval_wall_route_skipped` so production can tell "no candidate row"
+ *  from "a rule excluded it" from "the lookup failed" -- the three read
+ *  identically (no `approval_wall_routed`) until 2026-09-20, when a local
+ *  repro produced one unexplained non-route in six with a routable row. */
+export interface WallRouteSkip {
+  candidates: number;
+  stale: number;
+  routed_already: number;
+  opened_since: number;
+  no_query: number;
+  future: number;
+}
+
+export function explainWallRouteSkip(rows: readonly WallHitRow[], nowMs = Date.now()): WallRouteSkip {
+  const skip: WallRouteSkip = { candidates: rows.length, stale: 0, routed_already: 0, opened_since: 0, no_query: 0, future: 0 };
+  for (const row of rows) {
+    const age = nowMs - row.wallHitAt.getTime();
+    if (age < 0) skip.future++;
+    else if (age > ROUTE_WINDOW_MS) skip.stale++;
+    if (row.routedAt && row.routedAt.getTime() >= row.wallHitAt.getTime()) skip.routed_already++;
+    if (row.openedAt && row.openedAt.getTime() >= row.wallHitAt.getTime()) skip.opened_since++;
+    if (!row.wallQuery) skip.no_query++;
+  }
+  return skip;
+}

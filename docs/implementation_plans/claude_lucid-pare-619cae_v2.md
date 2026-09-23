@@ -20,7 +20,7 @@
 | subject | "is disconnected" / "is still disconnected" | "is disconnected" only |
 | event props | `trigger first\|repeat`, `notice_number`, `max_notices` | `trigger: 'first_failure'`; the two counters dropped |
 | global guard | none | **circuit breaker: 10 dead-grant notices per rolling hour across ALL owners**, inside the atomic claim; skipped refusals stamp `notify_status: 'skipped_global_capped'` |
-| monitoring | 7.29a–c | 7.29a–d (d = per-recipient emails/day across all three triggers) and **step 0.8 of the daily review task** |
+| monitoring | 7.30a–c | 7.30a–d (d = per-recipient emails/day across all three triggers) and **step 0.8 of the daily review task** |
 
 Why the breaker: the dead-grant classes are deterministic by Clerk error code
 (that is what makes the trigger safe to fire on the first refusal), so an
@@ -41,11 +41,11 @@ better served by a second.
 
 Two layers, both added in this revision:
 
-1. **Runbook 7.29 in `docs/monitoring.md`** is now a spam watch: 7.29a (one row
-   per owner + mailbox, `days_dead = 0`, no hour with 5+ rows), 7.29c (guard
-   outcomes — `skipped_global_capped` must stay zero, `disabled` absent), 7.29d
+1. **Runbook 7.30 in `docs/monitoring.md`** is now a spam watch: 7.30a (one row
+   per owner + mailbox, `days_dead = 0`, no hour with 5+ rows), 7.30c (guard
+   outcomes — `skipped_global_capped` must stay zero, `disabled` absent), 7.30d
    (emails per recipient per day across all three triggers — should return
-   nothing), 7.29b (did the owner reconnect).
+   nothing), 7.30b (did the owner reconnect).
 2. **The daily review task** (`~/.claude/scheduled-tasks/fgac-user-behavior-review/SKILL.md`,
    local, not in the repo) gained an "OWNER EMAIL VOLUME WATCH" section run
    fifth every morning and a report line 0.8. It reports one line when inside
@@ -69,7 +69,7 @@ Two layers, both added in this revision:
   week later and 90 days later are both "not due"), breaker constant, new
   closing line, `skipped_global_capped` adds no agent-facing line. `tsc`,
   eslint, `mcp:lint` green.
-- v1 QA (capability 18 A12/A13, 16 A27) exercised the first-notice path, the
+- v1 QA (capability 18 A12/A13, 16 A29) exercised the first-notice path, the
   ledger, the per-(owner, mailbox) suppression on the delegated leg, and the
   preview as USER_A. v2 changes the second-notice path (now unreachable) and
   the copy's closing line; the preview redeploys from this commit. The breaker

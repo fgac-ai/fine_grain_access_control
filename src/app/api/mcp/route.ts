@@ -25,6 +25,7 @@ import {
 } from '@/db/schema';
 import { eq, and, isNull } from 'drizzle-orm';
 import { filterLiveDelegatedAccess } from '@/db/delegationQueries';
+import { delegateLinkPath } from '@/lib/secondAccount';
 import { clerkClient } from '@clerk/nextjs/server';
 import { resolveDbUser } from '@/db/userHelpers';
 import { loadApplicableRules, checkReadRestrictions, decodeB64Url, stripHtmlToText, type ApplicableRules } from '@/lib/gmailRules';
@@ -682,9 +683,9 @@ async function policyDenialWithLink(
   // say so, or the agent gets "Access Denied" and tries again.
   if (!action) return textResult(withNoLinkStop(message));
   try {
-    const { url, requestId, targetHash } = await mintApprovalLink(DASHBOARD_URL, conn.user.id, proxyKeyId, action);
+    const { url, query, requestId, targetHash } = await mintApprovalLink(DASHBOARD_URL, conn.user.id, proxyKeyId, action);
     const mintCount = await recordApprovalMint({
-      requestId, userId: conn.user.id, proxyKeyId, action: action.action, targetHash,
+      requestId, userId: conn.user.id, proxyKeyId, action: action.action, targetHash, linkQuery: query,
     });
     // Out-of-band delivery (2026-09-15): when the agent asks for the SAME
     // link again and the person has still not opened it, FGAC emails the
@@ -712,6 +713,7 @@ async function policyDenialWithLink(
     const emailed = notifyDenialLine(notify.status, notify);
     return textResult(
       `${message}\n👉 Share this link with the user to approve it in one click: ${url}\n` +
+      `(The link must be opened signed in to FGAC as ${conn.user.email} — the account this agent is connected to. Opened under any other Google account it is refused; it does not need a second FGAC account.)\n` +
       `Suggested wording to relay: "FGAC is blocking this until you approve it here: ${url} — one click, and you can revoke it any time from your dashboard."\n` +
       (emailed ? `${emailed}\n` : '') +
       AGENT_APPROVAL_PROTOCOL,
@@ -781,7 +783,7 @@ async function sendDenialWithLinks(
       lines.push(`👉 Allow sending to '${denial.deniedRecipient}' only — share this one-click link with the user: ${one.url}`);
       const oneMintCount = await recordApprovalMint({
         requestId: one.requestId, userId: conn.user.id, proxyKeyId,
-        action: 'send_whitelist', targetHash: one.targetHash,
+        action: 'send_whitelist', targetHash: one.targetHash, linkQuery: one.query,
       });
       emailLinks.push({
         requestId: one.requestId, action: 'send_whitelist', url: one.url,
@@ -795,7 +797,7 @@ async function sendDenialWithLinks(
     const all = await mintApprovalLink(DASHBOARD_URL, conn.user.id, proxyKeyId, { action: 'send_all' });
     lines.push(`👉 Or allow sending to ANY recipient from this profile — share this one-click link with the user instead: ${all.url}`);
     const allMintCount = await recordApprovalMint({
-      requestId: all.requestId, userId: conn.user.id, proxyKeyId, action: 'send_all',
+      requestId: all.requestId, userId: conn.user.id, proxyKeyId, action: 'send_all', linkQuery: all.query,
     });
     emailLinks.push({
       requestId: all.requestId, action: 'send_all', url: all.url,
@@ -2604,8 +2606,13 @@ const handler = createMcpHandler(
             // arrives via delegation from its own FGAC signup. There is no
             // in-dashboard "link a second Google account" flow; describing
             // one here sent users hunting for it (support case 2026-08-24).
-            own_account: `To add another Gmail account the user owns: sign in to ${DASHBOARD_URL} AS that account (e.g. in another browser profile), then on its Accounts page use "Delegations You've Granted" to delegate that mailbox to this user's email. It then appears here automatically. Walkthrough: ${DASHBOARD_URL}/use-cases/multiple-gmail-accounts`,
-            someone_elses: `To access someone else's mailbox: that person signs up at ${DASHBOARD_URL} and uses "Delegations You've Granted" on their own Accounts page to delegate their mailbox to this user. It then appears here automatically.`,
+            // Since 2026-09-21 the routine is a LINK: opened signed in as the
+            // other account, it renders a one-click confirm that attaches that
+            // mailbox here (src/lib/secondAccount.ts). Three people in one
+            // week had instead created a second FGAC account and got stuck
+            // between the two.
+            own_account: `To add another Gmail account the user owns: give the user this link and tell them to open it SIGNED IN to FGAC as that other Gmail account (signing up with it first if needed): ${DASHBOARD_URL}${delegateLinkPath(conn.user.id)} — one click there attaches that mailbox to this account, and it then appears here automatically. Do NOT have them create a separate FGAC account for it. Walkthrough: ${DASHBOARD_URL}/use-cases/multiple-gmail-accounts`,
+            someone_elses: `To access someone else's mailbox: send that person the same link — ${DASHBOARD_URL}${delegateLinkPath(conn.user.id)} — they open it signed in to FGAC as their own Google account (signing up first if needed) and confirm; their mailbox then appears here automatically. They can revoke it any time.`,
           },
         });
       }
@@ -3446,12 +3453,12 @@ const handler = createMcpHandler(
           return textResult(`🚫 Unknown request type '${type}'. ${REQUESTABLE}`);
         }
 
-        const { url, requestId, targetHash } = await mintApprovalLink(DASHBOARD_URL, conn.user.id, conn.proxyKeyId, action);
+        const { url, query, requestId, targetHash } = await mintApprovalLink(DASHBOARD_URL, conn.user.id, conn.proxyKeyId, action);
         // The title rides in the request ledger, never in the URL (the link
         // stays deterministic); the approve page reads it back by request_id.
         const mintCount = await recordApprovalMint({
           requestId, userId: conn.user.id, proxyKeyId: conn.proxyKeyId, action: action.action, targetHash,
-          ...named,
+          linkQuery: query, ...named,
         });
         // A re-request without a title still has one if an earlier mint stored
         // it — the response should say so rather than ask the agent again

@@ -1,5 +1,5 @@
 {
-  "id": "28bda14b-4577-4510-8ffc-340040e28e95",
+  "id": "160d2f5e-66f2-4e00-8492-0cd34a05344d",
   "prevId": "f9203976-884a-4084-841e-668ad29dcefc",
   "version": "7",
   "dialect": "postgresql",
@@ -547,6 +547,18 @@
           "type": "timestamp",
           "primaryKey": false,
           "notNull": false
+        },
+        "link_query": {
+          "name": "link_query",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "dismissed_at": {
+          "name": "dismissed_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
@@ -693,135 +705,6 @@
           "tableTo": "users",
           "columnsFrom": [
             "delegate_user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.google_grant_failures": {
-      "name": "google_grant_failures",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "account_email": {
-          "name": "account_email",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "last_reason": {
-          "name": "last_reason",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "first_failed_at": {
-          "name": "first_failed_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "last_failed_at": {
-          "name": "last_failed_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "failure_count": {
-          "name": "failure_count",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 1
-        },
-        "notified_count": {
-          "name": "notified_count",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "notified_at": {
-          "name": "notified_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "google_grant_failures_owner_email_unique": {
-          "name": "google_grant_failures_owner_email_unique",
-          "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "account_email",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "google_grant_failures_user_notified_idx": {
-          "name": "google_grant_failures_user_notified_idx",
-          "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "notified_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "google_grant_failures_user_id_users_id_fk": {
-          "name": "google_grant_failures_user_id_users_id_fk",
-          "tableFrom": "google_grant_failures",
-          "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
           ],
           "columnsTo": [
             "id"

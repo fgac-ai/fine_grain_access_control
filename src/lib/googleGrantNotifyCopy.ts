@@ -56,7 +56,7 @@ export const GRANT_DEAD_EPISODE_GAP_MS = 14 * 24 * 60 * 60_000;
  * in minutes. Ten an hour is far above the organic rate (30 d to 2026-09-19:
  * five own-mailbox owners and one delegated mailbox in total) and low enough
  * that an incident sends a handful, not hundreds; the skipped refusals stamp
- * `notify_status: 'skipped_global_capped'` so monitoring.md 7.29 sees it. */
+ * `notify_status: 'skipped_global_capped'` so monitoring.md 7.30 sees it. */
 export const GRANT_DEAD_GLOBAL_HOURLY_MAX = 10;
 
 /** Normalise the mailbox the way access rows compare it (the ledger key). */

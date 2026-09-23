@@ -1,6 +1,8 @@
 import { notFound, redirect } from 'next/navigation';
 import { ConnectGoogleWarning } from '../../ConnectGoogleWarning';
 import { SignInTelemetry } from '../../SignInTelemetry';
+import { PendingApprovalsBanner } from '../../PendingApprovalsBanner';
+import { SecondAccountBanner } from '../../SecondAccountBanner';
 import { AgentProfilesView } from '../../AgentProfilesView';
 import { loadDashboardData } from '../../loadDashboard';
 import { slugifyProfileLabel } from '@/lib/profileSlugs';
@@ -40,6 +42,8 @@ export default async function AgentProfilePage({
         access={data.googleAccess}
         needsDriveFile={data.needsDriveFile}
       />
+      <PendingApprovalsBanner userId={data.userId} clerkUserId={data.clerkUserId} profiles={data.profiles} />
+      <SecondAccountBanner currentClerkUserId={data.clerkUserId} currentUserId={data.userId} currentEmail={data.email} accountCreatedAt={data.accountCreatedAt} />
       {!data.hasCompleteGoogleAccess && (
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 pt-8">
           <ConnectGoogleWarning

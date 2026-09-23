@@ -115,7 +115,7 @@ reconnect on the Accounts page as before.
 | `src/app/api/mcp/route.ts` | `getGoogleToken` returns the token owner on failure; `resolveAccountAndToken` notifies and appends the 📧 line |
 | `src/app/dashboard/googleAccess.ts`, `src/lib/googleScopeCopy.ts` | `disconnected` state → "Reconnect Google" card copy |
 | `scripts/test-google-grant-notify-copy.ts` (+ `mcp:lint`), `scripts/test-google-scope-copy.ts` | pins |
-| `docs/analytics.md`, `docs/monitoring.md` §7.29 (+ pointer in §7.13a) | event row, runbook (7.29a sent, 7.29b did it work, 7.29c delivery health) |
+| `docs/analytics.md`, `docs/monitoring.md` §7.30 (+ pointer in §7.13a) | event row, runbook (7.30a sent, 7.30b did it work, 7.30c delivery health) |
 | `docs/QA_Acceptance_Test/capabilities/18_google_reconnect.md` A13, `16_analytics_events.md` A27, `14_magic_link_approvals.md` A16 headroom | QA assertions |
 
 ## 4. Out of scope, deliberately
@@ -135,7 +135,7 @@ reconnect on the Accounts page as before.
 - Migration generated, renamed, journal tag fixed, `npm run db:migrate` applied
   on the branch DB (`claude-lucid-pare-619cae`).
 - Local QA: capability 18 A13 (own + delegated legs, ledger, cap, never-cases)
-  and 16 A27, with USER_A as the stand-in sender — results in the PR.
+  and 16 A29, with USER_A as the stand-in sender — results in the PR.
 - Preview: `/deploy-pr-preview`; note (cap 18 A12) that every delegated mailbox
   on a preview reads `owner_not_found` (production Clerk ids against the dev
   instance), which is NOT a reconnect-repairable class and must not notify.

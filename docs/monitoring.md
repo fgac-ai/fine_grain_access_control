@@ -830,7 +830,7 @@ Healthy: `oauth_token_retrieval_error` rows carry `reason = 'grant_revoked'`
 `$mcp_tool_call` rows after the first failure are `denied_by_policy` with
 `google_token_error = 'grant_revoked'` — not a run of `failed`. Whether the
 reconnect link converts is §7.8's `google_reconnect_*` funnel for that person.
-Since PR #156 the refusal also emails the mailbox OWNER once per episode (§7.29)
+Since PR #156 the refusal also emails the mailbox OWNER once per episode (§7.30)
 — the agent's link reaches nobody when the owner is not the person running the
 agent.
 The per-tool split the directory table needs is now a property, no join:
@@ -1900,6 +1900,119 @@ LEFT JOIN routed ro ON ro.rid = r.rid
 LEFT JOIN opened o ON o.rid = r.rid
 ```
 
+**Read 2026-09-20, four days after the router shipped (production, 2026-09-16
+13:24Z → 09-20 22:45Z).** The first query above was mis-run in the 2026-09-19
+review as a join of wall hits to `approval_link_opened` on `action` +
+`target_hash` — `approval_link_opened` does not carry `target_hash`, so that
+join is 0 by construction. Joined as written here (wall → mint → open on
+`request_id`) the picture inverts:
+
+| signal | value |
+| --- | --- |
+| `approval_sign_in_wall`, `navigation = true`, people | 25 hits on 18 requests (11 `claude_desktop`, 7 `browser`) |
+| `approval_wall_recorded {recorded: true}` | 25, all 17 ledger rows stamped |
+| walled requests opened by their owner afterwards | 16 of 17 (median 12 s after the hit; `claude_desktop` walls are re-opened in the person's real browser 5–95 s later) |
+| walled requests approved | 14 of 17 |
+| `approval_wall_routed` | 0 — and `routed_at` is NULL on every ledger row |
+| `sign_in_completed {after_approval_wall: true}` | 0 |
+
+So the router's fix half never fired because it had nothing to do: a
+same-browser sign-in comes straight back to the approve page through Clerk's
+own `redirect_url` (the approve page renders, `opened_at` stamps, the router's
+"not seen since" rule correctly declines), and a Claude-desktop bounce is
+repaired by the person themselves. The `browser` class over-counts people:
+every `browser` wall hit whose owner was on the approve page at the time
+carried the owner's EXACT user-agent and fired within 150 ms of that owner's
+own signed-in `approval_link_opened` — a cookie-less duplicate load of the
+link (a link scanner or preview fetch riding the click), not a person losing
+context; two more `browser` hits came from a Windows Chrome 151 UA whose
+owner uses a different machine entirely. Read `client = 'browser'` wall rows
+as an upper bound, and read recovery per request from the query above.
+
+A local reproduction (dev build, USER_A, 2026-09-21) confirmed the router
+itself works — five of six signed-in `/dashboard` loads with a routable row
+redirected to the approve page — and produced one unexplained miss with a
+provably routable row and a clean log, the exact production signature. The
+page now emits `approval_wall_route_skipped {reason, candidates, stale,
+routed_already, opened_since, no_query, future}` whenever an owner had
+wall-hit rows on file and none routed, so the next such miss names its rule:
+
+```sql
+-- why wall hits on file did not route (per owner render), last 30 d
+SELECT toString(properties.reason) AS reason, count() AS renders,
+       sum(toFloat64OrNull(toString(properties.candidates))) AS candidates,
+       sum(toFloat64OrNull(toString(properties.stale))) AS stale,
+       sum(toFloat64OrNull(toString(properties.routed_already))) AS routed_already,
+       sum(toFloat64OrNull(toString(properties.opened_since))) AS opened_since,
+       sum(toFloat64OrNull(toString(properties.no_query))) AS no_query,
+       sum(toFloat64OrNull(toString(properties.future))) AS future
+FROM events
+WHERE event = 'approval_wall_route_skipped' AND properties.environment = 'production'
+  AND timestamp >= now() - INTERVAL 30 DAY
+GROUP BY reason
+```
+
+A `skip` render whose counts are all zero is the unexplained case (every rule
+passed and the pick still returned nothing) — that cannot happen by
+construction and would mean the row changed between the read and the pick.
+
+The lost context that IS real sits outside the wall: 47 of the 87 requests
+minted in the same window were never opened at all (21 owners), and 5 of
+those had the owner on a dashboard page within the week — every one shown the
+profile page with nothing about the request. That is what the pending-
+approvals banner (shipped 2026-09-20, `src/lib/approvalPending.ts`) is for:
+every dashboard page lists the owner's open requests from the ledger alone,
+in whatever browser they sign in with. Its funnel, per request:
+
+```sql
+-- pending-approvals banner: owners shown → requests clicked → opened via the banner → dismissed
+SELECT 'owners_shown' AS metric, count(DISTINCT distinct_id) AS n
+FROM events WHERE event = 'approval_banner_shown' AND properties.environment = 'production' AND timestamp >= now() - INTERVAL 30 DAY
+UNION ALL
+SELECT 'banner_renders', count()
+FROM events WHERE event = 'approval_banner_shown' AND properties.environment = 'production' AND timestamp >= now() - INTERVAL 30 DAY
+UNION ALL
+SELECT 'requests_clicked', count(DISTINCT toString(properties.request_id))
+FROM events WHERE event = 'approval_banner_clicked' AND properties.environment = 'production' AND timestamp >= now() - INTERVAL 30 DAY
+UNION ALL
+SELECT 'requests_opened_via_banner', count(DISTINCT toString(properties.request_id))
+FROM events WHERE event = 'approval_link_opened' AND properties.environment = 'production'
+  AND toString(properties.link_source) = 'banner' AND timestamp >= now() - INTERVAL 30 DAY
+UNION ALL
+SELECT 'requests_dismissed', count(DISTINCT toString(properties.request_id))
+FROM events WHERE event = 'approval_banner_dismissed' AND properties.environment = 'production' AND timestamp >= now() - INTERVAL 30 DAY
+```
+
+```sql
+-- requests approved after a banner open (the banner's converted share)
+WITH opened AS (
+  SELECT toString(properties.request_id) AS rid, min(timestamp) AS first_open
+  FROM events
+  WHERE event = 'approval_link_opened' AND properties.environment = 'production'
+    AND toString(properties.link_source) = 'banner' AND timestamp >= now() - INTERVAL 30 DAY
+  GROUP BY rid
+),
+approved AS (
+  SELECT toString(properties.request_id) AS rid, min(timestamp) AS first_approved
+  FROM events
+  WHERE event = 'approval_link_approved' AND properties.environment = 'production'
+    AND timestamp >= now() - INTERVAL 30 DAY
+  GROUP BY rid
+)
+SELECT count() AS opened_via_banner,
+       countIf(a.first_approved > o.first_open) AS approved_after,
+       round(100.0 * countIf(a.first_approved > o.first_open) / count(), 1) AS pct_converted
+FROM opened o
+LEFT JOIN approved a ON a.rid = o.rid
+```
+
+The banner is judged working if `requests_opened_via_banner` grows out of
+the never-opened pool (the 47/87 above), and `pct_converted` sits near the
+agent-link rate in 7.26. A high `requests_dismissed` with low clicks means
+the entries read as noise — check `oldest_pending_s` on the shown rows
+before shortening the 7-day window. Rows minted before 2026-09-20 have no
+stored link and never appear; the banner's population starts at the deploy.
+
 **7.26 — Approval-link reminder email: does the emailed link get more
 interaction than the one the agent was handed?** Added 2026-09-15 with the
 repeat-request reminder (`src/lib/approvalNotify.ts`; sender = FGAC's
@@ -1995,14 +2108,14 @@ GROUP BY status ORDER BY mints DESC
 -- values — before that an agent guessing three addresses earned three emails
 -- in 16.7 h, 2026-09-20/21); `not_due` on every row of a person with ≥ 3
 -- refusals in a day means the window reset between them (cadence > 24 h) or
--- the sender is off (`disabled`). The per-recipient spam watch is 7.29d. Pair with:
+-- the sender is off (`disabled`). The per-recipient spam watch is 7.30d. Pair with:
 --   SELECT * FROM account_refusals ORDER BY last_refused_at DESC LIMIT 20
 -- (branch DB or a read-only production query) for the ledger itself.
 SELECT person.properties.email AS who,
        toString(properties.$mcp_tool_name) AS tool,
        toString(properties.account_requested) AS requested,
        count() AS refusals, uniq(toDate(timestamp)) AS days,
-       max(toInt32OrNull(toString(properties.account_refusal_count))) AS max_in_window,
+       max(toFloat64OrNull(toString(properties.account_refusal_count))) AS max_in_window,
        groupUniqArray(toString(properties.notify_status)) AS notify,
        min(timestamp) AS first, max(timestamp) AS last
 FROM events
@@ -2166,7 +2279,82 @@ Google message the classifier has not seen, and the fixture list in
 fetch layer stamps the props, so raw `google_api_get` / `google_api_modify`
 400s appear in 7.28b too; only the sheets typed tools list tabs.
 
-**7.29 — Dead-grant owner notice: is the owner told once, does the grant come
+**7.29 — Second FGAC accounts → delegation (the wall, the link, the prompt).**
+Added 2026-09-21. FGAC's multi-account model is "sign in as the second Google
+account and delegate it to your first FGAC account"; three people in the week
+to 09-21 instead created a SECOND FGAC account minutes after the first and got
+stuck between the two (one opened the first account's approval link eleven
+times as the second account; one clicked "+ Add account" → "Got it" on both
+accounts). Three surfaces now offer the one-click repair
+(`src/lib/secondAccount.ts`): the wrong-account approval card, the delegate
+link the "+ Add account" dialog hands out, and a dashboard prompt for a fresh
+account whose browser held another FGAC session moments ago (middleware
+marker cookies — PostHog itself cannot pair the two accounts, `posthog.reset()`
+on sign-out rotates the device id). Baseline 30 d to 2026-09-21:
+wrong-account opens 33 rows / 11 requests / 10 people, 3 of them accounts
+under 30 min old; "+ Add account" 30 clicks by 17 people; `delegation_created`
+per week 8, 12, 13, 1, 5.
+
+```sql
+-- 7.29a: per surface, people who saw the offer vs people who took it (14 d)
+WITH shown AS (
+  SELECT properties.surface AS surface, person_id FROM events
+  WHERE event = 'delegation_prompt_shown' AND properties.environment = 'production'
+    AND timestamp > now() - INTERVAL 14 DAY
+    AND person.properties.email NOT IN (/* internal / QA accounts */)
+  GROUP BY surface, person_id),
+took AS (
+  SELECT properties.via AS surface, person_id FROM events
+  WHERE event = 'delegation_created' AND properties.environment = 'production'
+    AND timestamp > now() - INTERVAL 14 DAY
+  GROUP BY surface, person_id)
+SELECT s.surface, count() AS people_shown, countIf(t.person_id != '') AS people_delegated
+FROM shown s LEFT JOIN took t ON t.surface = s.surface AND t.person_id = s.person_id
+GROUP BY s.surface ORDER BY s.surface
+```
+
+```sql
+-- 7.29b: the wall — does the offer lead (prior session matched) and does it convert?
+SELECT JSONExtractBool(properties, 'prior_session_matches') AS prior_matched,
+       uniq(properties.request_id) AS requests,
+       uniq(person_id)             AS people,
+       countIf(event = 'delegation_created') AS delegated
+FROM events
+WHERE properties.environment = 'production' AND timestamp > now() - INTERVAL 14 DAY
+  AND ((event = 'delegation_prompt_shown' AND properties.surface = 'approve_wall')
+       OR (event = 'delegation_created' AND properties.via = 'approve_wall'))
+GROUP BY prior_matched
+```
+
+```sql
+-- 7.29c: second accounts created from a browser that just held another FGAC session
+SELECT toStartOfWeek(timestamp) AS wk,
+       uniq(person_id) AS fresh_accounts_prompted,
+       uniqIf(person_id, properties.direction = 'switch') AS back_on_the_older_account,
+       uniqIf(person_id, toInt(properties.account_age_s) < 3600) AS under_an_hour_old,
+       uniqIf(person_id, event = 'delegation_prompt_dismissed') AS said_someone_else
+FROM events
+WHERE properties.environment = 'production' AND timestamp > now() - INTERVAL 6 WEEK
+  AND event IN ('delegation_prompt_shown', 'delegation_prompt_dismissed')
+  AND properties.surface = 'dashboard_banner'
+GROUP BY wk ORDER BY wk
+```
+
+Healthy: 7.29a `people_delegated / people_shown` well above zero on every
+surface (the wall had 0 of 10 people recover by any path before this
+shipped); 7.29b shows most wall offers with `prior_matched = true` (people
+who really are the owner's other identity) and `false` rows converting
+rarely — a `false` row that DOES convert is worth a look (a stranger
+attaching their mailbox to a link-holder's account is the phishing shape the
+two-step confirm exists for; the delegation is visible on their Accounts page
+and revocable there); 7.29c `said_someone_else` small relative to prompted
+(a large share means the 2-hour adjacency window is catching shared
+computers — tighten it in `secondAccount.ts`). The weekly `delegation_created`
+count should recover from the 1–5 of mid-September; `via != 'form'` is the
+share this change created.
+
+
+**7.30 — Dead-grant owner notice: is the owner told once, does the grant come
 back, and is it staying far from spam?** Added 2026-09-20 (PR #156,
 `src/lib/approvalNotify.ts` `notifyOwnerOfDeadGrant`,
 `docs/implementation_plans/claude_lucid-pare-619cae_v2.md`). The
@@ -2192,7 +2380,7 @@ This section is also step 0.8 of the daily review task — the point of that
 step is to notice over-mailing before a user does.
 
 ```sql
--- 7.29a — notices sent (30 d): who, which mailbox class, and how long the
+-- 7.30a — notices sent (30 d): who, which mailbox class, and how long the
 -- grant had been dead when the email went out. `days_dead` > 0 means the
 -- email did not go out on the first refusal — the sender was off or a cap
 -- held it — or the episode predates the deploy. Two rows for one owner +
@@ -2208,7 +2396,7 @@ ORDER BY timestamp DESC
 ```
 
 ```sql
--- 7.29b — did the email work (30 d)? Per notified owner: refusals on that
+-- 7.30b — did the email work (30 d)? Per notified owner: refusals on that
 -- owner's mailboxes before vs after the notice, the first own-mailbox success
 -- after it, and whether a reconnect started. There is no second email by
 -- design: an owner whose refusals keep climbing for weeks after `emailed_at`
@@ -2233,7 +2421,7 @@ GROUP BY owner ORDER BY failures_after DESC
 ```
 
 ```sql
--- 7.29c — delivery health and the guards (7 d): every reconnect-repairable
+-- 7.30c — delivery health and the guards (7 d): every reconnect-repairable
 -- refusal by what the notice did. `sent` once per new dead mailbox and
 -- `already_sent` on every later refusal is the steady state. `disabled` = the
 -- sender is off (SUPPORT_FGAC_PROXY_KEY / SUPPORT_SENDER_EMAIL unset, or
@@ -2254,7 +2442,7 @@ GROUP BY day, reason, delegated, notify ORDER BY day DESC, refusals DESC
 ```
 
 ```sql
--- 7.29d — the spam watch (7 d), all three owner-notice triggers together:
+-- 7.30d — the spam watch (7 d), all three owner-notice triggers together:
 -- emails per recipient per day. The claim caps a recipient at 3 in 24 h, so
 -- a 3 here is the cap doing its job — and a person we are over-mailing.
 -- Anyone above 1 in a day is worth a look; 3+ distinct days in a week is a
@@ -2273,11 +2461,11 @@ WHERE event IN ('approval_link_notified', 'account_refusal_notified', 'google_gr
 GROUP BY recipient, day HAVING total > 1 ORDER BY total DESC, day DESC
 ```
 
-Healthy: 7.29a shows at most one row per owner + mailbox with `days_dead = 0`
-and no hour holding 5 or more rows; 7.29c shows `sent` once per new dead
+Healthy: 7.30a shows at most one row per owner + mailbox with `days_dead = 0`
+and no hour holding 5 or more rows; 7.30c shows `sent` once per new dead
 mailbox, `already_sent` on the rest, `disabled` absent, `failed` rare and
-`skipped_global_capped` zero; 7.29d returns nothing (no recipient got two
-emails of any kind in one day); 7.29b's `reconnect_started` is non-zero for
+`skipped_global_capped` zero; 7.30d returns nothing (no recipient got two
+emails of any kind in one day); 7.30b's `reconnect_started` is non-zero for
 most emailed owners within a week. Pair with the ledger itself (branch DB or a
 read-only production query): `SELECT account_email, last_reason,
 failure_count, notified_count, first_failed_at, notified_at FROM
