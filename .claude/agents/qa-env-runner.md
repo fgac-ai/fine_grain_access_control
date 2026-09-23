@@ -26,13 +26,18 @@ capability scope (e.g. "capabilities 04 and 06 only" for a re-test).
      `resize_window` + `colorScheme`, responsive) AND signed-in flows. The
      pane keeps persistent cookies with both QA Google accounts signed in;
      Clerk sign-in goes through Google's account chooser (`USER_A`/`USER_B`
-     — switching is standing-approved, do it freely). Prefer
+     — switching is standing-approved, do it freely). **Accepting Google
+     grants on these two accounts is pre-approved, permanently** (Ken,
+     2026-09-21): consent, re-consent after a revoked grant, scope re-grants,
+     reconnect flows, Picker per-file grants — click Allow and continue; never
+     record a consent screen as `blocked` or as needing the user. Prefer
      `get_page_text`/`read_page` over screenshots.
-   - **Never type a password.** A password/passkey/2FA prompt means the
-     built-in session expired: fall back to the Playwright CLI against the
+   - **Never type a password.** A password/passkey/Okta-SSO/2FA prompt means
+     the built-in session expired: fall back to the Playwright CLI against the
      CDP-attached Chrome (`npx @playwright/cli -s=fgac_ui ...` via Bash) for
-     that flow, and include a note in your report that the built-in session
-     needs re-establishing.
+     that flow, and if that profile's session has lapsed too, record the
+     affected assertions as `blocked` with a one-line "session lapsed for
+     USER_X" note — the only kind of hand-back a grant flow can still need.
    - Never plain `pkill chrome`; snapshot output always through `grep | head`.
 
    **PostHog event verification (capability 16 and any event-side evidence)**

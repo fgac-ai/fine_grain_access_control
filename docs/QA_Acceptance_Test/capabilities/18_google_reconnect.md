@@ -180,3 +180,84 @@
   The revocation took ~40 min to surface (Clerk serves its cached access token
   until expiry); the Google permissions page and the consent leg needed Path B
   in an unattended session
+
+### A13: A dead grant emails the mailbox owner exactly once per episode, with the owner-bound link
+- Sender configured exactly as capability 14 A16 (`SUPPORT_FGAC_PROXY_KEY` /
+  `SUPPORT_SENDER_EMAIL`; USER_A stands in for the support mailbox via
+  `.secrets/sender.env` and `fgac-dev-sender`). Without them every refusal
+  carries `notify_status: 'disabled'`, the `google_grant_failures` row is
+  still written, and this assertion is `blocked`, not `skip`. Headroom: the
+  3-a-day cap is per mailbox OWNER across `approval_requests`,
+  `account_refusals` AND `google_grant_failures` — check
+  `notified_at > now() - interval '24 hours'` on all three (read-only) before
+  running, and use the other QA account as the owner if it is spent
+- **Fixture**: the A12 fixture (revoke FGAC from the Google side on a QA
+  account, wait for the access token to expire) — OR the naturally dead dev
+  grant: USER_A's dev Google grant dies on its own roughly hourly (Clerk's
+  reauthorize uses `select_account`, so Google issues no refresh token); when
+  `list_accounts` reports USER_A `google_token: 'unavailable'` the fixture is
+  in place with no Google-side action. Run the own-mailbox leg with a key
+  whose owner is the dead account, and the delegated leg with a key owned by
+  the OTHER QA account that has the dead mailbox delegated onto it
+  (capability 04 setup)
+- Own-mailbox leg: as the agent, call `gmail_list` on the dead account three
+  times a few seconds apart
+- **Expected**: every call is the A12 🚫 `google_token_unavailable` refusal,
+  unchanged, and the FIRST additionally ends with a 📧 line: "FGAC has also
+  emailed the user just now with this reconnect link — do not re-ask"; the
+  second and third say FGAC emailed the user "at <date HH:MM UTC>" and that
+  no further email is sent while it keeps failing. The sender's inbox holds
+  exactly ONE message to the dead account's address, From `FGAC <support
+  address>`, Reply-To the support address, NO Cc, subject `Google access to
+  <address> is disconnected — your agent is being refused`, plain text, body
+  opening "<agent> has been refused today (first at <date HH:MM UTC>) because
+  FGAC can no longer reach Google on behalf of:", the address on its own
+  line, the cause paragraph matching the refusal's class (`grant_revoked` →
+  "expired or revoked"; `refresh_failed` → "no usable refresh token"), the
+  SAME `?reconnect=1&for=<address>` link as the refusal, "Open the link while
+  signed in to FGAC as <address>", "do nothing — the agent stays refused", and
+  "This is the only email FGAC will send about this account unless it is
+  repaired and disconnects again" — never a promise of a reminder. Opening the
+  emailed link signed in as that account runs A4
+- Delegated leg: as the OTHER account's agent, call `gmail_list` with
+  `account` = the dead mailbox, twice
+- **Expected**: the refusal is the A12 delegated text (only the owner can
+  repair it; the key owner cannot) and the FIRST ends with "FGAC has also
+  emailed the owner of the mailbox (and copied this user) just now"; the
+  second says it was emailed "at <date HH:MM UTC>". The sender's inbox holds
+  ONE new message To the dead mailbox's address AND Cc the key owner's
+  address, subject `Google access to <address> is disconnected — an agent you
+  delegated to is being refused`, body opening "<agent>, run by <key owner>
+  under the mailbox access you delegated, has been refused …", and a paragraph
+  addressed to the key owner: "(copied on this email): this is the mailbox
+  owner's grant, not yours — nothing on your own Accounts page fixes it … your
+  other mailboxes are unaffected". If the own-mailbox leg already emailed this
+  owner today for the same mailbox, the delegated leg's first refusal says
+  "emailed … at <time>" instead and sends nothing — the ledger is per
+  (owner, mailbox), not per key
+- **Ledger** (read-only query on the branch DB): one `google_grant_failures`
+  row per (owner, mailbox), `account_email` lower-cased, `last_reason` the
+  class, `failure_count` = total refusals across both legs, `notified_count`
+  1, `notified_at` set once and unchanged by later refusals,
+  `first_failed_at` = the first refusal
+- **Dashboard**: signed in as the dead account, `/dashboard` shows the amber
+  card titled "Action Required: Reconnect Google" (not "Connect Google
+  Account") whose body names revoked / password / aged-out causes and says
+  agent calls are refused until reconnect; the button reads "Reconnect Google"
+- **Cap**: with three notices of any kind already sent to this owner in 24 h,
+  a due first refusal carries no 📧 line and `notify_status:
+  'skipped_rate_capped'`; the row keeps `notified_at` NULL and
+  `notified_count` 0. The global breaker (10 dead-grant notices per rolling
+  hour across ALL owners → `notify_status: 'skipped_global_capped'`) cannot be
+  reached with two QA accounts — `npx tsx scripts/test-google-grant-notify-copy.ts`
+  pins the constant and the status; record it as covered by unit test
+- **Never**: never emails on a transient `clerk_error` / `timeout` refusal
+  (the ❌ "retry once" text) or on `owner_not_found` / `delegation_inactive`;
+  never emails from the quiet `list_accounts` probes (call `list_accounts`
+  five times on the dead account — no new message, no ledger row change);
+  never emails the delegate ALONE (the owner is always the To); never sends
+  through a user's Google grant; never assert on a production account's inbox.
+  If the dead grant cannot be arranged, `npx tsx
+  scripts/test-google-grant-notify-copy.ts` pins the copy, the Cc header and
+  the one-per-episode rule — record the assertion as covered by unit test,
+  with the reason, not as a pass

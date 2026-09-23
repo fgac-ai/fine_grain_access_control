@@ -830,6 +830,9 @@ Healthy: `oauth_token_retrieval_error` rows carry `reason = 'grant_revoked'`
 `$mcp_tool_call` rows after the first failure are `denied_by_policy` with
 `google_token_error = 'grant_revoked'` — not a run of `failed`. Whether the
 reconnect link converts is §7.8's `google_reconnect_*` funnel for that person.
+Since PR #156 the refusal also emails the mailbox OWNER once per episode (§7.30)
+— the agent's link reaches nobody when the owner is not the person running the
+agent.
 The per-tool split the directory table needs is now a property, no join:
 
 ```sql
@@ -2100,9 +2103,12 @@ GROUP BY status ORDER BY mints DESC
 -- `account_requested` did not exist and the refused value was recorded
 -- nowhere (a scheduled job: 53 refusals in 6 days, inferred from the
 -- response length). The email fires once EVER per (key, requested value) on
--- the 3rd refusal in a rolling 24 h; `not_due` on every row of a person
--- with ≥ 3 refusals in a day means the window reset between them (cadence
--- > 24 h) or the sender is off (`disabled`). Pair with:
+-- the 3rd refusal in a rolling 24 h, and since PR #156 at most once per
+-- OWNER per 14-day episode whatever the value (`skipped_episode` on the later
+-- values — before that an agent guessing three addresses earned three emails
+-- in 16.7 h, 2026-09-20/21); `not_due` on every row of a person with ≥ 3
+-- refusals in a day means the window reset between them (cadence > 24 h) or
+-- the sender is off (`disabled`). The per-recipient spam watch is 7.30d. Pair with:
 --   SELECT * FROM account_refusals ORDER BY last_refused_at DESC LIMIT 20
 -- (branch DB or a read-only production query) for the ledger itself.
 SELECT person.properties.email AS who,
@@ -2347,3 +2353,125 @@ computers — tighten it in `secondAccount.ts`). The weekly `delegation_created`
 count should recover from the 1–5 of mid-September; `via != 'form'` is the
 share this change created.
 
+
+**7.30 — Dead-grant owner notice: is the owner told once, does the grant come
+back, and is it staying far from spam?** Added 2026-09-20 (PR #156,
+`src/lib/approvalNotify.ts` `notifyOwnerOfDeadGrant`,
+`docs/implementation_plans/claude_lucid-pare-619cae_v2.md`). The
+`google_token_unavailable` refusal (§7.13a) carries an owner-bound reconnect
+link, and until PR #156 the AGENT was the only party that saw it. Measured in
+the 30 d to 2026-09-19: one scheduled job read a delegated mailbox once a day
+and was refused every day for 30 days (zero successes on that mailbox — the
+same job's other mailboxes worked; `clerk_error` to 09-05, `refresh_failed`
+from 09-06 once PR #127 classified it) and the mailbox owner, a different
+person and the only one who can reconnect, was never told. Own-mailbox: five
+owners hit a non-retryable class; the three who recovered (9 h, 26 h, 4 d) all
+did so after dashboard visits with `google_reconnect_*` events; the two who did
+not each got exactly ONE refusal, then their agent stopped, zero pageviews,
+still dead 48 h later. So the notice fires on the FIRST reconnect-repairable
+refusal (`grant_revoked` / `refresh_failed` / `no_token`), to the mailbox
+owner from the support mailbox (CC the key owner when delegated), **once per
+episode** (Ken, 2026-09-21: one email for one event; a refusal 14+ days after
+the previous one is a new episode), under the shared 3-a-day per-person cap
+and a global breaker of 10 notices per rolling hour across all owners (an
+auth-provider incident would otherwise email everyone at once). The event is
+captured for the OWNER, so it joins to that person's reconnect funnel (§7.8).
+This section is also step 0.8 of the daily review task — the point of that
+step is to notice over-mailing before a user does.
+
+```sql
+-- 7.30a — notices sent (30 d): who, which mailbox class, and how long the
+-- grant had been dead when the email went out. `days_dead` > 0 means the
+-- email did not go out on the first refusal — the sender was off or a cap
+-- held it — or the episode predates the deploy. Two rows for one owner +
+-- mailbox inside 14 d mean the episode reset when it should not have (a
+-- flapping grant, or the gap logic broke): FLAG.
+SELECT toDate(timestamp) AS day, person.properties.email AS owner,
+       properties.reason AS reason, properties.account_delegated AS delegated,
+       properties.failure_count AS failures, properties.days_dead AS days_dead
+FROM events
+WHERE event = 'google_grant_dead_notified' AND properties.environment = 'production'
+  AND timestamp > now() - INTERVAL 30 DAY
+ORDER BY timestamp DESC
+```
+
+```sql
+-- 7.30b — did the email work (30 d)? Per notified owner: refusals on that
+-- owner's mailboxes before vs after the notice, the first own-mailbox success
+-- after it, and whether a reconnect started. There is no second email by
+-- design: an owner whose refusals keep climbing for weeks after `emailed_at`
+-- with no `reconnect_started` did not read it (or does not want the mailbox
+-- reconnected); the delegate was CC'd and can drop the mailbox from the task,
+-- and the next lever is the dashboard card, never more mail.
+WITH notified AS (
+  SELECT person_id, min(timestamp) AS emailed_at, count() AS notices
+  FROM events WHERE event = 'google_grant_dead_notified' AND properties.environment = 'production'
+    AND timestamp > now() - INTERVAL 30 DAY
+  GROUP BY person_id
+)
+SELECT person.properties.email AS owner, any(n.emailed_at) AS emailed_at, any(n.notices) AS notices,
+       countIf(e.event = 'google_token_fetch_failed' AND e.timestamp < n.emailed_at) AS failures_before,
+       countIf(e.event = 'google_token_fetch_failed' AND e.timestamp >= n.emailed_at) AS failures_after,
+       countIf(e.event = 'google_reconnect_started' AND e.timestamp >= n.emailed_at) AS reconnect_started,
+       countIf(e.event = 'google_reconnect_verified' AND e.timestamp >= n.emailed_at) AS reconnect_verified,
+       minIf(e.timestamp, e.event = '$mcp_tool_call' AND e.properties.outcome = 'success' AND e.timestamp >= n.emailed_at) AS first_success_after
+FROM events e JOIN notified n ON n.person_id = e.person_id
+WHERE e.timestamp > now() - INTERVAL 30 DAY
+GROUP BY owner ORDER BY failures_after DESC
+```
+
+```sql
+-- 7.30c — delivery health and the guards (7 d): every reconnect-repairable
+-- refusal by what the notice did. `sent` once per new dead mailbox and
+-- `already_sent` on every later refusal is the steady state. `disabled` = the
+-- sender is off (SUPPORT_FGAC_PROXY_KEY / SUPPORT_SENDER_EMAIL unset, or
+-- APPROVAL_LINK_EMAIL=off); `failed` = the send or the ledger write failed
+-- (server logs: "[approvalNotify] dead-grant"); `skipped_rate_capped` = the
+-- owner already had 3 notices of any kind today; `skipped_global_capped` =
+-- the 10-per-hour breaker tripped — pair it with 7.13a's incident shape.
+SELECT toDate(timestamp) AS day, properties.google_token_error AS reason,
+       properties.account_delegated AS delegated, properties.notify_status AS notify,
+       max(toInt64(properties.grant_days_dead)) AS max_days_dead,
+       count() AS refusals, uniq(person_id) AS key_owners
+FROM events
+WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
+  AND properties.denial_code = 'google_token_unavailable'
+  AND properties.google_token_error IN ('grant_revoked', 'refresh_failed', 'no_token')
+  AND timestamp > now() - INTERVAL 7 DAY
+GROUP BY day, reason, delegated, notify ORDER BY day DESC, refusals DESC
+```
+
+```sql
+-- 7.30d — the spam watch (7 d), all three owner-notice triggers together:
+-- emails per recipient per day. The claim caps a recipient at 3 in 24 h, so
+-- a 3 here is the cap doing its job — and a person we are over-mailing.
+-- Anyone above 1 in a day is worth a look; 3+ distinct days in a week is a
+-- FLAG even at 1 a day. Baseline at introduction (7 d to 2026-09-21):
+-- link reminders 1-3/day, refusal notices ≤ 1/day, dead-grant ≤ 1/day.
+SELECT person.properties.email AS recipient, toDate(timestamp) AS day,
+       countIf(event = 'approval_link_notified') AS link_reminders,
+       countIf(event = 'account_refusal_notified') AS refusal_notices,
+       countIf(event = 'google_grant_dead_notified') AS dead_grant_notices,
+       count() AS total
+FROM events
+WHERE event IN ('approval_link_notified', 'account_refusal_notified', 'google_grant_dead_notified')
+  AND properties.environment = 'production'
+  AND timestamp > now() - INTERVAL 7 DAY
+  AND person.properties.email NOT IN (/* internal + QA accounts */)
+GROUP BY recipient, day HAVING total > 1 ORDER BY total DESC, day DESC
+```
+
+Healthy: 7.30a shows at most one row per owner + mailbox with `days_dead = 0`
+and no hour holding 5 or more rows; 7.30c shows `sent` once per new dead
+mailbox, `already_sent` on the rest, `disabled` absent, `failed` rare and
+`skipped_global_capped` zero; 7.30d returns nothing (no recipient got two
+emails of any kind in one day); 7.30b's `reconnect_started` is non-zero for
+most emailed owners within a week. Pair with the ledger itself (branch DB or a
+read-only production query): `SELECT account_email, last_reason,
+failure_count, notified_count, first_failed_at, notified_at FROM
+google_grant_failures ORDER BY last_failed_at DESC LIMIT 20`. Under this rule
+the 30-day delegated case would have emailed its owner (CC the delegate) once,
+on 2026-09-06 — the first day PR #127 classified it `refresh_failed`; before
+that it was `clerk_error`, which is retried and never notifies — and never
+again while the mailbox stayed dead. The own-mailbox owner who went dark on
+2026-09-17 would have been emailed at 22:21 UTC that evening.

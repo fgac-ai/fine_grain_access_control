@@ -22,9 +22,14 @@ everywhere downstream.
    flow lands on a password prompt (built-in session expired — report it).
 3. Account switching between `USER_A` and `USER_B` is a routine harness step
    under CLAUDE.md's standing approval — switch as often as the docs require
-   without asking. Hard limits: never type a password (if a password, passkey,
-   or 2FA prompt appears, stop and report), never create an account, only
-   these two accounts, only against local/preview.
+   without asking. **Accepting Google grants on these two accounts is
+   pre-approved, permanently** (Ken, 2026-09-21): first consent, re-consent
+   after a revoked grant, scope re-grants, reconnect flows, Picker per-file
+   grants — click Allow and continue, never ask, never end the run on a
+   consent screen. Hard limits: never type a password (a password, passkey,
+   Okta/SSO, or 2FA prompt means the built-in session lapsed — report it in
+   one line, not as a question), never create an account, only these two
+   accounts, only against local/preview.
 4. Save the final dashboard screenshot to `.playwright/qa_proof_setup.png`
    (never the repo root).
 5. Walk the coverage checkpoint from `.claude/commands/qa-setup.md` item by

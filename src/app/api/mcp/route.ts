@@ -37,7 +37,8 @@ import { GOOGLE_FETCH_TIMEOUT_MS, CLERK_TOKEN_TIMEOUT_MS, withTimeout, isUpstrea
 import { classifyMcpClient, classifyTransportRejection, installFingerprint, parseInitializeClientInfo, parseRpcEnvelope, parseValidationFailure, resourceIdHash, validationFailureProps, type McpClientInfo } from '@/lib/mcpClientSignals';
 import { recordEagerResolve, shouldSkipEagerResolve } from '@/lib/connectionTouchMemo';
 import { after } from 'next/server';
-import { notifyOwnerOfAccountRefusal, notifyOwnerOfApprovalLinks, type NotifyLink } from '@/lib/approvalNotify';
+import { notifyOwnerOfAccountRefusal, notifyOwnerOfApprovalLinks, notifyOwnerOfDeadGrant, type NotifyLink } from '@/lib/approvalNotify';
+import { deadGrantDenialLine, type DeadGrantReason } from '@/lib/googleGrantNotifyCopy';
 import { accountRefusalDenialLine, notifyDenialLine } from '@/lib/approvalNotifyCopy';
 import { normalizeRequestedEmail } from '@/lib/accountRefusals';
 import { inSuccessSample, AUTH_SUCCESS_SAMPLE } from '@/lib/authSampling';
@@ -416,7 +417,14 @@ type GoogleTokenResult = {
 /** Why no token came back — the caller turns this into class-specific
  * guidance (src/lib/googleTokenFailure.ts) instead of one "reconnect" text
  * for every cause. `retried` = a server-side retry already ran and failed. */
-type GoogleTokenFailure = { failure: GoogleTokenFailureReason; retried: boolean };
+type GoogleTokenFailure = {
+  failure: GoogleTokenFailureReason; retried: boolean;
+  /** The mailbox OWNER whose grant was asked for — the key owner for an own
+   * mailbox, the grantor for a delegated one. Present whenever Clerk was
+   * actually asked (absent for `delegation_inactive`); the dead-grant owner
+   * notice emails this person. */
+  owner?: { id: string; email: string; clerkUserId: string };
+};
 
 /**
  * `quiet` suppresses the PostHog captures and tool-call props this function
@@ -433,6 +441,7 @@ async function getGoogleToken(
   { quiet = false }: { quiet?: boolean } = {},
 ): Promise<GoogleTokenResult | GoogleTokenFailure> {
   let tokenOwnerClerkId: string;
+  let tokenOwner: { id: string; email: string; clerkUserId: string } = keyOwner;
 
   if (targetEmail.toLowerCase() === keyOwner.email.toLowerCase()) {
     tokenOwnerClerkId = keyOwner.clerkUserId;
@@ -454,6 +463,7 @@ async function getGoogleToken(
 
     if (emailOwner && delegation) {
       tokenOwnerClerkId = emailOwner.clerkUserId;
+      tokenOwner = { id: emailOwner.id, email: emailOwner.email, clerkUserId: emailOwner.clerkUserId };
     } else {
       const own = await checkOwnClerkEmail(keyOwner.clerkUserId, targetEmail);
       if (!own.own) {
@@ -566,7 +576,7 @@ async function getGoogleToken(
       });
     }
     console.error(`[MCP] Google token fetch failed (${cls.reason}${retried ? ', after retry' : ''}) for target mailbox:`, describeErrorForLog(err));
-    return { failure: cls.reason, retried };
+    return { failure: cls.reason, retried, owner: tokenOwner };
   }
   if (!quiet) addToolCallProps({ token_ms: Date.now() - tokenStarted });
   const grant = tokenResponse.data?.[0];
@@ -580,7 +590,7 @@ async function getGoogleToken(
         reason: 'no_token', via: 'mcp', account_delegated: accountDelegated, retried: false,
       });
     }
-    return { failure: 'no_token', retried: false };
+    return { failure: 'no_token', retried: false, owner: tokenOwner };
   }
   // Clerk's `scopes` is the scope set of the last OAuth request that
   // completed for the account — not necessarily what the token in hand
@@ -1974,9 +1984,35 @@ async function resolveAccountAndToken(
       retried: googleToken.retried,
     });
     if (guidance.denialCode) addToolCallProps({ denial_code: guidance.denialCode });
+    // The owner notice: the agent's refusal is the only channel that existed,
+    // and it reaches nobody when the owner is not the person running the
+    // agent (delegated mailbox) or is not reading its output (scheduled job)
+    // — one delegated mailbox was refused daily for 30 days, its owner never
+    // told. Fires from THIS path only (an actual refusal, never the quiet
+    // list_accounts probes), for the failures a reconnect repairs, to the
+    // mailbox owner, from FGAC's support mailbox. Best-effort: every failure
+    // degrades to the refusal exactly as it was.
+    let emailed = '';
+    if (googleToken.owner && reconnectRepairs(googleToken.failure)) {
+      const notify = await notifyOwnerOfDeadGrant({
+        owner: googleToken.owner, accountEmail: targetEmail, reason: googleToken.failure as DeadGrantReason,
+        keyOwnerEmail: conn.user.email, agentLabel: agentLabel(conn),
+        reconnectUrl: reconnectLink(targetEmail), dashboardUrl: DASHBOARD_URL,
+      });
+      addToolCallProps({
+        notify_status: notify.status,
+        ...(notify.failureCount !== null ? { grant_failure_count: notify.failureCount } : {}),
+        ...(notify.daysDead !== null ? { grant_days_dead: notify.daysDead } : {}),
+      });
+      emailed = deadGrantDenialLine(notify.status, {
+        notifiedAt: notify.notifiedAt,
+        delegated: targetEmail.toLowerCase() !== conn.user.email.toLowerCase(),
+        ccDelegate: notify.ccDelegate,
+      });
+    }
     return resolveFailure(
       googleToken.failure === 'delegation_inactive' ? 'delegation_inactive' : 'google_token_unavailable',
-      guidance.text,
+      guidance.text + (emailed ? `\n${emailed}` : ''),
     );
   }
 

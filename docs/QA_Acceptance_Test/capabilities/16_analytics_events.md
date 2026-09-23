@@ -632,3 +632,37 @@ attributable to it.
   a signed-out click on **Start for free** must still emit `sign_up_started
   {cta_location: 'pricing_free'}` so the sign-up funnel keeps counting
   pricing-page sign-ups
+
+### A29: The dead-grant owner notice is measurable, captured for the owner
+- Run capability 18 A13 (both legs), then query the last hour:
+  `SELECT event, distinct_id, properties.$mcp_tool_name, properties.denial_code,
+  properties.google_token_error, properties.account_delegated,
+  properties.notify_status, properties.grant_failure_count,
+  properties.grant_days_dead, properties.trigger, properties.reason,
+  properties.cc_delegate, properties.failure_count,
+  properties.days_dead FROM events WHERE event IN ('$mcp_tool_call',
+  'google_grant_dead_notified','google_token_fetch_failed') AND timestamp >=
+  now() - INTERVAL 1 HOUR ORDER BY timestamp`
+- **Expected**: every refused `$mcp_tool_call` carries `outcome:
+  'denied_by_policy'`, `denial_code: 'google_token_unavailable'`,
+  `google_token_error` the class, `grant_failure_count` 1, 2, 3 … in order
+  across BOTH legs (one ledger row per owner + mailbox), `grant_days_dead: 0`,
+  and `notify_status` `sent` on the first refusal of the day then
+  `already_sent` on every later one — including the delegated leg's first
+  refusal when the own-mailbox leg ran first. Exactly ONE
+  `google_grant_dead_notified` row for the owner + mailbox, whose
+  `distinct_id` is the mailbox OWNER's Clerk id (the same person as the
+  `google_token_fetch_failed` rows of the own-mailbox leg, and NOT the key
+  owner of the delegated leg), with `channel: 'email'`, `trigger:
+  'first_failure'`, `reason` the class, `failure_count: 1`, `days_dead: 0`,
+  `via: 'mcp'`, and `account_delegated` / `cc_delegate`
+  true exactly when the delegated leg produced it. ONE `proxy_request
+  {service: 'gmail', outcome: 'success'}` row under the sender's key. Five
+  `list_accounts` calls on the dead account add NO `google_token_fetch_failed`
+  rows and NO `google_grant_dead_notified` rows (quiet probes). With the
+  sender unset every refusal carries `notify_status: 'disabled'` and the
+  `grant_failure_count` still climbs
+- **Regression guard**: a `google_grant_dead_notified` row whose
+  `distinct_id` is the key owner on a delegated leg means the notice went to
+  the wrong person — the delegate cannot open the owner-bound link
+  (`monitoring.md` 7.30)
