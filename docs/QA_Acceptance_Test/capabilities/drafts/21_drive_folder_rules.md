@@ -216,6 +216,29 @@ Reconnect).
   `sheets_not_exposed` (legacy path); the dashboard card offers the beta button
   again. This is also the mandatory restore step for the QA baseline.
 
+### A22: A same-turn burst of write denials in one folder mints ONE link and sends at most ONE email
+- With no Drive rules on the Default profile, have the agent attempt writes to
+  `DinA`, `CinBinA` and a third fixture doc in `Test Folder A` within one turn
+  (three `docs_edit` calls in under 10 s). Do not open the link. Re-run the
+  same three calls 45 minutes later (or advance the reminder clock in the
+  runner as capability 14 does).
+- **Expected**: The three first-turn denials carry the SAME approval URL
+  (`approval_request_id` equal on all three `$mcp_tool_call` rows, `batch_size:
+  3`), and its page offers folder "Test Folder A" first. The repeat produces
+  exactly ONE `approval_link_notified` event (`link_count: 3`) and one email in
+  the owner's inbox, never one per file. Reads of the same files never mint
+  anything (A3–A5). Production baseline this replaces (7 d to 2026-09-24):
+  214 links minted by 56 owners, 16 reminder emails to 13 owners, including
+  two emails 108 ms apart for two links minted in one turn.
+
+### A23: Approving the folder from the burst link clears every pending request in it
+- Open the A22 link and grant Read & Write on `Test Folder A`.
+- **Expected**: All three `approval_requests` rows are marked approved in the
+  same action (no lingering pending rows for files under A), the pending
+  banner (capability 14) shows nothing for them, and the three writes now
+  succeed with `rule_match_level: 'folder'`. Revert the edits and remove the
+  rule.
+
 ## Out of scope for this capability
 * Verification / CASA submission (user action, plan v8 §5).
 * Shared-drive fixtures (the QA accounts cannot create in one; a
