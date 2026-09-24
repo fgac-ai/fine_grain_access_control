@@ -29,3 +29,22 @@ export function addToolCallProps(props: ToolCallProps): void {
 export function getToolCallProps(): ToolCallProps {
   return { ...(storage.getStore() ?? {}) };
 }
+
+/**
+ * Request-scoped properties set by the transport wrapper BEFORE the SDK
+ * dispatches the tool (argument aliases applied to the call — see
+ * mcpArgumentGuidance.ts). A separate store from the per-call bag because
+ * the bag is created inside withToolAnalytics, after the SDK has already
+ * validated the rewritten arguments.
+ */
+const requestStorage = new AsyncLocalStorage<ToolCallProps>();
+
+/** Run `fn` with request-level properties every wrapped tool call inherits. */
+export function runWithRequestProps<T>(props: ToolCallProps, fn: () => T): T {
+  return requestStorage.run(props, fn);
+}
+
+/** Properties set for the current request ({} outside one). */
+export function getRequestProps(): ToolCallProps {
+  return { ...(requestStorage.getStore() ?? {}) };
+}

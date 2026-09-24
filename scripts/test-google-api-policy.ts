@@ -457,6 +457,21 @@ expect('leading slash stripped, query preserved',
 expect('idempotent on the canonical spelling',
   canonicalizeGoogleApiPath('drive/v3/files/1Abc'),
   (p: string) => p === 'drive/v3/files/1Abc');
+expect('a full googleapis.com URL (what agents send under `url`) is reduced to its path',
+  canonicalizeGoogleApiPath('https://gmail.googleapis.com/gmail/v1/users/me/messages?q=is%3Aunread'),
+  (p: string) => p === 'gmail/v1/users/me/messages?q=is%3Aunread');
+expect('www.googleapis.com origin stripped, bare Drive spelling still canonicalised',
+  canonicalizeGoogleApiPath('https://www.googleapis.com/v3/files/1Abc'),
+  (p: string) => p === 'drive/v3/files/1Abc');
+expect('sheets host origin stripped',
+  canonicalizeGoogleApiPath('https://sheets.googleapis.com/v4/spreadsheets/1Abc/values/A1:B2'),
+  (p: string) => p === 'v4/spreadsheets/1Abc/values/A1:B2');
+expect('a non-Google origin is NOT stripped (the classifier refuses it)',
+  canonicalizeGoogleApiPath('https://evil.example.com/gmail/v1/users/me/messages'),
+  (p: string) => p === 'https://evil.example.com/gmail/v1/users/me/messages');
+expect('a look-alike host is NOT stripped',
+  canonicalizeGoogleApiPath('https://googleapis.com.evil.example/gmail/v1/users/me'),
+  (p: string) => p.startsWith('https://googleapis.com.evil.example/'));
 expect('sheets bare spelling untouched (v4/spreadsheets is served as-is)',
   canonicalizeGoogleApiPath('v4/spreadsheets/1Abc/values/A1:B2'),
   (p: string) => p === 'v4/spreadsheets/1Abc/values/A1:B2');

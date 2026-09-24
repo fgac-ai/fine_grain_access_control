@@ -643,7 +643,69 @@ GROUP BY tool, field, code, expected, received ORDER BY n DESC
 `issues_parsed = false` rows are failures whose text carried no JSON issue
 array (a custom message or an SDK format change) — if they appear after an
 SDK bump, `scripts/test-validation-failure-capture.ts` is the first thing
-to re-run, since it drives the real SDK.
+to re-run, since it drives the real SDK. Rows with NO `first_issue_path`
+and a `message` ending at `: [` are simply older than the decoder: the 46
+such rows in the week to 2026-09-22 all date from before PR #151 went live
+(2026-09-19 00:40Z) — bound the query at that timestamp before reading
+field-less rows as a capture gap.
+
+**Since 2026-09-23 (argument tolerance, PR on `claude/magical-liskov-2f26f1`)
+the route acts on this table instead of only recording it.** Baseline, the
+week to 2026-09-22 10:00 UTC, production, internal accounts excluded:
+**75 events from 18 people** (of ~110 who called a tool that week — about
+one in six), and in every decoded row the agent had spelled a known
+argument differently (`spreadsheet_id`, `message_id` / `id`, `url` / `uri` /
+`api_path`, `resource_type`). Two changes, both in the transport wrapper
+because the SDK validates before any tool code runs (`mcpArgumentGuidance.ts`):
+
+- **Aliases are moved onto the canonical key before validation**, so the
+  call simply runs. Each hit lands on `$mcp_tool_call` as `arg_aliases`
+  (the keys the agent typed), `arg_alias_targets` (what they became) and
+  `arg_alias_count`. A full `*.googleapis.com` URL under `url` / `path` is
+  reduced to its API path (`canonicalizeGoogleApiPath`).
+- **What still fails gets a guided paragraph** in place of the JSON dump:
+  the missing / wrong argument, the keys the agent sent that the tool does
+  not have (with a wrong-tool hint where one applies — `query` on
+  `gmail_read` → `gmail_list`), and the tool's exact argument list. The
+  -32602 code stays in the text. Those rows carry `guided: true` and are
+  captured from the Zod issues directly (same `first_issue_*` props), not
+  from the tee.
+
+Measure the decline weekly — failures by tool, guided or not, next to the
+aliases that were absorbed:
+
+```sql
+-- Refusals the agent still sees (target: a fraction of the 75/18 baseline)
+SELECT toStartOfWeek(timestamp) AS week, properties.tool AS tool,
+       countIf(properties.guided = true) AS guided, countIf(properties.guided IS NULL) AS legacy,
+       count() AS n, uniq(person_id) AS people
+FROM events
+WHERE event = 'mcp_input_validation_failed' AND properties.environment = 'production'
+  AND timestamp > now() - INTERVAL 28 DAY
+  AND person.properties.email NOT IN ('<internal accounts>')
+GROUP BY week, tool ORDER BY week DESC, n DESC
+```
+
+```sql
+-- Calls that succeeded ONLY because an alias was absorbed (what the baseline turned into)
+SELECT properties.$mcp_tool_name AS tool, arrayJoin(properties.arg_aliases) AS alias,
+       count() AS n, uniq(person_id) AS people
+FROM events
+WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
+  AND properties.arg_alias_count > 0 AND timestamp > now() - INTERVAL 7 DAY
+GROUP BY tool, alias ORDER BY n DESC
+```
+
+Reading it: alias hits are the friction the fix absorbed — a steady count
+there with a near-zero first table is the intended end state, and an alias
+that never fires can be retired from `ARGUMENT_ALIASES`. A guided row that
+repeats for one person on one tool is a shape the paragraph does not
+explain well enough (or a wrong-tool case with no hint yet): read
+`sent_keys` + `first_issue_path` and add the alias or the hint. Rows with
+`guided IS NULL` after the deploy are failures the pre-check could not run
+(a JSON-RPC batch, or a tool whose shape is missing from the registry) —
+`scripts/test-argument-guidance.ts` and the registry stub in `route.ts`
+are the places to look.
 
 Healthy: near zero. A single user repeating the same `invalid_arguments` on
 one tool is an agent stuck on a schema misunderstanding — the tool's

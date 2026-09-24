@@ -513,7 +513,7 @@ function receivedFromMessage(message: unknown): string | undefined {
  * union failure nests one issue list per branch — the branches' `expected`
  * values are joined so `body: string|record ← array` reads as one line.
  */
-function normalizeIssue(raw: unknown): ValidationIssue | undefined {
+export function normalizeValidationIssue(raw: unknown): ValidationIssue | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const i = raw as {
     code?: unknown; path?: unknown; expected?: unknown; values?: unknown; message?: unknown; errors?: unknown;
@@ -575,7 +575,7 @@ export function parseValidationFailure(body: string): ValidationFailure | undefi
         if (Array.isArray(parsed)) {
           issues_parsed = true;
           issue_count = parsed.length;
-          issues = parsed.slice(0, MAX_ISSUES).map(normalizeIssue).filter((i): i is ValidationIssue => !!i);
+          issues = parsed.slice(0, MAX_ISSUES).map(normalizeValidationIssue).filter((i): i is ValidationIssue => !!i);
         }
       } catch { /* not Zod 4's JSON message (a custom or v3 message) — counted, not decoded */ }
       return { kind: 'invalid_arguments', tool: m[1], message, issues_parsed, issues, issue_count };

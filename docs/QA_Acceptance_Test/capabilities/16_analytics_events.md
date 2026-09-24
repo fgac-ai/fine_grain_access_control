@@ -544,7 +544,10 @@ attributable to it.
   `values` passed as the STRING `"[[1]]"` (any spreadsheetId/range — the
   SDK rejects the shape before FGAC's rule check runs), then a tool that
   does not exist (`gmail_search` with `{"query": "is:unread"}`). Each call
-  returns an `isError` result whose text starts `MCP error -32602:`.
+  returns an `isError` result whose text starts `MCP error -32602:` (since
+  2026-09-23 the first two are the guided paragraph — see A29 — and the
+  `message` prop below is that paragraph, not the SDK's JSON; the
+  `first_issue_*` expectations are unchanged).
 - Query: `SELECT properties.tool, properties.kind, properties.first_issue_path,
   properties.first_issue_code, properties.first_issue_expected,
   properties.first_issue_received, properties.sent_keys, properties.issue_count,
@@ -559,12 +562,41 @@ attributable to it.
   `first_issue_expected: 'array'`, `first_issue_received: 'string'`,
   `sent_keys` containing `values`. `gmail_search`: `kind: 'unknown_tool'`,
   `sent_keys: ['query']`, no `first_issue_*` props. Every `message` is a
-  single line, at most 300 characters, and contains the issue JSON (the
+  single line, at most 300 characters, and names the rejected argument (the
   word `messageId` appears in the gmail_read row's message) — never the
   argument VALUES (`x` and `[[1]]` appear nowhere in the properties).
 - **Regression guard**: a `message` ending in `Invalid arguments for tool
   gmail_read: [` is the pre-2026-09-17 truncation returning — the capture
   regex has replaced `parseValidationFailure` (`monitoring.md` 7.10a).
+
+### A29: Argument aliases and guided refusals are measurable (2026-09-23)
+- Run capability 09 A13 (aliased calls) and capability 15 A10 (guided
+  refusals), plus `gmail_read` with `{"query": "is:unread"}` (a wrong-tool
+  shape: no alias applies, the guidance points at `gmail_list`).
+- Query: `SELECT event, properties.$mcp_tool_name, properties.tool,
+  properties.arg_aliases, properties.arg_alias_targets,
+  properties.arg_alias_count, properties.guided, properties.first_issue_path,
+  properties.first_issue_code, properties.sent_keys, properties.message
+  FROM events WHERE event IN ('$mcp_tool_call', 'mcp_input_validation_failed')
+  AND properties.environment = '<tier>' AND timestamp >= now() - INTERVAL 1
+  HOUR ORDER BY timestamp`
+- **Expected**: the aliased calls are `$mcp_tool_call` rows (outcome as the
+  canonical call would have) with `arg_aliases` / `arg_alias_targets` /
+  `arg_alias_count` set and NO `mcp_input_validation_failed` row for them.
+  The guided refusals are `mcp_input_validation_failed` rows with `guided:
+  true`, `first_issue_path: 'type'` / `first_issue_code: 'invalid_value'`
+  for the `resource_type` shape (with `arg_aliases: ['resource_type',
+  'resource_name']` — the aliases were applied, the enum value still
+  failed) and `first_issue_path: 'messageId'` / `first_issue_code:
+  'invalid_type'` / `sent_keys: ['query']` for the gmail_read shape; every
+  guided `message` starts `MCP error -32602: Invalid arguments for tool`
+  and contains no `"code"` (the JSON dump is gone) and no argument value.
+  A26 still holds for the shapes it names (they are now guided rows: same
+  `first_issue_*` props, `guided: true`).
+- **Regression guard**: a `mcp_input_validation_failed` row for a
+  `spreadsheet_id` call, or a guided `message` that contains
+  `Input validation error`, means the pre-check stopped running before the
+  SDK (`prepareToolCall`) — `scripts/test-argument-guidance.ts` first.
 
 ### A27: The pending-approvals banner is measurable end to end
 - Run capability 14 A18, then query the user's events for the last hour:
