@@ -44,7 +44,7 @@ export const TOOL_DEFS = {
   gmail_read: {
     name: 'gmail_read',
     title: 'Read a Gmail message',
-    description: 'Read a Gmail message by ID. Returns parsed headers, body text, and attachment metadata. Reading is allowed by default; messages matching the user\'s read-block rules (labels or content patterns), if any, are withheld. Works across every connected or delegated Gmail inbox via the "account" parameter. For a full thread use google_api_get with gmail/v1/users/me/threads/{id}. Long messages: pass offset and a limit sized to your tool-result budget (chars, max 200000/call) to window the serialized message with the body UNtruncated — the envelope reports total_chars and next_offset; concatenate data strings in offset order.',
+    description: 'Read a Gmail message by ID — arguments: messageId (required; the "id" from gmail_list), account, format, offset, limit. Returns parsed headers, body text, and attachment metadata. Reading is allowed by default; messages matching the user\'s read-block rules (labels or content patterns), if any, are withheld. Works across every connected or delegated Gmail inbox via the "account" parameter. For a full thread use google_api_get with gmail/v1/users/me/threads/{id}. Long messages: pass offset and a limit sized to your tool-result budget (chars, max 200000/call) to window the serialized message with the body UNtruncated — the envelope reports total_chars and next_offset; concatenate data strings in offset order.',
     readOnly: true,
   },
   gmail_get_attachment: {
@@ -70,19 +70,19 @@ export const TOOL_DEFS = {
   sheets_get_spreadsheet: {
     name: 'sheets_get_spreadsheet',
     title: 'Get spreadsheet metadata',
-    description: 'Get metadata and sheet tabs for a Google Spreadsheet exposed by the user\'s FGAC rules. Large responses: pass offset and a limit sized to your tool-result budget (chars, max 200000/call) — the windowed envelope reports total_chars and next_offset; concatenate data strings in offset order.',
+    description: 'Get metadata and sheet tabs for a Google Spreadsheet exposed by the user\'s FGAC rules — arguments: spreadsheetId (required), account, offset, limit. Large responses: pass offset and a limit sized to your tool-result budget (chars, max 200000/call) — the windowed envelope reports total_chars and next_offset; concatenate data strings in offset order.',
     readOnly: true,
   },
   sheets_read_range: {
     name: 'sheets_read_range',
     title: 'Read spreadsheet cells',
-    description: 'Read cell values from a sheet tab or range in a Google Spreadsheet exposed by the user\'s FGAC rules. Prefer narrowing the range; for genuinely large ranges, pass offset and a limit sized to your tool-result budget (chars, max 200000/call) — the windowed envelope reports total_chars and next_offset; concatenate data strings in offset order.',
+    description: 'Read cell values from a sheet tab or range in a Google Spreadsheet exposed by the user\'s FGAC rules — arguments: spreadsheetId and range (both required), account, offset, limit. Prefer narrowing the range; for genuinely large ranges, pass offset and a limit sized to your tool-result budget (chars, max 200000/call) — the windowed envelope reports total_chars and next_offset; concatenate data strings in offset order.',
     readOnly: true,
   },
   sheets_update_range: {
     name: 'sheets_update_range',
     title: 'Update spreadsheet cells',
-    description: 'Overwrite cell values in a range of a Google Spreadsheet. Requires a Read & Write FGAC rule for the spreadsheet. Values only — for formatting, charts, or structural changes use sheets_edit; the same rule authorizes both.',
+    description: 'Overwrite cell values in a range of a Google Spreadsheet — arguments: spreadsheetId, range, values (a JSON array of row arrays, all required), account. Requires a Read & Write FGAC rule for the spreadsheet. Values only — for formatting, charts, or structural changes use sheets_edit; the same rule authorizes both.',
     readOnly: false,
     destructive: true,
   },
@@ -103,7 +103,7 @@ export const TOOL_DEFS = {
   docs_read_document: {
     name: 'docs_read_document',
     title: 'Read a Google Doc',
-    description: 'Read a Google Docs document exposed by the user\'s FGAC rules. Returns the raw Docs API document resource (title, body content as structured JSON). Large documents: trim with the optional "fields" mask (e.g. "title,body.content"), or read in windows by passing offset and a limit sized to YOUR tool-result budget (chars of serialized JSON, max 200000/call) — each response reports total_chars and next_offset; concatenate data strings in offset order. To edit the document use docs_edit; comments live in the Drive API — use comments_read.',
+    description: 'Read a Google Docs document exposed by the user\'s FGAC rules — arguments: documentId (required), fields, account, offset, limit. Returns the raw Docs API document resource (title, body content as structured JSON). Large documents: trim with the optional "fields" mask (e.g. "title,body.content"), or read in windows by passing offset and a limit sized to YOUR tool-result budget (chars of serialized JSON, max 200000/call) — each response reports total_chars and next_offset; concatenate data strings in offset order. To edit the document use docs_edit; comments live in the Drive API — use comments_read.',
     readOnly: true,
   },
   docs_edit: {
@@ -158,7 +158,7 @@ export const TOOL_DEFS = {
   request_access: {
     name: 'request_access',
     title: 'Request a permission upgrade',
-    description: 'Ask the user to grant this agent a specific permission: sending email to a recipient, or read/write access to a Google Spreadsheet, Google Docs document, or Google Slides presentation. Returns a permanent approval link for the user — calling this tool grants nothing by itself; the user must open the link and approve. For a spreadsheet, document, or presentation, pass resourceName (the file\'s title) whenever you know it: the approval page shows it, and without it the user only sees Google\'s file id while Google\'s picker lists files by name.',
+    description: 'Ask the user to grant this agent a specific permission: sending email to a recipient, or read/write access to a Google Spreadsheet, Google Docs document, or Google Slides presentation. Arguments: type (required — one of send, sheets_read, sheets_write, docs_read, docs_write, slides_read, slides_write) plus recipient for send, or spreadsheetId / documentId / presentationId for a file. Returns a permanent approval link for the user — calling this tool grants nothing by itself; the user must open the link and approve. For a spreadsheet, document, or presentation, pass resourceName (the file\'s title) whenever you know it: the approval page shows it, and without it the user only sees Google\'s file id while Google\'s picker lists files by name.',
     readOnly: true,
   },
   get_my_permissions: {
