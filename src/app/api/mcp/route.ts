@@ -41,6 +41,7 @@ import { notifyOwnerOfAccountRefusal, notifyOwnerOfApprovalLinks, notifyOwnerOfD
 import { deadGrantDenialLine, type DeadGrantReason } from '@/lib/googleGrantNotifyCopy';
 import { accountRefusalDenialLine, notifyDenialLine } from '@/lib/approvalNotifyCopy';
 import { normalizeRequestedEmail } from '@/lib/accountRefusals';
+import { classifyPlaceholderEmail } from '@/lib/placeholderEmail';
 import { inSuccessSample, AUTH_SUCCESS_SAMPLE } from '@/lib/authSampling';
 import { ensureDefaultProfile } from '@/db/defaultProfile';
 import { mintApprovalLink, describeApproval, actionTarget, fileApprovalActionFor, fileIdFields, type ApprovalAction, type ApprovalPayload } from '@/lib/approvalLinks';
@@ -1940,6 +1941,13 @@ async function resolveAccountAndToken(
       // never reach this owner (plan v4): record the refused value and, on
       // the third refusal of it in 24 h, email the owner once from the
       // support mailbox naming what the task passes and what would work.
+      // A value that cannot be anyone's mailbox — `ufficio@example.com`, a
+      // template, not an address — gets its own text ("do not guess; ask the
+      // user"), is never ledgered, and never emails the owner: one agent
+      // re-sent two invented example.com addresses 140 times in three days
+      // (2026-09-21 → 23) and the generic text earned its owner two emails
+      // naming accounts nobody has. Stamped so 7.22 / 7.26d can split it out.
+      const placeholder = classifyPlaceholderEmail(targetEmail);
       const toolName = getToolCallProps().$mcp_tool_name;
       const notify = await notifyOwnerOfAccountRefusal({
         owner: conn.user, proxyKeyId: conn.proxyKeyId, agentLabel: agentLabel(conn),
@@ -1949,11 +1957,12 @@ async function resolveAccountAndToken(
       });
       addToolCallProps({
         account_requested: normalizeRequestedEmail(targetEmail),
+        account_requested_placeholder: placeholder ?? undefined,
         account_refusal_count: notify.refusalCount ?? undefined,
         notify_status: notify.status,
       });
       const emailed = accountRefusalDenialLine(notify.status, notify);
-      return { error: accountNotPermittedByCaller(targetEmail, usable) + (emailed ? `\n${emailed}` : '') };
+      return { error: accountNotPermittedByCaller(targetEmail, usable, placeholder) + (emailed ? `\n${emailed}` : '') };
     }
     return resolveFailure('account_not_permitted', accountNotPermittedByDefault(targetEmail, usable));
   }

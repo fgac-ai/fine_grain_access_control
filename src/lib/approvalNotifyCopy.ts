@@ -32,6 +32,10 @@ export type NotifyStatus =
   /** Account-refusal notice only: the owner was already emailed about a
    * refused account inside the current episode (ACCOUNT_REFUSAL_EPISODE_GAP_MS). */
   | 'skipped_episode'
+  /** Account-refusal notice only: the refused value is a placeholder (an
+   * RFC 2606 example domain, a template value, not an address) — nothing is
+   * recorded and nobody is emailed about an account that cannot exist. */
+  | 'skipped_placeholder'
   | 'skipped_no_links'
   | 'failed'
   | 'disabled';
