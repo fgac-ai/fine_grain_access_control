@@ -180,6 +180,16 @@ export async function approvalTargetHash(target: string): Promise<string | undef
   return (await hmac('fgac-approval-target', target)).slice(0, 16);
 }
 
+/**
+ * The same keyed hash for other analytics keys that must never carry the raw
+ * value — e.g. the Clerk cookie behind `clerk_auth_redirect.client_hash`
+ * (src/lib/clerkAuthRedirect.ts). A distinct `label` keeps each use in its own
+ * keyspace, so hashes never collide across events.
+ */
+export async function analyticsHash(label: string, value: string): Promise<string> {
+  return (await hmac(label, value)).slice(0, 16);
+}
+
 /** Timing-safe string compare (both operands are fixed-length base64url). */
 function safeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
