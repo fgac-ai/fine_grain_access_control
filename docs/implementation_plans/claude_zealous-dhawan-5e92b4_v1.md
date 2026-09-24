@@ -119,3 +119,29 @@ handshake per fresh browser — every query filters `environment = 'production'`
   carrying that cookie was answered with `.2`. Both rows arrived in PostHog
   under `environment = 'development'` with `client_hash` absent,
   `browser_key = bounce_id`, `client = browser`, `navigation = true`.
+- **Stale `node_modules` blocked the first QA run.** The worktree's
+  `node_modules` existed, so `npm install` was skipped at bootstrap; it
+  predated `posthog-node` and every `/dashboard` render 500'd
+  (`Module not found: posthog-node` from `src/lib/posthogServer.ts`). The
+  middleware still redirected correctly (the curl probes above ran against
+  that server), which is why the defect only surfaced once a real browser got
+  past the handshake. Lesson for the bootstrap list: an existing
+  `node_modules` is not a current one — run `npm install` on every worktree
+  bootstrap, then restart the dev server.
+
+## QA outcome (capability 16 A30, 2026-09-24)
+
+| environment | leg | path | result |
+| --- | --- | --- | --- |
+| local (dev server, dev Clerk) | signed-out `/dashboard` | Path B Chrome | one `handshake` (`dev-browser-missing`, `bounce_count` 1) then exactly one `sign_in` (`session-token-and-uat-missing`, `path /dashboard`, `navigation true`, `bounce_count` 2, same `bounce_id`, 16-char `client_hash`) |
+| local | signed-in `/dashboard` ×2 | Path B Chrome | **blocked** — the runner's `cookie-clear` wiped the shared Path B profile's Google session; Google asked for a password and the runner stopped. USER ACTION: re-auth USER_A in the Path B Chrome profile, then re-check this one leg |
+| preview (`lf7gnchto`, dev Clerk) | signed-out `/dashboard` | built-in pane | same shape as local: `handshake` then exactly one `sign_in` |
+| preview | signed-in `/dashboard` ×2 (USER_A) | built-in pane | **zero** new rows |
+
+Coverage checker: scoped run, 30/30 in-scope assertions accounted for
+(A30 `blocked` with the user action named; A1–A29 `skip`, out of scope).
+Two tooling notes for the QA harness: the built-in pane loops only on
+`localhost` (stale cross-port Clerk cookies); against the preview host it drove
+Clerk's hosted sign-in, the Google chooser and consent without trouble. And
+playwright-cli's `cookie-clear` clears the whole shared context — use
+`cookie-delete <name>` for localhost-only cookies.
