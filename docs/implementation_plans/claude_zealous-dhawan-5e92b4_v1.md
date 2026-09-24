@@ -92,8 +92,11 @@ handshake per fresh browser — every query filters `environment = 'production'`
    shows the `sign_in` row (plus the dev `handshake` row for a fresh browser);
    a signed-in navigation adds nothing.
 3. `/deploy-pr-preview`, repeat on the preview URL (`environment = 'preview'`).
-4. Alert: attempt insight + alert creation through the PostHog connector; if
-   the write is refused, §7.31 documents the exact insight for Ken to create.
+4. Alert: created through the PostHog MCP connector (OAuth as Ken) —
+   insight `XKnzwDVm`, alert `01a0d396-2dd7-0000-252a-fbe4f35492af`, hourly,
+   fires when the hour's count of `bounce_count ≥ 5` production hops is above 0.
+   The `phx_` automation key could not have done this (`insight:write`
+   denied); §7.31 and the 2–3 alerts table record it.
 5. No `/qa-production`.
 
 ## Findings during validation (2026-09-24)

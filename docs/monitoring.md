@@ -98,6 +98,7 @@ are the trustworthy series for any historical question.
 | --- | --- | --- | --- |
 | MCP tool-call volume floor | [MFYwjsQU](https://us.posthog.com/project/343912/insights/MFYwjsQU) | completed day < 50 tool calls | observed daily range 168–1,203 post-launch; near-zero = clients silently locked out |
 | MCP invalid_token spike | [mGzUClRs](https://us.posthog.com/project/343912/insights/mGzUClRs) | day (incl. today) > 50 invalid_token failures, **excluding `kid = 'probe'` and `client_class IN ('scanner', 'internal')`** | real-user baseline is **0–2/day**; a spike means verification broke or a rejection storm |
+| Clerk redirect loop | [XKnzwDVm](https://us.posthog.com/project/343912/insights/XKnzwDVm) | hour (incl. the current one) > 0 `clerk_auth_redirect` hops with `bounce_count ≥ 5`, `environment = production` | one browser sent to Clerk sign-in/handshake five times in five minutes is a loop, never normal traffic; Clerk's own detector only catches sub-2-s hops (§7.31) |
 
 **The invalid_token alert must exclude our own synthetic probes.** Every
 `invalid_token` event carrying `kid = 'probe'` comes from
@@ -2612,14 +2613,16 @@ Clerk's detector never fired. The marker cookie is the detector. `approval_sign_
 funnel's join keys; when a looping browser's `paths` include
 `/dashboard/approve`, join on the minute to see which link it was carrying.
 
-**Alert (hourly, email to Ken).** A trends insight on `clerk_auth_redirect`
-filtered to `environment = production` and `bounce_count >= 5`
-(numeric property filter: *bounce_count greater than or equal to 5*),
-displayed as total count per hour, with an alert *when value is above 0* on
-the last completed hour. Under the reading above that fires the first time
-any production browser completes a five-hop loop; `sign_in` and `handshake`
-both count, so a Clerk-side handshake storm and an app-side reject loop page
-the same way. Creating the insight and the alert is a **user action** — the
-automation key is `query:read` only (`insight:write` denied, same as 2–3), and
-the MCP connector's write path is what to try first. Until it exists, 7.31a
-is the manual check and belongs in the daily review's health pass.
+**Alert (hourly, email to Ken) — live since 2026-09-24.** Insight
+[XKnzwDVm](https://us.posthog.com/project/343912/insights/XKnzwDVm) is a
+trends count of `clerk_auth_redirect` filtered to `environment = production`
+and `bounce_count > 4` (numeric filter, i.e. ≥ 5), per hour. Alert
+"Clerk redirect loop" (`01a0d396-2dd7-0000-252a-fbe4f35492af`) evaluates it
+hourly, including the in-progress hour, and fires *when value is above 0*.
+Under the reading above that is the first time any production browser
+completes a five-hop loop; `sign_in` and `handshake` both count, so a
+Clerk-side handshake storm and an app-side reject loop page the same way.
+Both were created through the PostHog MCP connector (OAuth as Ken, which has
+`insight:write` — the `phx_` automation key of 2–3 does not, so any change
+to them goes through the connector or the UI, not the runner scripts). Row 4
+of the alerts table in 2–3 lists it. 7.31a is what to run when it fires.
