@@ -31,10 +31,11 @@ import { resolveDbUser } from '@/db/userHelpers';
 import { loadApplicableRules, checkReadRestrictions, decodeB64Url, stripHtmlToText, type ApplicableRules } from '@/lib/gmailRules';
 import { compileRulePattern } from '@/lib/rulePatterns';
 import { captureServerEvent } from '@/lib/posthogServer';
-import { runWithToolCallProps, addToolCallProps, getToolCallProps } from '@/lib/toolCallContext';
+import { runWithToolCallProps, addToolCallProps, getToolCallProps, runWithRequestProps, getRequestProps } from '@/lib/toolCallContext';
+import { normalizeToolArguments, describeArgumentFailure, rewriteValidationFailureBody, type AliasHit, type ZodIssueLike } from '@/lib/mcpArgumentGuidance';
 import { cleanResourceName } from '@/lib/pickerRecoveryCopy';
 import { GOOGLE_FETCH_TIMEOUT_MS, CLERK_TOKEN_TIMEOUT_MS, withTimeout, isUpstreamTimeout } from '@/lib/upstreamTimeouts';
-import { classifyMcpClient, classifyTransportRejection, installFingerprint, parseInitializeClientInfo, parseRpcEnvelope, parseValidationFailure, resourceIdHash, validationFailureProps, type McpClientInfo } from '@/lib/mcpClientSignals';
+import { classifyMcpClient, classifyTransportRejection, installFingerprint, parseInitializeClientInfo, parseRpcEnvelope, parseValidationFailure, normalizeValidationIssue, resourceIdHash, validationFailureProps, type McpClientInfo } from '@/lib/mcpClientSignals';
 import { recordEagerResolve, shouldSkipEagerResolve } from '@/lib/connectionTouchMemo';
 import { after } from 'next/server';
 import { notifyOwnerOfAccountRefusal, notifyOwnerOfApprovalLinks, notifyOwnerOfDeadGrant, type NotifyLink } from '@/lib/approvalNotify';
@@ -1845,6 +1846,9 @@ function withToolAnalytics<R extends ToolAnalyticsResult>(
         client_id: extra?.authInfo?.clientId,
         user_agent: extra?.authInfo?.extra?.userAgent,
         outcome,
+        // Request-level props set before the SDK dispatched the call
+        // (arg_aliases — see prepareToolCall), then the per-call bag.
+        ...getRequestProps(),
         ...getToolCallProps(),
       },
     );
@@ -2507,8 +2511,20 @@ function toolConfig<S extends z.ZodRawShape>(def: FgacToolDef, inputSchema: S) {
   };
 }
 
-const handler = createMcpHandler(
-  (server) => {
+type FgacMcpServer = Parameters<Parameters<typeof createMcpHandler>[0]>[0];
+
+/**
+ * Every tool's Zod input shape, keyed by tool name, filled once at module
+ * load by running the registration function against a stub server (below).
+ * mcp-handler builds a fresh McpServer per request, so the registrations
+ * themselves cannot be consulted before that request's handler runs — and
+ * the transport wrapper needs the shapes BEFORE the SDK validates, to alias
+ * argument names and to write the guided -32602 text (mcpArgumentGuidance).
+ */
+const TOOL_INPUT_SHAPES = new Map<string, z.ZodRawShape>();
+const TOOL_INPUT_OBJECTS = new Map<string, z.ZodObject<z.ZodRawShape>>();
+
+function registerFgacTools(server: FgacMcpServer) {
     // Every registered tool is wrapped with a PostHog `$mcp_tool_call` capture.
     // Patching registerTool here keeps the registrations below untouched (their
     // schema-inferred param types intact) and instruments future tools too.
@@ -3568,7 +3584,18 @@ const handler = createMcpHandler(
         });
       }
     );
+}
+
+registerFgacTools({
+  registerTool: (name: string, config: { inputSchema?: z.ZodRawShape }) => {
+    if (!config.inputSchema) return;
+    TOOL_INPUT_SHAPES.set(name, config.inputSchema);
+    TOOL_INPUT_OBJECTS.set(name, z.object(config.inputSchema));
   },
+} as unknown as FgacMcpServer);
+
+const handler = createMcpHandler(
+  registerFgacTools,
   {
     serverInfo: {
       name: 'fgac',
@@ -3999,6 +4026,63 @@ const MAX_REJECT_BODY_CHARS = 100_000;
  */
 type AuthedRequest = Request & { auth?: { clientId?: string; extra?: { userId?: string } } };
 
+interface PreparedToolCall {
+  tool: string;
+  /** Aliases moved onto canonical keys (from → to), in order. */
+  aliased: AliasHit[];
+  /** The request body with aliased keys renamed; undefined when nothing changed. */
+  rewrittenText?: string;
+  /** Set when the (normalised) arguments still fail the tool's schema. */
+  failure?: { text: string; issues: ZodIssueLike[]; args: Record<string, unknown> };
+}
+
+/**
+ * Argument-name tolerance for one `tools/call` POST, before the SDK sees it
+ * (mcpArgumentGuidance.ts). Single-message envelopes only — a JSON-RPC
+ * batch is left to the SDK untouched. Never throws.
+ */
+async function prepareToolCall(text: string): Promise<PreparedToolCall | undefined> {
+  let body: unknown;
+  try { body = JSON.parse(text); } catch { return undefined; }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return undefined;
+  const msg = body as { method?: unknown; params?: { name?: unknown; arguments?: unknown } };
+  if (msg.method !== 'tools/call' || typeof msg.params?.name !== 'string') return undefined;
+  const tool = msg.params.name;
+  const shape = TOOL_INPUT_SHAPES.get(tool);
+  const object = TOOL_INPUT_OBJECTS.get(tool);
+  if (!shape || !object) return undefined;
+  const raw = msg.params.arguments;
+  const args = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  const { args: normalized, aliased } = normalizeToolArguments(Object.keys(shape), args);
+  const rewrittenText = aliased.length
+    ? JSON.stringify({ ...msg, params: { ...msg.params, arguments: normalized } })
+    : undefined;
+  let failure: PreparedToolCall['failure'];
+  try {
+    const parsed = await object.safeParseAsync(normalized);
+    if (!parsed.success) {
+      const issues = parsed.error.issues as ZodIssueLike[];
+      failure = { text: describeArgumentFailure({ tool, shape, issues, args: normalized, aliased }), issues, args: normalized };
+    }
+  } catch { /* schema threw — let the SDK answer as before */ }
+  return { tool, aliased, rewrittenText, failure };
+}
+
+/** The same request with a new body; `auth` (set by experimental_withMcpAuth) is carried over. */
+function withRequestBody(req: Request, text: string): Request {
+  const headers = new Headers(req.headers);
+  headers.delete('content-length');
+  const next = new Request(req.url, { method: req.method, headers, body: text }) as AuthedRequest;
+  next.auth = (req as AuthedRequest).auth;
+  return next;
+}
+
+function responseWithBody(res: Response, body: string): Response {
+  const headers = new Headers(res.headers);
+  headers.delete('content-length');
+  return new Response(body, { status: res.status, statusText: res.statusText, headers });
+}
+
 const withTransportObservability =
   (h: (req: Request) => Promise<Response>) =>
   async (req: Request): Promise<Response> => {
@@ -4012,6 +4096,7 @@ const withTransportObservability =
     });
 
     let envelope: ReturnType<typeof parseRpcEnvelope> | undefined;
+    let prepared: PreparedToolCall | undefined;
     if (req.method === 'POST' && (req.headers.get('content-type') ?? '').includes('application/json')) {
       let text = '';
       try { text = await req.clone().text(); } catch { /* unreadable body: let the handler decide */ }
@@ -4025,9 +4110,22 @@ const withTransportObservability =
           { status: 400 },
         );
       }
+      // Argument-name tolerance: `spreadsheet_id` → `spreadsheetId` before
+      // the SDK validates (it would refuse the call and strip the key). The
+      // envelope keeps the ORIGINAL keys, so sent_keys still says what the
+      // agent typed.
+      prepared = await prepareToolCall(text);
+      if (prepared?.rewrittenText) req = withRequestBody(req, prepared.rewrittenText);
     }
 
-    const res = await h(req);
+    const aliasProps = prepared?.aliased.length
+      ? {
+          arg_aliases: prepared.aliased.map(a => a.from),
+          arg_alias_targets: prepared.aliased.map(a => a.to),
+          arg_alias_count: prepared.aliased.length,
+        }
+      : undefined;
+    const res = aliasProps ? await runWithRequestProps(aliasProps, () => h(req)) : await h(req);
 
     if (TRANSPORT_REJECT_STATUSES.has(res.status)) {
       let message: string | undefined;
@@ -4044,6 +4142,40 @@ const withTransportObservability =
         rpc_methods: envelope?.methods, tool: envelope?.toolName,
       });
       return res;
+    }
+
+    if (prepared?.failure && req.method === 'POST' && res.ok && res.body) {
+      // The schema check above already failed on these arguments, so the
+      // SDK's answer is its -32602 text. Buffer it (a validation result is a
+      // few hundred bytes), swap in the guided paragraph, and record the
+      // failure from the Zod issues directly — the same props the tee
+      // decodes, plus `guided: true` and the aliases that were applied.
+      const failure = prepared.failure;
+      const body = await res.text();
+      const rewritten = rewriteValidationFailureBody(body, prepared.tool, failure.text);
+      if (rewritten !== undefined) {
+        const issues = failure.issues.slice(0, 10)
+          .map(normalizeValidationIssue)
+          .filter((i): i is NonNullable<ReturnType<typeof normalizeValidationIssue>> => !!i);
+        captureServerEvent(distinctId, 'mcp_input_validation_failed', {
+          ...base(),
+          tool: prepared.tool,
+          ...validationFailureProps({
+            kind: 'invalid_arguments',
+            tool: prepared.tool,
+            message: failure.text.replace(/\s+/g, ' ').slice(0, 300),
+            issues_parsed: true,
+            issues,
+            issue_count: failure.issues.length,
+          }, envelope?.argumentKeys),
+          guided: true,
+          ...aliasProps,
+        });
+        return responseWithBody(res, rewritten);
+      }
+      // The SDK accepted what our check refused (a schema the pre-check
+      // cannot run) — hand back the buffered body unchanged.
+      return responseWithBody(res, body);
     }
 
     if (req.method === 'POST' && envelope?.toolName && res.ok && res.body) {

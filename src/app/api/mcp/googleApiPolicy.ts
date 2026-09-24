@@ -133,8 +133,17 @@ export function hasDotSegment(path: string): boolean {
   });
 }
 
+/**
+ * A full Google API URL pasted as the path (`https://gmail.googleapis.com/
+ * gmail/v1/users/me/messages`) — what agents send under `url` / `uri`, which
+ * the argument aliasing maps onto `path` (mcpArgumentGuidance.ts). Only
+ * `*.googleapis.com` origins are stripped; any other host stays in the path
+ * and is refused by the classifier as before.
+ */
+const GOOGLEAPIS_ORIGIN = /^https?:\/\/(?:[a-z0-9-]+\.)*googleapis\.com(?::\d+)?\//i;
+
 export function canonicalizeGoogleApiPath(rawPath: string): string {
-  const path = rawPath.replace(/^\/+/, '');
+  const path = rawPath.replace(GOOGLEAPIS_ORIGIN, '').replace(/^\/+/, '');
   return DRIVE_BARE_PATH.test(path) ? `drive/${path}` : path;
 }
 
