@@ -452,8 +452,29 @@ less** with exactly three labelled parts, in this order:
 1. **What the work does** — the change or finding, in plain language, with the PR
    and preview links.
 2. **Why it matters** — the problem it solves and the evidence that showed it.
-3. **What the impact is** — measured before/after where there is data, the
-   behavioural consequences a reviewer should know, and what remains open.
+3. **What the impact is** — the USER and BUSINESS consequence of the change,
+   not a validation report. Answer, in this order:
+   - **For users**: who is affected (how many, of how many — e.g. "18 of the
+     ~110 people who called a tool that week, about one in six"), what they
+     experienced before, and what they experience now, in the words a user
+     would use ("the connector looked broken" → "it just worked").
+   - **For the business**: what that experience change does to the numbers Ken
+     runs on — activation and first-session drop-off, retention/churn, support
+     load, the connector-directory error rate, cost. Name the mechanism, not
+     just the metric ("first-session dead ends are where churn happens").
+   - **The honest caveat**: how big the win really is in absolute terms, what
+     is assumed rather than measured, and how the after-number will be
+     measured (the runbook section and the before-figure it compares to).
+
+   What does NOT belong here: test pass counts, "validated locally and on the
+   preview", PostHog rows matching an assertion, tiers, environments, runner
+   observations. Those are validation evidence — they go in the plan under
+   `docs/implementation_plans/` (or at most one clause of part 1). An impact
+   section that could be pasted into a PR checklist unchanged is the failure
+   mode this rule exists to prevent (2026-09-24: the argument-tolerance
+   hand-back listed "11 of 11 calls on local and preview" as impact; the real
+   impact was "one in six weekly users hit a dead end that now works on the
+   first try").
 
 Rules: lead with the outcome, no headers beyond the three labels, no code in
 prose, numbers only where they change what the reviewer does. Anything longer
