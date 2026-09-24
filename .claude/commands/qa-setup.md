@@ -51,13 +51,27 @@ every downstream QA run.
 6. **Screenshot the final dashboard state** as proof, into the gitignored directory:
    `.playwright/qa_proof_setup.png`
 
-7. **Coverage Checkpoint** — verify ALL prerequisites before proceeding:
-   - [ ] USER_A signed up and Google account connected
-   - [ ] USER_B signed up as a separate FGAC user
-   - [ ] USER_B delegated their email to USER_A
-   - [ ] Three proxy keys created: QA-Agent-A, QA-Agent-B, QA-Power-Agent
-   - [ ] Quick-add 2FA block rules applied (exactly once — the button should read "✓ 2FA Block Applied")
-   - [ ] Send whitelist rule created
-   - [ ] Key-specific read blacklist rule created (assigned to QA-Agent-B only)
+7. **Coverage Checkpoint** — verify ALL prerequisites in the UI before proceeding.
+   The dashboard is profile-based: a profile IS a proxy key, each lives at
+   `/dashboard/agents/<slug>`, Google/delegation state lives at `/dashboard/accounts`
+   (see the "How the dashboard is organised" section of setup 01).
+   - [ ] USER_A signed up and Google account connected (`/dashboard/accounts` →
+         "Connected Google Account" shows green `gmail.modify` + `drive.file` badges;
+         no "Action Required" banner on the profile pages)
+   - [ ] USER_B signed up as a separate FGAC user (own `Default Profile` only)
+   - [ ] USER_B delegated their email to USER_A (USER_A's Accounts page lists
+         USER_B_EMAIL with "Delegated to you"; USER_A's Default Profile "Gmail Account
+         Access" card shows it as "Delegated")
+   - [ ] Three profiles exist as tabs, each reaching exactly its mailboxes in the
+         "Gmail Account Access" card: `QA-Agent-A` (USER_A only), `QA-Agent-B`
+         (USER_B only), `QA-Power-Agent` (both)
+   - [ ] Quick-add 2FA block rules applied (exactly once — the "Create a rule" card's
+         button reads "✓ 2FA Block Applied"; four global Read Blacklist rows on every
+         profile's "Gmail Rules" card)
+   - [ ] Send whitelist rules created (global — "Send Whitelist" + "Global" badges)
+   - [ ] Profile-specific read blacklist rule `Block Competitor Emails` on `QA-Agent-B`
+         only (no "Global" badge, "Detach" present; absent from `QA-Power-Agent`)
+   - [ ] No `Send to Anyone` rule on any profile (the Default Profile's "Enable sending
+         to anyone" button was not clicked)
 
    If any item is unchecked, **STOP** — re-run the relevant setup doc before running agent tests.
