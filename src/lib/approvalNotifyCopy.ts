@@ -27,6 +27,11 @@ export type NotifyStatus =
   | 'not_due'
   | 'skipped_opened'
   | 'skipped_rate_capped'
+  /** Dead-grant notice only: the global hourly circuit breaker tripped. */
+  | 'skipped_global_capped'
+  /** Account-refusal notice only: the owner was already emailed about a
+   * refused account inside the current episode (ACCOUNT_REFUSAL_EPISODE_GAP_MS). */
+  | 'skipped_episode'
   | 'skipped_no_links'
   | 'failed'
   | 'disabled';
@@ -127,13 +132,16 @@ export function encodeHeaderWord(value: string): string {
 /**
  * The RFC 2822 message FGAC's proxy API sends (base64url-encoded by the
  * caller). From and Reply-To are the support mailbox; the proxy sends as
- * the key's own account, so Gmail keeps the From consistent.
+ * the key's own account, so Gmail keeps the From consistent. `cc` is used by
+ * the dead-grant notice on a delegated mailbox (the key owner rides along).
  */
-export function approvalEmailRaw(opts: { from: string; to: string; subject: string; body: string }): string {
+export function approvalEmailRaw(opts: { from: string; to: string; cc?: string | null; subject: string; body: string }): string {
   const from = sanitizeLine(opts.from, 254);
+  const cc = opts.cc ? sanitizeLine(opts.cc, 254) : '';
   return `From: FGAC <${from}>\r\n` +
     `Reply-To: ${from}\r\n` +
     `To: ${sanitizeLine(opts.to, 254)}\r\n` +
+    (cc ? `Cc: ${cc}\r\n` : '') +
     `Subject: ${encodeHeaderWord(sanitizeLine(opts.subject, 200))}\r\n` +
     `MIME-Version: 1.0\r\n` +
     `Content-Type: text/plain; charset=utf-8\r\n` +
@@ -171,6 +179,15 @@ export function notifyDenialLine(status: NotifyStatus, opts: { notifiedAt?: Date
  * at 7–11 a day, six one-offs at 1–2 in the month — any threshold from 3 to
  * 7 separates them; 3 emails earliest. */
 export const ACCOUNT_REFUSAL_NOTIFY_AFTER = 3;
+
+/** One refusal email per OWNER per episode, whatever the refused value. The
+ * once-per-(key, value) rule alone let an agent that guessed three wrong
+ * addresses earn three emails in 16.7 h (production, 2026-09-20/21 — only
+ * the daily cap stopped a fourth). The 🚫 refusal still names every value and
+ * the fixes on every call; the owner is told once, and again only if refusals
+ * recur after a fortnight with none in between (same gap as the dead-grant
+ * episode). Ken, 2026-09-21: one email per event, no repeat cadence. */
+export const ACCOUNT_REFUSAL_EPISODE_GAP_MS = 14 * 24 * 60 * 60_000;
 
 export interface AccountRefusalNotice {
   agentLabel: string;

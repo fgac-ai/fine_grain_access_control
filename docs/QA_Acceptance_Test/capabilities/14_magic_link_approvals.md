@@ -188,7 +188,8 @@
   branch can exhaust it (2026-09-16: three link reminders sent to USER_A at
   ~05:00 UTC blocked a later run outright). Check headroom first
   (read-only: `notified_at > now() - interval '24 hours'` on
-  `approval_requests` and `account_refusals`, grouped by owner) and, when
+  `approval_requests`, `account_refusals` and `google_grant_failures` — all
+  three ledgers share the cap — grouped by owner) and, when
   it is spent, run A16/A17 with the OTHER QA account as the connection
   owner and recipient — never clear the stamps
 - Signed in as USER_A, trigger a send denial to a recipient never denied
@@ -252,7 +253,12 @@
   you about this account again". The FOURTH says FGAC emailed the user about
   this account "at <date HH:MM UTC>" and no further email is sent; the
   mailbox still holds one message. The DIFFERENT value starts its own count
-  (no 📧 line on its first refusal)
+  (no 📧 line on its first refusal) — and even on its THIRD refusal within
+  24 h it sends NOTHING while the same owner was emailed about the first
+  value less than 14 days ago: the refusal carries no 📧 line and
+  `notify_status: 'skipped_episode'`, its ledger row keeps `notified_at`
+  NULL, and the mailbox still holds exactly one message (one refusal email
+  per owner per episode, PR #156)
 - **Ledger** (read-only query on the branch DB): one `account_refusals`
   row per (profile key, value), `requested_email` lower-cased,
   `refusal_count` 4 and `window_count` 4 for the first value, `last_tool`
@@ -263,8 +269,9 @@
   carries no 📧 line and `notify_status: 'skipped_rate_capped'`; the row
   keeps `notified_at` NULL
 - **Never**: a refusal never mints a link, never emails on the first or
-  second refusal, never emails twice for the same (key, value), and never
-  sends through a user's Google grant. Never assert on a production
+  second refusal, never emails twice for the same (key, value), never emails
+  the same owner about a second value within 14 days of the first email, and
+  never sends through a user's Google grant. Never assert on a production
   account's inbox
 
 ### A18: Open requests appear on the dashboard until approved or dismissed
