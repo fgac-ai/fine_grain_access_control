@@ -123,6 +123,21 @@ const marker = { id: ids[0], first: Math.floor(t0 / 1000), count: 3 };
     cookies: { __session_Ab12: SESSION }, responseHeaders: new Headers(), marker, nowMs: t0 });
   check('suffixed __session_<suffix> counts as the session cookie', suffixed.has_session_cookie === true && suffixed.client_hash === loop.client_hash);
 
+  // The 2026-09-24 specimen: two dev instances on one host — a stale bare
+  // __session next to __client_uat=0, with the other instance's suffixed
+  // __client_uat still live. Clerk answered session-token-but-no-client-uat
+  // forever; the event must say "there IS a live client cookie, and two sets".
+  const twoInstances = await describeClerkAuthRedirect({
+    kind: 'handshake', url: new URL('http://localhost:3000/dashboard'), requestHeaders: navHeaders,
+    cookies: { __session: SESSION, __client_uat: '0', __client_uat_envb8lhk: '1758400000', __clerk_db_jwt_envb8lhk: 'dvb_x' },
+    responseHeaders: new Headers(), marker, nowMs: t0 });
+  check('a live suffixed __client_uat counts even when the bare one is 0', twoInstances.has_client_cookie === true);
+  check('client_uat_cookies counts every instance seen on the host', twoInstances.client_uat_cookies === 2);
+  check('cookie-less browser has zero client_uat cookies', agentLike(await describeClerkAuthRedirect({
+    kind: 'handshake', url: new URL('https://fgac.ai/dashboard'), requestHeaders: navHeaders,
+    cookies: {}, responseHeaders: new Headers(), marker, nowMs: t0 })));
+  function agentLike(h: Awaited<ReturnType<typeof describeClerkAuthRedirect>>) { return h.client_uat_cookies === 0 && h.has_client_cookie === false; }
+
   const fetchHeaders = new Headers({ 'user-agent': 'python-requests/2.32', accept: '*/*' });
   const agent = await describeClerkAuthRedirect({
     kind: 'handshake', url: new URL('https://fgac.ai/dashboard'), requestHeaders: fetchHeaders,

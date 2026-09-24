@@ -2475,3 +2475,151 @@ on 2026-09-06 — the first day PR #127 classified it `refresh_failed`; before
 that it was `clerk_error`, which is retried and never notifies — and never
 again while the mailbox stayed dead. The own-mailbox owner who went dark on
 2026-09-17 would have been emailed at 22:21 UTC that evening.
+
+**7.31 — Clerk sign-in / handshake redirect loops (browsers that never
+land).** Added 2026-09-24 (`src/lib/clerkAuthRedirect.ts`, the outer wrapper in
+`src/middleware.ts`,
+`docs/implementation_plans/claude_zealous-dhawan-5e92b4_v1.md`). On 2026-09-21
+a localhost session testing the pricing page got stuck bouncing between
+`/dashboard` and Clerk's hosted sign-in: the dev server logged Clerk's
+"Refreshing the session token resulted in an infinite redirect loop" warning
+dozens of times and the browser never landed. The local causes were a pruned
+Neon branch (the dashboard threw on every load) plus stale Clerk cookies, but
+the point is what production would have shown for the same shape: nothing.
+`sign_in_completed` fires only on success, and Clerk's warning goes to
+Vercel's ~1 h runtime log. `clerk_auth_redirect` is one row per hop — every
+time middleware answers a request with a redirect to Clerk's sign-in page
+(`kind = sign_in`) or its handshake endpoint (`kind = handshake`) — with a
+per-browser `bounce_count` from a 5-minute marker cookie, so a loop reads as
+a rising count on one `browser_key` rather than as a query over timestamps.
+Both redirects surface in the outer middleware wrapper and nowhere else
+(clerkMiddleware returns the handshake before our handler runs; the sign-in is
+`auth.protect()`'s thrown control-flow error turned into a response), which is
+why the capture lives there and not beside the approval wall.
+
+**Read production only.** Localhost and previews run the dev Clerk instance,
+where every cookie-less browser's first visit takes a `handshake` hop
+(`reason = dev-browser-missing`) by design, and a dev sign-in callback loop
+(QA 2026-09-16 counted 28 wall hits in three minutes) trips 7.31a on every
+run. `environment = 'production'` is in every query below on purpose.
+
+```sql
+-- 7.31a — looping browsers (24 h): a browser that took 5+ Clerk redirects
+-- inside one 5-minute marker window. bounce_count is the sliding count the
+-- cookie carried on that hop, so max() per series is the loop length.
+SELECT toString(properties.browser_key) AS browser,
+       toString(properties.bounce_id) AS series,
+       max(toInt(properties.bounce_count)) AS hops,
+       min(timestamp) AS first_hop, max(timestamp) AS last_hop,
+       groupUniqArray(toString(properties.kind)) AS kinds,
+       groupUniqArray(toString(properties.reason)) AS reasons,
+       groupUniqArray(toString(properties.path)) AS paths,
+       argMax(toString(properties.client), timestamp) AS client,
+       max(toInt(properties.clerk_redirect_count)) AS clerk_hop_counter
+FROM events
+WHERE event = 'clerk_auth_redirect'
+  AND properties.environment = 'production'
+  AND timestamp >= now() - INTERVAL 24 HOUR
+GROUP BY browser, series
+HAVING hops >= 5
+ORDER BY hops DESC, last_hop DESC
+```
+
+```sql
+-- 7.31a' — the same signal without the cookie (a browser that drops
+-- cookies never grows bounce_count): 5+ hops from one browser_key inside
+-- one fixed 5-minute bucket. Coarser — a loop straddling a bucket edge can
+-- read as two 3s — but it cannot be hidden by cookie policy.
+SELECT toString(properties.browser_key) AS browser,
+       toStartOfFiveMinutes(timestamp) AS bucket,
+       count() AS hops,
+       groupUniqArray(toString(properties.kind)) AS kinds,
+       groupUniqArray(toString(properties.path)) AS paths
+FROM events
+WHERE event = 'clerk_auth_redirect'
+  AND properties.environment = 'production'
+  AND timestamp >= now() - INTERVAL 24 HOUR
+GROUP BY browser, bucket
+HAVING hops >= 5
+ORDER BY hops DESC
+```
+
+```sql
+-- 7.31b — per path (24 h): where the hops happen, and how many were loops.
+SELECT toString(properties.path) AS path,
+       toString(properties.kind) AS kind,
+       toString(properties.reason) AS reason,
+       count() AS hops,
+       uniq(toString(properties.browser_key)) AS browsers,
+       countIf(toInt(properties.bounce_count) >= 5) AS loop_hops,
+       uniqIf(toString(properties.browser_key), toInt(properties.bounce_count) >= 5) AS looping_browsers,
+       countIf(toString(properties.navigation) = 'true') AS navigations
+FROM events
+WHERE event = 'clerk_auth_redirect'
+  AND properties.environment = 'production'
+  AND timestamp >= now() - INTERVAL 24 HOUR
+GROUP BY path, kind, reason
+ORDER BY hops DESC
+```
+
+```sql
+-- 7.31c — baseline (14 d): hops per day by kind and reason. A handshake per
+-- returning browser with an expired token is normal; the day this doubles
+-- with no traffic change is a Clerk or cookie regression.
+SELECT toDate(timestamp) AS day,
+       toString(properties.kind) AS kind,
+       toString(properties.reason) AS reason,
+       count() AS hops,
+       uniq(toString(properties.browser_key)) AS browsers,
+       uniqIf(toString(properties.bounce_id), toInt(properties.bounce_count) >= 5) AS loop_series
+FROM events
+WHERE event = 'clerk_auth_redirect'
+  AND properties.environment = 'production'
+  AND timestamp >= now() - INTERVAL 14 DAY
+GROUP BY day, kind, reason
+ORDER BY day DESC, hops DESC
+```
+
+Healthy: 7.31a and 7.31a' return nothing; 7.31b shows `sign_in` hops on
+`/dashboard` and `/dashboard/approve` with `bounce_count` 1–2 (a person
+signing in takes one hop; the approval wall's Claude-desktop visitors take
+one per link click) and `handshake` hops with `reason = session-token-expired`
+at roughly the returning-browser rate; `clerk_hop_counter` never reaches 3
+(that is the value at which Clerk itself gives up, signs the browser out and
+prints the warning). A row in 7.31a means one browser was sent to Clerk five
+or more times inside five minutes: read `kinds` and `reasons` first —
+`handshake` + `session-token-expired` repeating is Clerk failing to refresh a
+token it keeps re-issuing (instance keys, clock skew, a cookie the browser
+will not keep); `sign_in` repeating is the app rejecting a session Clerk
+considers valid (the 2026-09-21 shape: the protected page threw on every
+load, so the browser was bounced back to sign-in it had already completed).
+`paths` says which page; cross-check Vercel's runtime log for the same minute
+while it still exists.
+
+**Do not wait for Clerk's own counter.** `clerk_redirect_count` is Clerk's
+`__clerk_redirect_count` cookie, which Clerk sets with `Max-Age=2` on each
+handshake redirect and reads back to decide (at 3) that it is looping — that
+decision is what prints the "infinite redirect loop" line. Two seconds is
+shorter than most real hops (a Google round trip, a browser retry, a slow
+page), so a loop can run indefinitely with the counter never leaving 0, and
+the log line — the only pre-existing signal — never appears. Measured on the
+day this shipped (2026-09-24, dev instance): the Claude desktop in-app browser
+held a stale `__session` for localhost and no `__client_uat`, and looped
+`handshake` / `session-token-but-no-client-uat` 27 times in 214 s on `/` and
+`/dashboard`, `bounce_count` climbing 1 → 27 on one `bounce_id` while
+`clerk_redirect_count` read 0 on every hop. 7.31a flags that at hop 5;
+Clerk's detector never fired. The marker cookie is the detector. `approval_sign_in_wall` (7.25) still owns the approval
+funnel's join keys; when a looping browser's `paths` include
+`/dashboard/approve`, join on the minute to see which link it was carrying.
+
+**Alert (hourly, email to Ken).** A trends insight on `clerk_auth_redirect`
+filtered to `environment = production` and `bounce_count >= 5`
+(numeric property filter: *bounce_count greater than or equal to 5*),
+displayed as total count per hour, with an alert *when value is above 0* on
+the last completed hour. Under the reading above that fires the first time
+any production browser completes a five-hop loop; `sign_in` and `handshake`
+both count, so a Clerk-side handshake storm and an app-side reject loop page
+the same way. Creating the insight and the alert is a **user action** — the
+automation key is `query:read` only (`insight:write` denied, same as 2–3), and
+the MCP connector's write path is what to try first. Until it exists, 7.31a
+is the manual check and belongs in the daily review's health pass.

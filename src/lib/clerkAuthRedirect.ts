@@ -141,9 +141,14 @@ export interface ClerkAuthRedirectHit {
    *  the loop query groups on. */
   browser_key: string;
   has_session_cookie: boolean;
-  /** `__client_uat` present with a non-zero value (Clerk believes this
-   *  browser has a client). `0` is what a signed-out browser carries. */
+  /** Some `__client_uat*` cookie carries a non-zero value (Clerk believes
+   *  this browser has a client). `0` is what a signed-out browser carries. */
   has_client_cookie: boolean;
+  /** How many `__client_uat*` cookies the request carried — one per Clerk
+   *  instance this host has seen. More than one on localhost / a preview host
+   *  is the classic dev loop: a stale `__session` from instance A next to
+   *  `__client_uat=0` from instance B (`session-token-but-no-client-uat`). */
+  client_uat_cookies: number;
   /** Clerk's own per-handshake hop counter (`__clerk_redirect_count`) as the
    *  request carried it; Clerk gives up and signs the browser out at 3. */
   clerk_redirect_count: number;
@@ -170,22 +175,26 @@ export interface ClerkAuthRedirectInput {
   nowMs?: number;
 }
 
-function findCookie(cookies: Record<string, string>, base: string): string | undefined {
-  // Clerk suffixes cookie names per publishable key on multi-instance hosts
-  // (`__session_<suffix>`); the bare name comes first when both exist.
-  if (cookies[base] !== undefined) return cookies[base];
-  const suffixed = Object.keys(cookies).find(n => n.startsWith(`${base}_`));
-  return suffixed ? cookies[suffixed] : undefined;
+/** Every value of a Clerk cookie family — the bare name plus the per-instance
+ *  suffixed forms (`__session`, `__session_<suffix>`) Clerk writes on hosts
+ *  that have seen more than one instance. Bare first. */
+function cookieFamily(cookies: Record<string, string>, base: string): string[] {
+  const out: string[] = [];
+  if (cookies[base] !== undefined) out.push(cookies[base]);
+  for (const name of Object.keys(cookies)) {
+    if (name.startsWith(`${base}_`)) out.push(cookies[name]);
+  }
+  return out;
 }
 
 export async function describeClerkAuthRedirect(input: ClerkAuthRedirectInput): Promise<ClerkAuthRedirectHit> {
   const { kind, url, requestHeaders, cookies, responseHeaders, marker } = input;
   const now = Math.floor((input.nowMs ?? Date.now()) / 1000);
-  const session = findCookie(cookies, '__session');
-  const clientUat = findCookie(cookies, '__client_uat');
-  const devBrowser = cookies['__clerk_db_jwt'];
-  const hasClient = clientUat !== undefined && clientUat !== '0';
-  const identity = session || (hasClient ? clientUat : undefined) || devBrowser || undefined;
+  const sessions = cookieFamily(cookies, '__session').filter(Boolean);
+  const clientUats = cookieFamily(cookies, '__client_uat');
+  const liveClientUat = clientUats.find(v => v && v !== '0');
+  const devBrowser = cookieFamily(cookies, '__clerk_db_jwt').find(Boolean);
+  const identity = sessions[0] || liveClientUat || devBrowser || undefined;
   const client_hash = identity ? await analyticsHash('fgac-clerk-client', identity) : undefined;
   const ua = requestHeaders.get('user-agent') ?? '';
   const reason = responseHeaders.get('x-clerk-auth-reason') ?? undefined;
@@ -198,8 +207,9 @@ export async function describeClerkAuthRedirect(input: ClerkAuthRedirectInput): 
     ...(auth_status ? { auth_status: auth_status.slice(0, 40) } : {}),
     ...(client_hash ? { client_hash } : {}),
     browser_key: client_hash ?? marker.id,
-    has_session_cookie: session !== undefined,
-    has_client_cookie: hasClient,
+    has_session_cookie: sessions.length > 0,
+    has_client_cookie: liveClientUat !== undefined,
+    client_uat_cookies: clientUats.length,
     clerk_redirect_count: Number.isFinite(redirectCount) ? redirectCount : 0,
     ...classifyApproveClient(ua),
     user_agent: ua.slice(0, 160),
