@@ -504,7 +504,9 @@ attributable to it.
   `send_whitelist` request id; the fourth carries `'already_sent'` and no
   second notified row exists. The open from the emailed link carries
   `link_source: 'email'`; an open from the chat's URL carries `'agent'`. A
-  capped repeat carries `'skipped_rate_capped'` and no notified row; with
+  capped repeat carries `'skipped_rate_capped'` and no notified row; a due
+  repeat for a SECOND request within 5 minutes of the owner's last reminder
+  carries `'skipped_burst'` and no notified row (one email per turn); with
   no sender key every mint carries `'disabled'`. Each sent reminder is also
   one `proxy_request {service: 'gmail', outcome: 'success'}` row under the
   sender's proxy key

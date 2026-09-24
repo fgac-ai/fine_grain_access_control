@@ -2083,7 +2083,10 @@ GROUP BY d, who ORDER BY reminders DESC, d DESC LIMIT 20
 -- that environment; `failed` = FGAC's proxy API or Google refused the send
 -- (a 403 means the support profile lost its send rule; a 401 means the key
 -- was revoked) or it was unconfirmed (server logs: "[approvalNotify]");
--- `skipped_rate_capped` = the daily cap engaged. The sends themselves are
+-- `skipped_rate_capped` = the daily cap engaged; `skipped_burst` (since
+-- 2026-09-24) = a due link NOT emailed because another of the owner's links
+-- was emailed inside the 5-minute same-turn window — expected on multi-file
+-- turns, and the link is still eligible on a later turn. The sends themselves are
 -- `proxy_request` rows under the support key — exclude that key's
 -- proxy_key_id (or the support address's account_email) from customer
 -- usage counts.
@@ -2445,6 +2448,12 @@ GROUP BY day, reason, delegated, notify ORDER BY day DESC, refusals DESC
 -- 7.30d — the spam watch (7 d), all three owner-notice triggers together:
 -- emails per recipient per day. The claim caps a recipient at 3 in 24 h, so
 -- a 3 here is the cap doing its job — and a person we are over-mailing.
+-- Two emails inside one second is a same-instant pair: until 2026-09-24 two
+-- rows of one owner claimed together could both pass the cross-row rules
+-- (one owner on 09-17, one on 09-21 — audit of every stamp: no window ever
+-- exceeded 3); the claims now serialize per owner, so a pair here after
+-- that date is a regression. Query: `min(dateDiff('millisecond', …))`
+-- per recipient-day, or eyeball the timestamps of any total ≥ 2.
 -- Anyone above 1 in a day is worth a look; 3+ distinct days in a week is a
 -- FLAG even at 1 a day. Baseline at introduction (7 d to 2026-09-21):
 -- link reminders 1-3/day, refusal notices ≤ 1/day, dead-grant ≤ 1/day.

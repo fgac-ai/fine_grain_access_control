@@ -40,6 +40,7 @@ import { after } from 'next/server';
 import { notifyOwnerOfAccountRefusal, notifyOwnerOfApprovalLinks, notifyOwnerOfDeadGrant, type NotifyLink } from '@/lib/approvalNotify';
 import { deadGrantDenialLine, type DeadGrantReason } from '@/lib/googleGrantNotifyCopy';
 import { accountRefusalDenialLine, notifyDenialLine } from '@/lib/approvalNotifyCopy';
+import { agentLabel as buildAgentLabel } from '@/lib/agentLabel';
 import { normalizeRequestedEmail } from '@/lib/accountRefusals';
 import { inSuccessSample, AUTH_SUCCESS_SAMPLE } from '@/lib/authSampling';
 import { ensureDefaultProfile } from '@/db/defaultProfile';
@@ -119,6 +120,11 @@ interface ConnectionApproved {
   proxyKeyId: string | null;
   nickname: string | null;
   clientName: string | null;
+  /** The OAuth client_id — what `clientName` falls back to before the client's
+   * first `initialize`, so owner-facing copy can tell a name from an id. */
+  clientId: string;
+  /** The bound profile's label, for owner-facing copy ("… on the Default Profile"). */
+  profileLabel: string | null;
   user: { id: string; email: string; clerkUserId: string };
 }
 
@@ -287,6 +293,7 @@ async function resolveConnection(
   // A connection is only as alive as the key behind it. The proxy path checks
   // revokedAt/expiresAt on every request; without this, a revoked key kept
   // working through hosted MCP for connections bound before the revocation.
+  let profileLabel: string | null = null;
   if (connection.proxyKeyId) {
     const boundKey = await db.query.proxyKeys.findFirst({
       where: eq(proxyKeys.id, connection.proxyKeyId),
@@ -294,6 +301,7 @@ async function resolveConnection(
     if (!boundKey || boundKey.revokedAt) {
       return { authorized: false, reason: 'blocked', connectionId: connection.id };
     }
+    profileLabel = boundKey.label;
     if (boundKey.expiresAt && boundKey.expiresAt < new Date()) {
       return { authorized: false, reason: 'blocked', connectionId: connection.id };
     }
@@ -306,6 +314,8 @@ async function resolveConnection(
     proxyKeyId: connection.proxyKeyId,
     nickname: connection.nickname,
     clientName: connection.clientName,
+    clientId: connection.clientId,
+    profileLabel,
     user: { id: user.id, email: user.email, clerkUserId: user.clerkUserId },
   };
 }
@@ -727,16 +737,17 @@ async function policyDenialWithLink(
 // AGENT_APPROVAL_PROTOCOL lives in src/lib/denialCopy.ts (tested by scripts/test-denial-copy.ts).
 
 /**
- * What the reminder email calls the agent: the connection's nickname, else
- * the MCP client's registered name. A connection created without a name
- * carries its client_id as `clientName` (resolveConnection's fallback), and
- * "72T5NfMm… asking 3 times" is not a sentence for a person — an id-shaped
- * name falls back to the generic label (observed in QA, 2026-09-14).
+ * What an owner notice calls the agent: the connection's nickname, else
+ * "your <client> agent", else "your AI agent" — plus the profile it runs on.
+ * A connection created before its client's first `initialize` carries its
+ * client_id as `clientName` (resolveConnection's fallback), and "FGAC has
+ * refused JkGUAFOdt9Ib0Q7J 3 times" is what one owner read on 2026-09-23;
+ * the id is compared, not guessed at. Pure logic in src/lib/agentLabel.ts.
  */
 function agentLabel(conn: ConnectionApproved): string {
-  const name = conn.nickname || conn.clientName || '';
-  const idShaped = /^[A-Za-z0-9_-]{12,}$/.test(name) && !/[aeiou]{2}|\s/i.test(name);
-  return name && !idShaped ? name : 'Your AI agent';
+  return buildAgentLabel({
+    nickname: conn.nickname, clientName: conn.clientName, clientId: conn.clientId, profileLabel: conn.profileLabel,
+  });
 }
 
 /** Payload shape `describeApproval` reads, without going through the URL. */
