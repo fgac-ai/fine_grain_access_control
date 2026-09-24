@@ -62,6 +62,24 @@
   requirements. A link minted for one user is never approvable by another,
   and altering any parameter invalidates the signature
 
+### A10: A wrongly shaped request_access call is refused with the named keys, not a JSON dump (2026-09-23)
+- Call `request_access` with `{"resource_type": "spreadsheet",
+  "resource_id": "<exposed fixture sheet id>", "resource_name": "QA Budget
+  Sheet"}` (the week-to-2026-09-22 production shape), then with
+  `{"fileId": "<same id>"}`.
+- **Expected**: both return an `isError` result whose text is ONE paragraph
+  starting `MCP error -32602: Invalid arguments for tool request_access`
+  (no JSON issue array, no `Input validation error:`), that (a) names
+  `type` with its seven allowed values (`"send" | "sheets_read" | …`), (b)
+  says the id must be passed as `spreadsheetId`, `documentId`, or
+  `presentationId` together with the matching `type`, (c) lists every
+  argument of the tool with required/optional, and (d) never echoes the
+  values sent (`spreadsheet`, the id, and `QA Budget Sheet` appear nowhere
+  in the text). No approval link is minted (no `approval_link_minted`
+  event, no new `approval_requests` row). Retrying with
+  `{"type": "sheets_read", "spreadsheetId": "<id>", "resourceName": "QA
+  Budget Sheet"}` then mints the link as A8 describes.
+
 ### A8: request_access can name the file, and the approval page shows it
 - On a spreadsheet with no rule and no Google grant, call `request_access`
   with `type: "sheets_read"`, the spreadsheet id, and `resourceName: "QA Budget

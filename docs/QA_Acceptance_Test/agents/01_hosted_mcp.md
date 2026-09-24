@@ -380,6 +380,54 @@ curl -s $BASE_URL/api/mcp -X POST \
 
 ---
 
+## Capability: Argument tolerance (→ capabilities/09 A13, 15 A10, 16 A29)
+
+> Since 2026-09-23 the route renames known argument aliases before the SDK
+> validates a call, and answers what still fails with a guided paragraph
+> instead of the SDK's JSON issue dump. Pure `tools/call` via curl; `$SID` is
+> the exposed fixture sheet id, `$TAB` its first tab name.
+
+### 09 A13: aliased calls reach FGAC
+```bash
+for ARGS in \
+  '{"spreadsheet_id":"'$SID'","range":"'$TAB'!A1:B2"}' \
+  '{"spreadsheetId":"'$SID'","spreadsheet_id":"junk","range":"'$TAB'!A1:B2"}'; do
+  curl -s $BASE_URL/api/mcp -X POST -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
+    -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"sheets_read_range","arguments":'"$ARGS"'},"id":1}' | grep -o '"text":"[^"]\{0,160\}'
+done
+curl -s $BASE_URL/api/mcp -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"sheets_get_spreadsheet","arguments":{"spreadsheet_id":"'$SID'"}},"id":2}' | grep -o '"text":"[^"]\{0,160\}'
+curl -s $BASE_URL/api/mcp -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"gmail_list","arguments":{"q":"is:unread","max":1}},"id":3}' | grep -o '"text":"[^"]\{0,160\}'
+```
+- [ ] No response text starts `MCP error -32602` — cell values / tab list /
+      message ids come back exactly as with the canonical names; the
+      canonical+alias call read the EXPOSED sheet (the alias did not overwrite it)
+- [ ] `$mcp_tool_call` rows carry `arg_aliases` / `arg_alias_targets` /
+      `arg_alias_count` (query per capability 16 A29)
+
+### 15 A10 + 16 A29: guided refusals
+```bash
+for CALL in \
+  '{"name":"request_access","arguments":{"resource_type":"spreadsheet","resource_id":"'$SID'","resource_name":"QA Budget Sheet"}}' \
+  '{"name":"request_access","arguments":{"fileId":"'$SID'"}}' \
+  '{"name":"gmail_read","arguments":{"query":"is:unread"}}'; do
+  curl -s $BASE_URL/api/mcp -X POST -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
+    -d '{"jsonrpc":"2.0","method":"tools/call","params":'"$CALL"',"id":4}' | grep -o '"text":"[^"]*'
+done
+```
+- [ ] Each text is ONE paragraph starting `MCP error -32602: Invalid arguments
+      for tool <name>` with no `Input validation error:` and no `"code":` JSON
+- [ ] request_access texts name `type` with its seven values and the
+      per-kind id keys; the gmail_read text names `messageId` and points at
+      `gmail_list`; none echoes `spreadsheet`, the id, or `QA Budget Sheet`
+- [ ] `mcp_input_validation_failed` rows carry `guided: true` and the
+      `first_issue_*` / `sent_keys` props (capability 16 A29 query)
+
 ## Capability: Analytics Events (→ capabilities/16_analytics_events.md)
 
 > Run LAST — it inspects the PostHog events the capabilities above generated.

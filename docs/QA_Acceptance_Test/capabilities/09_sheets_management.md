@@ -204,6 +204,27 @@ environment's DB branch. Verified end to end on a Vercel preview 2026-08-30.
   The pre-change text was Google's message alone, with no remedy and no stop
   (monitoring 7.28 has the production baseline).
 
+### A13: snake_case and synonym argument names are accepted (2026-09-23)
+- Through the environment's MCP client, call `sheets_read_range` with
+  `{"spreadsheet_id": "<exposed fixture sheet id>", "range": "<tab>!A1:B2"}`
+  (the key `spreadsheet_id` in place of `spreadsheetId`), then
+  `sheets_get_spreadsheet` with `{"spreadsheet_id": "<same id>"}`, then
+  `gmail_list` with `{"q": "is:unread", "max": 1}`.
+- **Expected**: every call reaches FGAC and behaves exactly as the
+  canonical spelling does — the read returns cell values, the metadata call
+  returns the tab list, the list call returns messages (or the same FGAC
+  denial the canonical call would produce; never an `isError` result whose
+  text starts `MCP error -32602`). Each call's `$mcp_tool_call` event
+  carries `arg_aliases` (`['spreadsheet_id']`, `['spreadsheet_id']`,
+  `['q']`), `arg_alias_targets` (`['spreadsheetId']`, …) and
+  `arg_alias_count: 1`; a call made with the canonical names carries none
+  of the three. A canonical key the agent DID send is never overwritten:
+  `{"spreadsheetId": "<exposed id>", "spreadsheet_id": "junk", "range":
+  "<tab>!A1:B2"}` reads the exposed sheet.
+- **Regression guard**: a `-32602` result for `spreadsheet_id` is the
+  pre-2026-09-23 behaviour returning — the transport-layer alias pass
+  (`prepareToolCall` in `route.ts`) has stopped running before the SDK.
+
 ### A7: Drive listing is Google-native; per-file Drive access respects sheet rules
 - `GET {proxy}/drive/v3/files` with the profile's bearer token, then
   `GET {proxy}/drive/v3/files/<id>` for (a) an exposed sheet, (b) a sheet with a
