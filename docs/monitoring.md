@@ -1085,8 +1085,9 @@ Established 2026-09-08 (listing live since 2026-08-16):
   `$mcp_tool_call` or a connection row (verified 2026-09-10: no scanner
   `client_name` on any authenticated event; the only names there are
   `claude-code`, `Anthropic/ClaudeAI`, `Anthropic/Toolbox`, `sheet-add-in`,
-  `claude-ai`). Anthropic's denominator counts *Claude accounts* that sent a
-  message, which a tokenless crawler is not.
+  `claude-ai` — and `Anthropic/Toolbox` is not a product but the directory's
+  connect-time inspector, see 7.31). Anthropic's denominator counts *Claude
+  accounts* that sent a message, which a tokenless crawler is not.
 
 ```sql
 -- Never-called accounts that have gone quiet, by week of first connection.
@@ -2475,3 +2476,108 @@ on 2026-09-06 — the first day PR #127 classified it `refresh_failed`; before
 that it was `clerk_error`, which is retried and never notifies — and never
 again while the mailbox stayed dead. The own-mailbox owner who went dark on
 2026-09-17 would have been emailed at 22:21 UTC that evening.
+
+**7.31 — `client_name` on `$mcp_tool_call`: the inspector mislabel (2026-08-29
+→ PR #162) and how to read the per-product split across it.** Added
+2026-09-24 (`src/lib/mcpClientName.ts`,
+`docs/implementation_plans/mcp-client-name-inspector_v1.md`). Every
+`$mcp_tool_call` carries `client_name` copied from the agent connection row,
+and until PR #162 that row kept the FIRST `initialize` name it ever saw.
+Claude's connector directory inspects a server once, at connect time, with a
+handshake named `Anthropic/Toolbox`; the user's real client
+(`Anthropic/ClaudeAI`) handshakes under the same OAuth client_id less than a
+minute later — and never got to rename the row. Measured over
+2026-08-28 → 2026-09-24:
+
+- 137 inspector handshakes from 124 accounts, 114 of them exactly once, and
+  the inspector→ClaudeAI gap under one minute for 114 (the rest under ten). Daily
+  inspector handshakes match the day's `mcp_connection_created` — it is a
+  connect-time event, not a product.
+- Every one of the 135 registrations that reported the inspector also
+  reported `Anthropic/ClaudeAI`; none reported only the inspector. All on the
+  `Claude-User` user agent.
+- 65 of the week's 98 claude.ai callers (week of 2026-09-14) carried the
+  inspector label on every call: 12,431 of 20,235 Claude-User tool calls, 61%.
+  It grew weekly as more directory connections aged in: 110 (week of 08-24),
+  2,126, 6,502, 12,431, 18,027 (week of 09-21, partial).
+- A registration is not a product either: 177 registrations reported both
+  `Anthropic/ClaudeAI` and `claude-code` handshakes (claude.ai-managed
+  connectors are shared with Claude Code). "First real name wins" pinned all of
+  a user's calls to whichever product handshook first.
+
+The rule since PR #162: an unnamed row takes any name, an inspector
+name yields to the first product name, and after that the most recent product
+handshake wins; a tool call whose user agent is the CLI's own
+(`claude-code/<version>`) is stamped `claude-code` regardless of the row.
+Stateless streamable HTTP gives a tool call no session (no Mcp-Session-Id is
+issued, the POST carries no clientInfo), so the row's latest handshake is the
+closest available proxy for "the product in use"; concurrent use of two
+products on one registration is the residual error. No backfill: every one of
+the 65 mislabelled callers handshook as ClaudeAI within the same week (about
+18 handshakes each), so rows heal on the first handshake after the deploy.
+`mcp_connection_client_identified` fires on every change, with `transition`
+(`first` | `inspector_to_product` | `product_switch`) and
+`previous_client_name`; the FIRST event per connection is the how-they-arrived
+signal (`Anthropic/Toolbox` = via the directory), the LATEST is the product.
+
+**Reading rule for rows before the deploy:** fold the inspector into
+claude.ai. It is exact for "claude.ai vs everything else" (no inspector-only
+registration exists) and over-counts claude.ai where a user also drove the
+same registration from Claude Code (79 of the 135 inspector registrations);
+the CLI's own calls are separable by user agent, remote Claude Code on the
+`Claude-User` agent is not.
+
+```sql
+-- 7.31 product expression, valid on both sides of the deploy.
+multiIf(properties.user_agent LIKE 'claude-code/%', 'claude-code',
+        properties.client_name = 'Anthropic/Toolbox', 'Anthropic/ClaudeAI',
+        properties.client_name) AS product
+```
+
+```sql
+-- 7.31a — daily label mix on tool calls. After the deploy the toolbox column
+-- should fall to ~0 within a week (the last rows are connections whose owner
+-- has not handshaken since); a persistent non-zero means a row is being
+-- renamed back, which the rule forbids.
+SELECT toDate(timestamp) AS day,
+       countIf(properties.client_name = 'Anthropic/Toolbox')  AS toolbox,
+       countIf(properties.client_name = 'Anthropic/ClaudeAI') AS claudeai,
+       countIf(properties.client_name = 'claude-code')        AS claude_code,
+       countIf(properties.client_name = properties.client_id) AS opaque_id,
+       count() AS total
+FROM events
+WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
+  AND timestamp > now() - INTERVAL 21 DAY
+GROUP BY day ORDER BY day
+```
+
+```sql
+-- 7.31b — name transitions since the deploy. Expect inspector_to_product once
+-- per directory connection (matching 7.31a's toolbox decline), product_switch
+-- on the shared claude.ai + Claude Code registrations, and 'first' with
+-- client_name = 'Anthropic/Toolbox' for each new directory connection.
+SELECT toDate(timestamp) AS day, properties.transition AS transition,
+       properties.previous_client_name AS from_name, properties.client_name AS to_name,
+       count() AS n, uniq(properties.connection_id) AS connections
+FROM events
+WHERE event = 'mcp_connection_client_identified' AND properties.environment = 'production'
+  AND timestamp > now() - INTERVAL 14 DAY
+GROUP BY day, transition, from_name, to_name ORDER BY day, n DESC
+```
+
+```sql
+-- 7.31c — the per-product split the directory-parity review wants, using the
+-- fold so the pre-deploy weeks are comparable.
+SELECT toStartOfWeek(timestamp, 1) AS week,
+       multiIf(properties.user_agent LIKE 'claude-code/%', 'claude-code',
+               properties.client_name = 'Anthropic/Toolbox', 'Anthropic/ClaudeAI',
+               properties.client_name) AS product,
+       count() AS calls, uniq(person_id) AS callers
+FROM events
+WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
+  AND timestamp > now() - INTERVAL 8 WEEK
+GROUP BY week, product ORDER BY week, calls DESC
+```
+
+Healthy: 7.31a's `toolbox` column at zero a week after the deploy; 7.31b shows
+no transition whose `to_name` is `Anthropic/Toolbox` other than `first`.
