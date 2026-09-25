@@ -2583,6 +2583,11 @@ and suppress nothing. The cron's own response
 `[Cron:sweep-bounces]`; `status: 'disabled'` means the sender variables are
 unset in that environment, `failed` with a 401 means the support key was
 revoked, a 403 that the support profile grew a read rule that blocks DSNs.
+No log line at all, hour after hour, means the cron itself is being refused:
+every `/api/cron/*` route answers 401 to Vercel's scheduler unless
+`CRON_SECRET` is set in the Production environment (Vercel sends it as the
+bearer; `docs/partner_onboarding_runbook.md` step 2) — as of 2026-09-25 it
+was NOT set, so this is the first thing to check when 7.30e stays empty.
 
 Healthy: 7.30a shows at most one row per owner + mailbox with `days_dead = 0`
 and no hour holding 5 or more rows; 7.30c shows `sent` once per new dead
