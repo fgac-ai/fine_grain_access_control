@@ -91,6 +91,7 @@ import {
 import {
   claimApprovalNotification, getApprovalNotificationState, releaseApprovalNotification,
 } from './approvalRequests';
+import { isPlaceholderEmail } from './placeholderEmail';
 import { captureServerEvent } from './posthogServer';
 import { withTimeout } from './upstreamTimeouts';
 
@@ -267,6 +268,15 @@ export interface NotifyAccountRefusalResult {
  * analytics never carried. Never throws.
  */
 export async function notifyOwnerOfAccountRefusal(opts: NotifyAccountRefusalOpts): Promise<NotifyAccountRefusalResult> {
+  // A value that cannot be anyone's mailbox (example.com, a template, not
+  // an address) is never ledgered and never emailed: the ledger exists to
+  // tell an owner which real account to add, and an email saying "your task
+  // passes ufficio@example.com" told one owner nothing twice (2026-09-21).
+  // The refusal text names the placeholder as such instead. Checked here as
+  // well as in the route so the guarantee travels with the function.
+  if (isPlaceholderEmail(opts.requestedAccount)) {
+    return { status: 'skipped_placeholder', notifiedAt: null, refusalCount: null };
+  }
   const row = await recordAccountRefusal({
     proxyKeyId: opts.proxyKeyId, userId: opts.owner.id, requestedEmail: opts.requestedAccount, tool: opts.tool,
   });

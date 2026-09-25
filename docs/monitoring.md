@@ -1773,6 +1773,34 @@ pre-2026-09-09 Picker page. `analytics.md` (the approval funnel section) has
 the reading; the change is judged working if same-target mints stop
 climbing while distinct-target batches are unaffected.
 
+Since 2026-09-24 `account_not_permitted` bursts split by
+`account_requested_placeholder`: a burst whose refused value is on a reserved
+or template domain (`reserved_domain` / `synthetic` / `malformed`,
+`src/lib/placeholderEmail.ts`) is an agent inventing addresses, not a task
+naming a real mailbox the key lacks — one Claude.ai agent re-sent
+`ufficio@example.com` + `direzione@example.com` in parallel on every turn,
+140 refusals in three days (2026-09-21 → 23), verbatim after every denial.
+Those rows still count as retry pressure here (the calls were made), but
+they never reach the refusal ledger or the owner email, and the 🚫 text
+tells the agent the value is fictional. Watch: the same person + placeholder
+value still bursting after the copy change means the agent is not reading
+the text at all (a task or system prompt carries the value) and the next
+lever is the owner, via the dashboard, not more copy.
+
+```sql
+-- placeholder guesses (7 d): who, which invented value, how often, last seen
+SELECT person.properties.email AS who,
+       toString(properties.account_requested) AS requested,
+       toString(properties.account_requested_placeholder) AS kind,
+       count() AS refusals, uniq(toDate(timestamp)) AS days, max(timestamp) AS last
+FROM events
+WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
+  AND properties.denial_code = 'account_not_permitted'
+  AND properties.account_requested_placeholder != ''
+  AND timestamp >= now() - INTERVAL 7 DAY
+GROUP BY who, requested, kind ORDER BY refusals DESC LIMIT 20
+```
+
 **7.23 — Cross-mailbox 404s (an id looked up in the wrong mailbox).** Added
 2026-09-15 with the 404 copy change (`googleNotFoundMessage` /
 `crossMailboxHint` in `src/lib/denialCopy.ts`). Gmail message, thread, and
@@ -2245,12 +2273,17 @@ GROUP BY status ORDER BY mints DESC
 -- values — before that an agent guessing three addresses earned three emails
 -- in 16.7 h, 2026-09-20/21); `not_due` on every row of a person with ≥ 3
 -- refusals in a day means the window reset between them (cadence > 24 h) or
--- the sender is off (`disabled`). The per-recipient spam watch is 7.30d. Pair with:
+-- the sender is off (`disabled`). Since 2026-09-24 a placeholder value
+-- (`account_requested_placeholder` set: example.com, a template, not an
+-- address) is never ledgered and stamps `skipped_placeholder` — two of the
+-- four notices ever sent (2026-09-21) named invented example.com addresses;
+-- 7.22 has the per-value watch. The per-recipient spam watch is 7.30d. Pair with:
 --   SELECT * FROM account_refusals ORDER BY last_refused_at DESC LIMIT 20
 -- (branch DB or a read-only production query) for the ledger itself.
 SELECT person.properties.email AS who,
        toString(properties.$mcp_tool_name) AS tool,
        toString(properties.account_requested) AS requested,
+       toString(properties.account_requested_placeholder) AS placeholder,
        count() AS refusals, uniq(toDate(timestamp)) AS days,
        max(toFloat64OrNull(toString(properties.account_refusal_count))) AS max_in_window,
        groupUniqArray(toString(properties.notify_status)) AS notify,
@@ -2260,7 +2293,7 @@ WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
   AND properties.denial_code = 'account_not_permitted'
   AND timestamp > now() - INTERVAL 7 DAY
   AND person.properties.email NOT IN (/* internal + QA accounts */)
-GROUP BY who, tool, requested ORDER BY refusals DESC LIMIT 20
+GROUP BY who, tool, requested, placeholder ORDER BY refusals DESC LIMIT 20
 ```
 
 ```sql

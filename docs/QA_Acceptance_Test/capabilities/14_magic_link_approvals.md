@@ -275,6 +275,18 @@
   `notify_status: 'skipped_episode'`, its ledger row keeps `notified_at`
   NULL, and the mailbox still holds exactly one message (one refusal email
   per owner per episode, PR #156)
+- **Placeholder value** (since 2026-09-24): call THREE more times with
+  `account: 'ufficio@example.com'` (an RFC 2606 example address — never a
+  real one). **Expected**: every call is the 🚫 placeholder form of the
+  refusal — "it is a placeholder — an example or template value, not a
+  mailbox anyone has", "Do not guess or invent addresses", "The only accounts
+  this connection can use: …", "ask the user which account they mean" — and
+  none carries a 📧 line, even on the third refusal and even with no earlier
+  email in the episode; each refusal stamps `notify_status:
+  'skipped_placeholder'` and `account_requested_placeholder:
+  'reserved_domain'`, no `account_refusal_count` (nothing was ledgered), the
+  mailbox holds no new message, and `account_refusals` has NO row for the
+  value
 - **Ledger** (read-only query on the branch DB): one `account_refusals`
   row per (profile key, value), `requested_email` lower-cased,
   `refusal_count` 4 and `window_count` 4 for the first value, `last_tool`
@@ -286,9 +298,9 @@
   keeps `notified_at` NULL
 - **Never**: a refusal never mints a link, never emails on the first or
   second refusal, never emails twice for the same (key, value), never emails
-  the same owner about a second value within 14 days of the first email, and
-  never sends through a user's Google grant. Never assert on a production
-  account's inbox
+  the same owner about a second value within 14 days of the first email,
+  never emails or ledgers a placeholder value, and never sends through a
+  user's Google grant. Never assert on a production account's inbox
 
 ### A18: Open requests appear on the dashboard until approved or dismissed
 - Signed in as USER_A with the MCP connection from capability 15, call
