@@ -21,9 +21,10 @@ Listing copy source of truth: `docs/connector_submission/listing_copy.md`
 | PulseMCP | — | optional, not submitted — submit button on the site | https://www.pulsemcp.com/submit |
 | Glama | — | optional — `/.well-known/glama.json` (maintainer: support@fgac.ai) is served; claim at https://glama.ai/mcp/servers | https://glama.ai/mcp/servers |
 | awesome-mcp-servers (mcpservers.org) | — | optional, not submitted | https://mcpservers.org/submit |
-| xAI plugin marketplace (Grok Build) | 2026-09-17 | **submitted** — PR https://github.com/xai-org/plugin-marketplace/pull/766 from the `fgac-ai/plugin-marketplace` fork, pinned to main `952a187`; Socket scan green, Semgrep + catalog validation awaiting first-contributor workflow approval; third-party merges took 3–19 days in Sep 2026 | https://github.com/xai-org/plugin-marketplace |
+| xAI plugin marketplace (Grok Build) | 2026-09-17 | **submitted** — PR https://github.com/xai-org/plugin-marketplace/pull/766 from the `fgac-ai/plugin-marketplace` fork, pinned to main `952a187`; Socket scan green, Semgrep + catalog validation awaiting first-contributor workflow approval; third-party merges took 3–19 days in Sep 2026. Not the source of the first Grok install (2026-09-24, next row): that came through grok.com's own custom-connector UI, which needs no catalog | https://github.com/xai-org/plugin-marketplace |
+| grok.com custom connector (Bring Your Own MCP — no listing, the user pastes the URL) | — | **first install 2026-09-24T18:04Z** — one person (an existing FGAC account from the Claude directory, 2026-09-21) added `https://fgac.ai/api/mcp` under grok.com/connectors → New Connector → Custom and used it: 20 Gmail reads across two mailboxes succeeded, then the normal Sheets gate (`sheets_not_exposed` → approval link) on 2026-09-25. Client family `connectors-manager` / `grok-connectors-manager/0.1.0` (see Attribution). Contradicts the §7 note of 2026-09-16 that grok.com custom connectors are Business/Enterprise admin-only: the 09-24 account is a consumer address, and third-party write-ups put BYO-MCP on SuperGrok. No submission exists for this surface; the plugin package's README covers it | https://grok.com/connectors |
 | cursor.directory (Cursor community marketplace) | 2026-09-17 | **live** — went live 2026-09-17 (verified ~11:20 UTC in a browser: title "FGAC.ai — Gmail, Google Sheets & Docs", the description, "MCP Servers (1) / Skills (1)", an "Add to Cursor" button and the install config `{"type":"http","url":"https://fgac.ai/api/mcp"}`; the "unpublished" / "Scanning your plugin" text is gone). The listing shows exactly one MCP server, `fgac` — the dev-only PostHog entry from the root `.mcp.json` (removed by hand before publishing; their scanner ignores subdirectory URLs) did NOT come back in the security scan. Plain `curl` to the listing URL returns HTTP 429 from a "Vercel Security Checkpoint" bot challenge, so the daily watch must read it through a real browser, never curl | https://cursor.directory/plugins/fgacai-gmail-google-sheets-docs |
-| Cursor Marketplace (first-party; also Grok Bot's Plugins pane) | 2026-09-17 | **application submitted** — publisher application (org name FGAC.ai, handle `fgac-ai`, contact support@fgac.ai, repo + logo + website) accepted with "Thanks for applying"; manual review, no status page, follow-up comes by email from Cursor's marketplace-publishing mailbox. Watch item: cursor.directory's scanner reads the repo root, so a re-scan would re-add the dev-only PostHog server from the root `.mcp.json` | https://cursor.com/marketplace |
+| Cursor Marketplace (first-party; also Grok Bot's Plugins pane) | 2026-09-17 | **application submitted** — publisher application (org name FGAC.ai, handle `fgac-ai`, contact support@fgac.ai, repo + logo + website) accepted with "Thanks for applying"; manual review, no status page, follow-up comes by email from Cursor's marketplace-publishing mailbox. Watch item: cursor.directory's scanner reads the repo root, so a re-scan would re-add the dev-only PostHog server from the root `.mcp.json`. First Cursor client seen 2026-09-24T18:09Z, five minutes after the Grok install: `Cursor` / `Cursor MCP Availability` on `Cursor/1.0.0` and a bare `CursorServer/1.0.0`, tokenless discovery only — no OAuth completion, no `initialize`, no tool call — so a Cursor install was attempted and not finished; which of cursor.directory, the Marketplace application, or a hand-typed URL it came through cannot be told from the handshake | https://cursor.com/marketplace |
 
 Update the *submitted* and *status* columns as each step lands.
 
@@ -52,6 +53,20 @@ be told apart from organic (any client). Baseline in the 30 days to
 `Anthropic/ClaudeAI` (179), `Anthropic/Toolbox` (64 — directory inspection),
 `sheet-add-in` (9); **no VS Code, Cursor, Cline or Smithery client at all**, so
 any of those appearing after 2026-09-10 is registry-driven.
+
+Client families measured so far (the strings as sent; `classifyMcpClient` in
+`src/lib/mcpClientSignals.ts` stamps `client_class_signal = 'product:<family>'`
+on the non-Anthropic ones so they never sit in the unlabelled `direct`
+remainder of monitoring 7.21e, and monitoring 7.21f puts each on its own row):
+
+| family | `client_name` | `user_agent` | first seen | surface |
+|---|---|---|---|---|
+| Claude | `Anthropic/ClaudeAI`, `claude-ai`, `claude-code`, `sheet-add-in`; `Anthropic/Toolbox` is the directory's connect-time inspector, not a product | `Claude-User`, `claude-code/<ver>` | 2026-08 | Claude connector directory, Claude Code, the Sheets add-in |
+| **Grok** | `connectors-manager` (discovery, every `initialize`, every tool call); `grok-validator` (the add-time validation, one tokenless hit) | `grok-connectors-manager/<ver>` (`0.1.0`); bare `Grok` on one tokenless discovery hit | **2026-09-24T18:04Z** | grok.com custom connector (Bring Your Own MCP), **not** the xAI marketplace PR (still open) and not Cursor: the hosted client re-handshakes per call — 21 `initialize` rows for 20 tool calls in 14 h, the claude.ai pattern — where Grok Build (a CLI) would initialize once per process |
+| Cursor | `Cursor`, `Cursor MCP Availability` | `Cursor/<ver>` (`1.0.0`), bare `CursorServer/<ver>` | 2026-09-24T18:09Z (tokenless discovery only; no install completed yet) | cursor.directory, the Cursor Marketplace, or a pasted URL — indistinguishable at the handshake |
+
+PostHog annotation for the Grok first-seen: "First Grok install
+(connectors-manager)" at 2026-09-24T18:04Z (id 460432, added 2026-09-25).
 
 Query (new client families per week since the registry listing):
 
@@ -232,8 +247,11 @@ Grok Bot's Plugins pane **is the Cursor Marketplace** (SpaceXAI owns Cursor);
 Grok Build, the coding CLI, reads `xai-org/plugin-marketplace`. Both accept a
 manifest-only plugin that points at a hosted OAuth MCP server. The package is
 `public/skills/fgac-mcp/`. The Grok Bot template marketplace is curated with no
-submission path, and grok.com custom connectors are Business/Enterprise
-admin-only — neither is a channel.
+submission path. grok.com custom connectors were read on 2026-09-16 as
+Business/Enterprise admin-only; that was wrong — the first Grok install
+(2026-09-24, ledger row above) came through exactly that surface from a
+consumer account, so "Bring Your Own MCP" on grok.com is a channel, one with
+no listing to submit: the user pastes `https://fgac.ai/api/mcp` themselves.
 
 **Prerequisites (user):** the repo lives under the `fgac-ai` org (both catalogs
 close branded plugins submitted from personal accounts), and a Cursor Pro or

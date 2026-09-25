@@ -224,6 +224,13 @@ export async function parseInitializeClientInfo(req: Request): Promise<McpClient
  *                  real client that broke. Measured 2026-09-12: 142 of the
  *                  206 `direct` failures since the listing were this shape,
  *                  and none of the UAs had authenticated in 14 days.
+ *                  Since 2026-09-25 a `direct` row can instead carry
+ *                  `client_class_signal = 'product:<name>'`: a third-party
+ *                  MCP product real people use (Grok, Cursor — see
+ *                  `PRODUCT_CLIENTS`). Still `direct` (the 7.5 install
+ *                  funnel counts Claude products only), but named, so it
+ *                  leaves the unlabelled remainder of 7.21e and the
+ *                  per-product split can put it on its own row.
  *
  * Why both user_agent and client_name: the registry ecosystem is split. Most
  * crawlers announce themselves in the user-agent (`SmitheryBot/1.0
@@ -259,7 +266,8 @@ export interface McpClientClassification {
   client_class: McpClientClass;
   /**
    * Which rule matched, e.g. `ua:SmitheryBot/`, `name:glama`, `keyword:probe`,
-   * `ua:self-link`; on `direct`, `ua:stock-runtime-no-name` or absent.
+   * `ua:self-link`; on `direct`, `product:grok` / `product:cursor` (a known
+   * third-party product), `ua:stock-runtime-no-name`, or absent.
    */
   client_class_signal?: string;
 }
@@ -273,6 +281,47 @@ const CLAUDE_CLIENT_NAMES = new Set([
   'sheet-add-in',
 ]);
 const CLAUDE_UA_PREFIXES = ['Claude-User', 'claude-code/'];
+
+/**
+ * Third-party MCP products that real people use. Not `claude` (7.5 counts
+ * Anthropic products only) and never `scanner`; they stay `direct` and the
+ * signal names the product (`product:grok`) so the unlabelled remainder in
+ * 7.21e stops growing by one every time such a user installs, and the
+ * per-product split (docs/monitoring.md 7.21f) has a row to put them on.
+ * Checked BEFORE the scanner rules: Grok's connector-add validation names
+ * itself `grok-validator`, which the vocabulary would otherwise read as a
+ * crawler.
+ *
+ * Names are compared case-insensitively and whole. A user-agent entry that
+ * ends in `/` is a prefix (the product string as sent, case-sensitive);
+ * any other entry must equal the whole user-agent.
+ *
+ * Measured, production:
+ *   - grok — 2026-09-24T18:04Z, the first non-Claude install. A grok.com
+ *     custom connector (grok.com/connectors → New Connector → Custom)
+ *     presents as `connectors-manager` on `grok-connectors-manager/0.1.0`
+ *     (discovery, every initialize, every tool call); the add-time
+ *     validation is `grok-validator` on the same UA (and once with no UA),
+ *     and the bare UA `Grok` appeared on one tokenless discovery hit in the
+ *     same second. 21 initializes for 20 tool calls in 14 h: the hosted
+ *     client re-handshakes per call, like claude.ai.
+ *   - cursor — 2026-09-24T18:09Z, five minutes later, tokenless discovery
+ *     only (no authenticated row, no initialize): `Cursor` and
+ *     `Cursor MCP Availability` on `Cursor/1.0.0`, plus the bare UA
+ *     `CursorServer/1.0.0`.
+ */
+const PRODUCT_CLIENTS: ReadonlyArray<{ product: string; names: string[]; userAgents: string[] }> = [
+  {
+    product: 'grok',
+    names: ['connectors-manager', 'grok-validator'],
+    userAgents: ['grok-connectors-manager/', 'Grok'],
+  },
+  {
+    product: 'cursor',
+    names: ['cursor', 'cursor mcp availability'],
+    userAgents: ['Cursor/', 'CursorServer/'],
+  },
+];
 
 /** FGAC's own probes and smoke tests (clientInfo names used by our scripts and runbooks). */
 const INTERNAL_CLIENT_NAMES = new Set([
@@ -405,6 +454,14 @@ function prefixHit(s: string | undefined, prefixes: readonly string[]): string |
   return prefixes.find((p) => s.startsWith(p));
 }
 
+function productHit(ua: string | undefined, lname: string | undefined): string | undefined {
+  for (const p of PRODUCT_CLIENTS) {
+    if (lname && p.names.includes(lname)) return p.product;
+    if (ua && p.userAgents.some((u) => (u.endsWith('/') ? ua.startsWith(u) : ua === u))) return p.product;
+  }
+  return undefined;
+}
+
 export function classifyMcpClient(input: {
   userAgent?: string;
   clientName?: string;
@@ -424,6 +481,9 @@ export function classifyMcpClient(input: {
   if (lname && CLAUDE_CLIENT_NAMES.has(lname)) {
     return { client_class: 'claude', client_class_signal: `name:${lname}` };
   }
+
+  const product = productHit(ua, lname);
+  if (product) return { client_class: 'direct', client_class_signal: `product:${product}` };
 
   if (lname && SCANNER_CLIENT_NAMES.has(lname)) {
     return { client_class: 'scanner', client_class_signal: `name:${lname}` };
