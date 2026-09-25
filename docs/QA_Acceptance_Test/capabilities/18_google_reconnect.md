@@ -277,14 +277,28 @@
   `notify_status: 'disabled'`, the ledger row is still written, and the
   assertion is `blocked`, not `skip`
 - **Fixture**: a QA account whose live token LACKS `drive.file` while its
-  grant is otherwise alive. Arrange it through the real flow: as the QA user,
-  click "Reconnect Google" on `/dashboard/accounts`, and on Google's consent
-  screen UNTICK the Google Drive box (leave Gmail ticked), continue, and
-  return — the page renders the A7 failure state naming `drive.file`, and
-  `GET /api/auth/google-picker-token` returns `hasDriveFileScope: false`. (A
-  Google surface: `computer` clicks, never JS clicks.) Do NOT touch Clerk or
-  the database. For the Gmail leg, untick Gmail instead. Restore the grant at
-  the end (A1, both boxes ticked) so the dev grant is left healthy
+  grant is otherwise alive. Arrange it through the real flow, in two steps,
+  because Google only offers per-scope checkboxes when at least one requested
+  scope is NOT already granted (measured 2026-09-25, both QA accounts, dev
+  client: an account holding every scope gets the read-only
+  `consentsummary` page — "accounts.dev already has some access", zero
+  checkboxes — however many times "Reconnect Google" runs). Step 1 is the
+  A12 Google-side removal: Google Account → Security → Third-party apps →
+  "Dev FGAC AI" → Remove access. **The harness classifies that click as an
+  irreversible deletion and refuses it for a runner** (2026-09-25), so a
+  human, or a session with that approval, does step 1 and says so. Step 2:
+  as the QA user, click "Reconnect Google" on `/dashboard/accounts`; Google
+  now shows the consent screen with checkboxes — UNTICK the Google Drive box
+  (leave Gmail ticked), continue, and return — the page renders the A7
+  failure state naming `drive.file`, and `GET /api/auth/google-picker-token`
+  returns `hasDriveFileScope: false`. (A Google surface: `computer` clicks,
+  never JS clicks.) Do NOT touch Clerk or the database. For the Gmail leg,
+  untick Gmail instead. Restore the grant at the end (A1, both boxes ticked)
+  so the dev grant is left healthy. Until step 1 is arranged, the ledger
+  episode rule and the scope email are covered by `npx tsx
+  scripts/test-grant-failure-episodes.ts` (branch DB, throwaway
+  example.com owner, captured send) — record A14 as `blocked` with that
+  script's result, never as `skip`
 - Own-mailbox leg: as the agent, call `sheets_get_spreadsheet` (any id) on
   that account three times a few seconds apart
 - **Expected**: every call is the 🚫 `drive_file_scope_missing` refusal —
