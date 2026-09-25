@@ -32,9 +32,53 @@ export type NotifyStatus =
   /** Account-refusal notice only: the owner was already emailed about a
    * refused account inside the current episode (ACCOUNT_REFUSAL_EPISODE_GAP_MS). */
   | 'skipped_episode'
+  /** Link reminder only: another request of this owner was emailed inside
+   * the same-turn window (NOTIFY_MIN_GAP_MS) — one email per turn; this link
+   * stays eligible for a later turn. */
+  | 'skipped_burst'
   | 'skipped_no_links'
   | 'failed'
   | 'disabled';
+
+/** What every owner notice signs as and tells people to write to. A fixed
+ * address, never the configured sender: on a local or preview build the
+ * sender is a QA account standing in for the support mailbox, and a
+ * signature rendering it read as if the user's own address had sent the
+ * email (Ken, 2026-09-23). Reply-To stays the real sender. */
+export const SUPPORT_CONTACT_ADDRESS = 'support@fgac.ai';
+
+/** The canonical site, used when a production build would otherwise email
+ * a loopback URL. */
+export const PRODUCTION_SITE_URL = 'https://fgac.ai';
+
+/** The delegation walkthrough video (the "Multiple Gmail accounts" demo),
+ * linked from the refusal email's "delegate that account" fix. The site page
+ * rather than the raw embed: it is ours, and the `video_played` event fires. */
+export const DELEGATION_HOWTO_PATH = '/use-cases/multiple-gmail-accounts';
+
+/**
+ * The base every emailed link is built on. `dashboardUrl` is the caller's
+ * `DASHBOARD_URL` (NEXT_PUBLIC_APP_URL, else Vercel's production URL, else
+ * localhost); in a production runtime a loopback base can only be a
+ * mis-set environment, and an email is the one place it cannot be allowed
+ * through — the QA copy of 2026-09-23 linked http://localhost:3000.
+ */
+export function notifyBaseUrl(dashboardUrl: string, env: Record<string, string | undefined> = process.env): string {
+  const base = dashboardUrl.trim().replace(/\/+$/, '');
+  const loopback = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)(:\d+)?$/i.test(base) || base === '';
+  return loopback && env.VERCEL_ENV === 'production' ? PRODUCTION_SITE_URL : base;
+}
+
+/** The signature line shared by every owner notice. */
+export function signatureLine(): string {
+  return `— FGAC support (${SUPPORT_CONTACT_ADDRESS})`;
+}
+
+/** First letter upper-cased, for a label at the start of a sentence
+ * ("your Claude agent on the Default Profile" → "Your Claude agent …"). */
+export function capitalize(value: string): string {
+  return value ? value[0].toUpperCase() + value.slice(1) : value;
+}
 
 export interface NotifyLink {
   /** Deterministic request id (the dedupe key). */
@@ -90,15 +134,18 @@ function whenUtc(d: Date): string {
 }
 
 /**
- * Plain-text body. `agentLabel` is the connection's nickname or client name
- * (agent-controlled at connect time, so it is sanitized like everything
+ * Plain-text body. `agentLabel` is what src/lib/agentLabel.ts made of the
+ * connection's nickname, client name and profile (nickname and client name
+ * are agent-controlled at connect time, so it is sanitized like everything
  * else). `links` is one entry for a file/recipient grant, two for a send
  * denial (the recipient-only grant first, then send-to-anyone).
+ * `supportAddress` is the Reply-To; the signature names the fixed support
+ * contact, never it.
  */
 export function approvalEmailBody(opts: {
   agentLabel: string; links: NotifyLink[]; times: number; firstAskedAt: Date; dashboardUrl: string; supportAddress: string;
 }): string {
-  const agent = sanitizeLine(opts.agentLabel, 80) || 'Your AI agent';
+  const agent = sanitizeLine(opts.agentLabel, 80) || 'your AI agent';
   const [primary, ...rest] = opts.links;
   const lines: string[] = [
     `FGAC has detected ${agent} asking ${opts.times} times, without approval, to:`,
@@ -118,7 +165,7 @@ export function approvalEmailBody(opts: {
     'If you intentionally do not want the agent to have this access, do nothing — it stays blocked. Or reply to this email to let us know, and we will not remind you about this request again.',
     '',
     `Rules and connected agents: ${opts.dashboardUrl.trim().replace(/\/+$/, '')}/dashboard`,
-    `— FGAC (${opts.supportAddress})`,
+    signatureLine(),
   );
   return lines.join('\n');
 }
@@ -210,7 +257,7 @@ export function accountRefusalEmailSubject(requestedAccount: string): string {
 }
 
 export function accountRefusalEmailBody(opts: AccountRefusalNotice): string {
-  const agent = sanitizeLine(opts.agentLabel, 80) || 'Your AI agent';
+  const agent = sanitizeLine(opts.agentLabel, 80) || 'your AI agent';
   const requested = sanitizeLine(opts.requestedAccount, 254);
   const usable = opts.usableAccounts.map(a => sanitizeLine(a, 254)).filter(Boolean);
   const tool = opts.tool ? sanitizeLine(opts.tool, 60) : '';
@@ -226,11 +273,12 @@ export function accountRefusalEmailBody(opts: AccountRefusalNotice): string {
     '',
     `1. The task should use an account listed above: change the task (or tell the agent) to name that account, or to leave "account" unspecified so the profile's default is used.`,
     `2. The task really should use ${requested}: sign in to FGAC as that account and, under Delegation Management, delegate access to ${sanitizeLine(opts.ownerEmail, 254)}; the mailbox then appears on your Default Profile automatically. ${base}/dashboard/accounts`,
+    `   How delegation works, in two minutes (video): ${base}${DELEGATION_HOWTO_PATH}`,
     '',
     'Until one of these happens, every run is refused the same way. FGAC will not email you about this account again; reply to this email if you need a hand.',
     '',
     `Rules and connected agents: ${base}/dashboard`,
-    `— FGAC (${opts.supportAddress})`,
+    signatureLine(),
   ];
   return lines.join('\n');
 }

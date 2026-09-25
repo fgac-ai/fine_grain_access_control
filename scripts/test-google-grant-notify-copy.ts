@@ -81,7 +81,15 @@ check('says it is the only email unless the grant is repaired and dies again', /
 check('never promises a repeat', !/again only if|at most|in a week/.test(own));
 check('offers "do nothing" as the decline path', /do nothing — the agent stays refused/.test(own));
 check('links the Accounts page with the trailing slash trimmed', own.includes('Connected accounts: https://fgac.ai/dashboard/accounts'));
-check('signs off as FGAC with the support address', own.endsWith('— FGAC (support@fgac.ai)'));
+check('signs off as FGAC support with the fixed contact', own.endsWith('— FGAC support (support@fgac.ai)'));
+const labelled = deadGrantEmailBody({
+  accountEmail: 'owner@example.com', reason: 'grant_revoked', delegated: false, keyOwnerEmail: 'owner@example.com',
+  agentLabel: 'your Claude agent on the Default Profile', reconnectUrl: reconnect, failureCount: 1, firstFailedAt: new Date('2026-09-20T13:20:00Z'),
+  dashboardUrl: 'https://fgac.ai/', supportAddress: 'qa-owner@example.com', now,
+});
+check('a lower-case label is capitalised at the sentence start', labelled.startsWith('Your Claude agent on the Default Profile has been refused today'));
+check('a QA sender address never appears in the body', !labelled.includes('qa-owner@example.com'));
+check('never links localhost with a production base', !/localhost/.test(labelled));
 
 console.log('body — delegated mailbox, day 15');
 const del = deadGrantEmailBody({
@@ -101,7 +109,7 @@ const second = deadGrantEmailBody({
   agentLabel: 'x\r\nBcc: victim@example.com', reconnectUrl: reconnect, failureCount: 8, firstFailedAt: new Date(now.getTime() - 7 * DAY - 1000),
   dashboardUrl: 'https://fgac.ai', supportAddress: 'support@fgac.ai', now,
 });
-check('agent label is header-safe in the body', !/\r|\nBcc/.test(second) && /x Bcc: victim@example.com has been refused/.test(second));
+check('agent label is header-safe in the body', !/\r|\nBcc/.test(second) && /X Bcc: victim@example.com has been refused/.test(second));
 check('one-week wording: "8 times since … — 7 days so far"', /8 times since .* — 7 days so far/.test(second));
 
 console.log('raw message');

@@ -17,6 +17,7 @@ import { db } from '@/db';
 import { googleGrantFailures } from '@/db/schema';
 import { and, eq, isNull, lt, sql } from 'drizzle-orm';
 import { recentNotificationCountSql } from './approvalRequests';
+import { claimSerialized } from './notifyClaimLock';
 import {
   GRANT_DEAD_EPISODE_GAP_MS, GRANT_DEAD_GLOBAL_HOURLY_MAX, GRANT_DEAD_NOTICES_PER_EPISODE, grantNoticeDue, isScopeMissingReason, normalizeAccountEmail,
   type GrantNoticeReason,
@@ -102,14 +103,17 @@ function recentGlobalNoticeCountSql() {
  * been notified, (b) the owner is under `maxPerDay` reminder emails in the
  * last 24 h across all three ledgers, and (c) fewer than
  * GRANT_DEAD_GLOBAL_HOURLY_MAX notices went to anyone in the last hour. One
- * statement, so two refusals landing together cannot both claim.
+ * statement, so two refusals on the same row cannot both claim — and run
+ * under the owner's advisory lock AND the global one (notifyClaimLock.ts),
+ * because (b) and (c) count OTHER rows, which a statement's own snapshot
+ * cannot see being stamped concurrently.
  */
 export async function claimGrantFailureNotification(id: string, userId: string, maxPerDay: number): Promise<
   { claimed: true; notifiedAt: Date | null }
   | { claimed: false; notifiedAt: Date | null; reason: 'already' | 'capped' | 'global_capped' | 'missing' | 'error' }
 > {
   try {
-    const [row] = await db.update(googleGrantFailures)
+    const [row] = await claimSerialized(userId, db.update(googleGrantFailures)
       .set({ notifiedAt: sql`now()`, notifiedCount: sql`${googleGrantFailures.notifiedCount} + 1` })
       .where(and(
         eq(googleGrantFailures.id, id),
@@ -118,7 +122,7 @@ export async function claimGrantFailureNotification(id: string, userId: string, 
         sql`${recentNotificationCountSql(userId)} < ${maxPerDay}`,
         sql`${recentGlobalNoticeCountSql()} < ${GRANT_DEAD_GLOBAL_HOURLY_MAX}`,
       ))
-      .returning({ notifiedAt: googleGrantFailures.notifiedAt });
+      .returning({ notifiedAt: googleGrantFailures.notifiedAt }), { global: true });
     if (row) return { claimed: true, notifiedAt: row.notifiedAt };
     const [existing] = await db.select({
       notifiedAt: googleGrantFailures.notifiedAt,
