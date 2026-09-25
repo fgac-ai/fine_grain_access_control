@@ -7,7 +7,7 @@ Architecture this pilots: `docs/adr/002_integration_trains.md`.
 
 | PR | branch | change | capabilities / ids | migration |
 | --- | --- | --- | --- | --- |
-| #166 | `claude/funny-montalcini-d812e6` | scope-missing refusals email the mailbox owner once per episode (fourth trigger on the dead-grant ledger; class-change episodes) | 16 **A30**, 18 A14; runbook 7.30/7.30e | `0017_google_grant_failures.sql` (already on main; PR adds columns via migrate) |
+| #166 | `claude/funny-montalcini-d812e6` | scope-missing refusals email the mailbox owner once per episode (fourth trigger on the dead-grant ledger; class-change episodes) | 16 **A30**, 18 A14; runbook 7.30/7.30e | none — `schema.ts` change is a comment on `last_reason` only; table already created by `0017_google_grant_failures.sql` on main |
 | #165 | `claude/elegant-engelbart-8cebb0` | Grok and Cursor classified as named third-party products; growth ledger; runbook 7.21f | 16; runbook 7.21f | none |
 | #163 | `claude/zealous-dhawan-5e92b4` | `clerk_auth_redirect` event from the middleware outer wrapper, one row per sign-in / handshake hop; PostHog alert on `bounce_count >= 5` | 16 **A31** (was A30 on the PR); runbook **7.31** | none |
 | #162 | `claude/angry-haibt-7bf8a3` | directory inspector's `client_name` (Anthropic/Toolbox) no longer sticks to every later tool call; latest product handshake wins | runbook **7.32** (was 7.31 on the PR) | none |
