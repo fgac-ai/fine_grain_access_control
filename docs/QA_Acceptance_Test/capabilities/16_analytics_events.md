@@ -700,3 +700,43 @@ attributable to it.
   `distinct_id` is the key owner on a delegated leg means the notice went to
   the wrong person — the delegate cannot open the owner-bound link
   (`monitoring.md` 7.30)
+
+### A30: The scope-missing owner notice is measurable, joins to the refusal's scope
+- Run capability 18 A14 (own-mailbox and delegated legs, drive.file
+  fixture), then query the last hour:
+  `SELECT event, distinct_id, properties.$mcp_tool_name, properties.denial_code,
+  properties.google_scope_missing, properties.account_delegated,
+  properties.notify_status, properties.grant_failure_count,
+  properties.grant_days_dead, properties.trigger, properties.reason,
+  properties.missing_scope, properties.scope, properties.cc_delegate,
+  properties.failure_count, properties.days_dead FROM events WHERE event IN
+  ('$mcp_tool_call', 'google_grant_dead_notified', 'google_scope_missing') AND
+  timestamp >= now() - INTERVAL 1 HOUR ORDER BY timestamp`
+- **Expected**: every refused `$mcp_tool_call` carries `outcome:
+  'denied_by_policy'`, `denial_code: 'drive_file_scope_missing'`,
+  `google_scope_missing: true`, `grant_failure_count` 1, 2, 3 … in order
+  across BOTH legs, `grant_days_dead: 0`, and `notify_status` `sent` on the
+  first refusal then `already_sent` on every later one (the delegated leg's
+  first included when the own-mailbox leg ran first). Each refusal has its
+  `google_scope_missing {scope: 'drive_file', via: 'mcp'}` twin, unchanged.
+  Exactly ONE `google_grant_dead_notified` row for the owner + mailbox, whose
+  `distinct_id` is the mailbox OWNER's Clerk id (not the key owner of the
+  delegated leg), with `channel: 'email'`, `trigger: 'scope_missing'`,
+  `reason: 'drive_file_scope_missing'`, `missing_scope: 'drive_file'` (equal
+  to the twin event's `scope`), `failure_count: 1`, `days_dead: 0`, `via:
+  'mcp'`, and `account_delegated` / `cc_delegate` true exactly when the
+  delegated leg produced it. ONE `proxy_request {service: 'gmail', outcome:
+  'success'}` row under the sender's key. Five `list_accounts` calls add NO
+  `google_scope_missing` rows and NO `google_grant_dead_notified` rows (quiet
+  probes). A successful `gmail_list` on the same account carries no
+  `notify_status`. With the sender unset every refusal carries
+  `notify_status: 'disabled'` and `grant_failure_count` still climbs
+- **Class change** (18 A14's class-change leg): a second
+  `google_grant_dead_notified` row for the same owner + mailbox inside 14 d
+  is expected exactly when its `trigger` differs from the first's
+  (`first_failure` → `scope_missing` or the reverse); two rows with the same
+  `trigger` inside 14 d are a regression (monitoring.md 7.30a FLAG)
+- **Regression guard**: the volume watch (monitoring.md 7.30d, daily review
+  0.8) counts `google_grant_dead_notified` by name — a scope notice captured
+  under any OTHER event name escapes the spam watch and is a defect
+

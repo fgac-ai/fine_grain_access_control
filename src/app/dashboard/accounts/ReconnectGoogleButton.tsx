@@ -29,7 +29,11 @@ import {
  *
  * On return (?reconnected=1) success is VERIFIED, not assumed: the token
  * bridge does a real tokeninfo call, and Google's granular consent means a
- * completed flow can still be missing a checkbox. Clerk propagates fresh
+ * completed flow can still be missing a checkbox — and a permission the
+ * account declined before comes back UNCHECKED on the next screen, so the
+ * failure copy has to say "tick the box", not just "approve" (one owner ran
+ * the flow twice inside a minute on 2026-09-24 and returned without either
+ * scope both times). Clerk propagates fresh
  * scopes with a lag, so we poll the same way useGooglePicker does before
  * declaring failure.
  */
@@ -186,9 +190,10 @@ export function ReconnectGoogleButton({
       )}
       {justReconnected && !error && verify?.phase === "failed" && (
         <p className="max-w-xs text-right text-[11px] text-destructive [overflow-wrap:anywhere]">
-          Google finished the flow WITHOUT granting {verify.missing.join(" and ")} — the
-          checkbox was likely left unchecked on the consent screen. Click Reconnect
-          Google again and approve every permission.
+          Google finished the flow WITHOUT granting {verify.missing.join(" and ")}.
+          Google leaves a permission that was declined before UNCHECKED on the
+          consent screen, so continuing without ticking it changes nothing. Click
+          Reconnect Google again and tick every box before you continue.
         </p>
       )}
       {error && (
