@@ -103,12 +103,12 @@ export async function sweepBounces(opts: SweepOpts = {}): Promise<SweepResult> {
       let bounceClass = classifyBounce(parsed.action, parsed.status) ?? 'transient';
       // Ours? The echoed notice header settles it; otherwise the recipient
       // must be an address a notice ledger knows. Anything else is the
-      // operator's own correspondence and is filed id-only.
-      if (bounceClass === 'mailbox_gone' || bounceClass === 'rejected') {
-        const ours = parsed.noticeKind !== null || (await resolveNoticeRecipient(parsed.recipient)).ours;
-        if (!ours) bounceClass = 'unmatched';
-      }
-      const recorded = await recordBounce({ gmailMessageId: id, bouncedAt, parsed, bounceClass });
+      // operator's own correspondence: a permanent one is filed `unmatched`,
+      // and NO class keeps its address (QA 2026-09-25 found 4.x.x rows of
+      // the operator's own mail carrying the recipient).
+      const ours = parsed.noticeKind !== null || (await resolveNoticeRecipient(parsed.recipient)).ours;
+      if (!ours && (bounceClass === 'mailbox_gone' || bounceClass === 'rejected')) bounceClass = 'unmatched';
+      const recorded = await recordBounce({ gmailMessageId: id, bouncedAt, parsed, bounceClass, ours });
       if (!recorded.inserted) continue;
       result.recorded[bounceClass]++;
       if ((bounceClass === 'mailbox_gone' || bounceClass === 'rejected') && recorded.owner) {

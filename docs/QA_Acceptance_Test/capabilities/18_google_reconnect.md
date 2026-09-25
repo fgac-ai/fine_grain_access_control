@@ -304,11 +304,18 @@
   (the header matched, no FGAC user has that address), `bounced_at` = the
   DSN's time; the untagged DSN's row has `bounce_class: 'unmatched'`,
   `address` EMPTY (the operator's own correspondence is never stored) and
-  `notice_kind: 'unknown'`. Server log shows `[Cron:sweep-bounces] ok …
-  gone=1 … unmatched=1` then `fresh=0`. The sweep's reads are `proxy_request`
-  rows under USER_A's key with `User-Agent: fgac-bounce-sweep`; no
+  `notice_kind: 'unknown'`; a 4.x.x delayed notice for mail that is not ours
+  is `transient` with an EMPTY address too (only a bounce of our own notice
+  ever keeps its recipient). Server log shows `[Cron:sweep-bounces] ok …
+  gone=1 … unmatched=1` then `fresh=0` and one `[emailBounceSweep] filed …`
+  line per fresh DSN. The sweep's reads are `proxy_request` rows under
+  USER_A's key (the request carries `User-Agent: fgac-bounce-sweep`, which
+  the event does not record — do not try to assert it from telemetry); no
   `notice_bounce_recorded` event fires for the probe (no owner resolved) —
-  the event is asserted in A15
+  the event is asserted in A15. Measured 2026-09-25 (local, USER_A stand-in):
+  sweep 1 `listed 12, fresh 2, mailbox_gone 1, unmatched 1`, sweep 2 `fresh
+  0`; the 10 older DSNs in the QA inbox filed as 7 `unmatched` + 3
+  `transient` on the first ever run
 - **Never**: never stores a body or a subject; never fetches a DSN twice
   (`fresh: 0` on the re-run); never files a 4.x.x delayed notice as anything
   but `transient`; never touches a user's Google grant (the reads carry the

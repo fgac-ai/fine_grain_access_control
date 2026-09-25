@@ -93,6 +93,12 @@ export interface RecordBounceInput {
   bouncedAt: Date;
   parsed: ParsedDsn;
   bounceClass: BounceClass;
+  /** Whether the bounced message was one of FGAC's notices (the sweep
+   * decides: echoed notice header, or a recipient a ledger knows). Only an
+   * "ours" row keeps its address — whatever the class — so the operator's
+   * own correspondence never lands in FGAC's database, not even as a
+   * delayed 4.x.x. */
+  ours: boolean;
 }
 
 export interface RecordBounceResult {
@@ -131,16 +137,15 @@ export async function resolveNoticeRecipient(address: string): Promise<
 }
 
 /**
- * Store one DSN and, for a suppressing class, mark every grant-failure row
- * for that mailbox. One row per Gmail message id — a second sweep over the
+ * Store one DSN — address only when it is ours — and, for a suppressing
+ * class, mark every grant-failure row for that mailbox. One row per Gmail message id — a second sweep over the
  * same DSN inserts nothing and marks nothing. Throws on a DB error; the
  * sweep counts it and moves on.
  */
 export async function recordBounce(input: RecordBounceInput): Promise<RecordBounceResult> {
-  const suppressing = (SUPPRESSING_CLASSES as readonly string[]).includes(input.bounceClass);
-  const keepAddress = input.bounceClass !== 'unmatched';
-  const address = keepAddress ? normalizeBounceAddress(input.parsed.recipient) : '';
-  const resolved = keepAddress ? await resolveNoticeRecipient(address) : { ours: false as const };
+  const suppressing = (SUPPRESSING_CLASSES as readonly string[]).includes(input.bounceClass) && input.ours;
+  const address = input.ours ? normalizeBounceAddress(input.parsed.recipient) : '';
+  const resolved = input.ours ? await resolveNoticeRecipient(address) : { ours: false as const };
   const owner = resolved.ours ? resolved.owner : null;
 
   const inserted = await db.insert(emailBounces)
