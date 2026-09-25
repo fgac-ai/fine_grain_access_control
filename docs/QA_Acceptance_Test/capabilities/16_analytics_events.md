@@ -740,3 +740,36 @@ attributable to it.
   0.8) counts `google_grant_dead_notified` by name — a scope notice captured
   under any OTHER event name escapes the spam watch and is a defect
 
+### A31: Clerk sign-in and handshake redirects are measurable per hop
+- Signed out of FGAC (a browser with no FGAC session, or sign out via the
+  dashboard's user menu), document-navigate to `/dashboard` on the
+  environment under test and let it land wherever Clerk sends it — do NOT
+  sign in from that page. Then sign in from the plain `/dashboard` URL (the
+  usual QA account switch) and, once the dashboard renders, navigate to
+  `/dashboard` again. Query, with `<env>` the environment under test
+  (`development` for localhost, `preview`, `production`):
+  `SELECT timestamp, distinct_id, properties.kind, properties.path,
+  properties.navigation, properties.reason, properties.auth_status,
+  properties.bounce_count, properties.bounce_id, properties.client_hash,
+  properties.browser_key, properties.has_session_cookie,
+  properties.has_client_cookie, properties.client FROM events WHERE event =
+  'clerk_auth_redirect' AND properties.environment = '<env>' AND timestamp >=
+  now() - INTERVAL 20 MINUTE ORDER BY timestamp`
+- **Expected**: exactly ONE row with `kind: 'sign_in'`, `path: '/dashboard'`,
+  `navigation: true` for the signed-out navigation, distinct id
+  `anonymous-clerk-redirect`, `bounce_count` 1 (or the next number if the
+  browser took a handshake hop first, see below), `client_hash` either absent
+  or a 16-character string — never a cookie value — and `browser_key` set; and
+  NO new rows at all for the two signed-in navigations (the query's newest
+  row predates the sign-in). Dev-instance note (localhost and previews): a
+  browser that has never met this Clerk dev instance takes ONE `kind:
+  'handshake'`, `reason: 'dev-browser-missing'` row before the `sign_in` row —
+  count `sign_in` rows, not all rows; production has no such hop. A second
+  signed-out `/dashboard` navigation within five minutes from the same browser
+  adds a second `sign_in` row with the same `bounce_id` and `bounce_count` one
+  higher (the loop counter), so run the signed-out leg once
+- **Why**: on 2026-09-21 a browser bounced between `/dashboard` and Clerk's
+  sign-in for minutes, the server printed Clerk's "infinite redirect loop"
+  warning dozens of times, and PostHog had no row for any of it. This event is
+  the only per-hop signal; `monitoring.md` 7.31 reads it (production only) and
+  the alert on `bounce_count >= 5` depends on the count being one per hop
