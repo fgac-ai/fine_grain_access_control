@@ -2416,8 +2416,9 @@ count should recover from the 1–5 of mid-September; `via != 'form'` is the
 share this change created.
 
 
-**7.30 — Dead-grant owner notice: is the owner told once, does the grant come
-back, and is it staying far from spam?** Added 2026-09-20 (PR #156,
+**7.30 — Dead-grant (and, since 2026-09-25, scope-missing) owner notice: is
+the owner told once, does the grant come back, and is it staying far from
+spam?** Added 2026-09-20 (PR #156,
 `src/lib/approvalNotify.ts` `notifyOwnerOfDeadGrant`,
 `docs/implementation_plans/claude_lucid-pare-619cae_v2.md`). The
 `google_token_unavailable` refusal (§7.13a) carries an owner-bound reconnect
@@ -2523,12 +2524,75 @@ WHERE event IN ('approval_link_notified', 'account_refusal_notified', 'google_gr
 GROUP BY recipient, day HAVING total > 1 ORDER BY total DESC, day DESC
 ```
 
-Healthy: 7.30a shows at most one row per owner + mailbox with `days_dead = 0`
-and no hour holding 5 or more rows; 7.30c shows `sent` once per new dead
-mailbox, `already_sent` on the rest, `disabled` absent, `failed` rare and
-`skipped_global_capped` zero; 7.30d returns nothing (no recipient got two
-emails of any kind in one day); 7.30b's `reconnect_started` is non-zero for
-most emailed owners within a week. Pair with the ledger itself (branch DB or a
+```sql
+-- 7.30e — the scope-missing trigger (added 2026-09-25). The same notice now
+-- fires on the first `gmail_scope_missing` / `drive_file_scope_missing`
+-- refusal of an episode: the grant is alive but lacks the scope the tool
+-- rides on, and until now only the agent held the reconnect link. Measured
+-- 7 d to 2026-09-25 (production, external accounts): 9 people refused for
+-- drive.file (22 refusals), 2 started a reconnect inside 24 h, 1 verified,
+-- 0 later Sheets/Docs successes; 8 of the 9 were launch-cohort accounts
+-- with ONE sign-in ever (2026-08-16 → 20), connected before drive.file was
+-- in the sign-in scope set — the permission was never asked of them, so
+-- "signed in again and narrowed the grant" (§7.12) explained none of them
+-- — and the ninth signed up that day, left both consent boxes unchecked,
+-- then ran the reconnect twice inside a minute and came back without either
+-- scope both times (Google leaves a previously declined permission UNCHECKED
+-- on later screens; the copy now says "tick the box"). 30-d baseline before
+-- the trigger: 45 drive.file-refused people, 22 started a reconnect, 9
+-- verified. Per refusal: what the notice did, split by scope and class.
+-- `sent` once per new (owner, mailbox) and `already_sent` afterwards is the
+-- steady state; a `sent` for a mailbox that 7.30a shows was emailed as a
+-- dead grant inside 14 d is the class-change reset working (the owner
+-- reconnected with a box unchecked), not an episode bug — 7.30a's
+-- "2 rows in 14 d" FLAG applies only to two rows of the SAME class.
+SELECT toDate(timestamp) AS day, properties.denial_code AS reason,
+       properties.account_delegated AS delegated, properties.notify_status AS notify,
+       max(toInt64(properties.grant_days_dead)) AS max_days_missing,
+       count() AS refusals, uniq(person_id) AS key_owners
+FROM events
+WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
+  AND properties.denial_code IN ('gmail_scope_missing', 'drive_file_scope_missing')
+  AND timestamp > now() - INTERVAL 7 DAY
+GROUP BY day, reason, delegated, notify ORDER BY day DESC, refusals DESC
+```
+
+```sql
+-- 7.30f — did the scope email work (30 d)? Per notified owner: reconnect
+-- started / verified / incomplete after the email, and the first success on
+-- the surface that was refused. Before-figure (30 d to 2026-09-25, no email):
+-- 22 of 45 drive.file-refused people started a reconnect, 9 verified; in the
+-- last week alone 2 of 9 started and 1 verified. `incomplete` after the
+-- email with `missing_scopes` still listing the scope = the owner clicked
+-- Continue without ticking the box — the copy's job, not a delivery
+-- failure. Three weeks of unconverted recipients means the lever is the
+-- dashboard card, never more mail.
+WITH notified AS (
+  SELECT person_id, min(timestamp) AS emailed_at, any(properties.missing_scope) AS scope
+  FROM events WHERE event = 'google_grant_dead_notified' AND properties.trigger = 'scope_missing'
+    AND properties.environment = 'production' AND timestamp > now() - INTERVAL 30 DAY
+  GROUP BY person_id
+)
+SELECT person.properties.email AS owner, any(n.emailed_at) AS emailed_at, any(n.scope) AS scope,
+       countIf(e.event = 'google_scope_missing' AND e.timestamp >= n.emailed_at) AS refusals_after,
+       countIf(e.event = 'google_reconnect_started' AND e.timestamp >= n.emailed_at) AS reconnect_started,
+       countIf(e.event = 'google_reconnect_verified' AND e.timestamp >= n.emailed_at) AS reconnect_verified,
+       countIf(e.event = 'google_reconnect_incomplete' AND e.timestamp >= n.emailed_at) AS reconnect_incomplete,
+       minIf(e.timestamp, e.event = '$mcp_tool_call' AND e.properties.outcome = 'success' AND e.timestamp >= n.emailed_at
+             AND ((any(n.scope) = 'gmail' AND e.properties.$mcp_tool_name LIKE 'gmail_%')
+                  OR (any(n.scope) = 'drive_file' AND e.properties.$mcp_tool_name NOT LIKE 'gmail_%' AND e.properties.$mcp_tool_name != 'list_accounts'))) AS first_success_after
+FROM events e JOIN notified n ON n.person_id = e.person_id
+WHERE e.timestamp > now() - INTERVAL 30 DAY
+GROUP BY owner ORDER BY refusals_after DESC
+```
+
+Healthy: 7.30a shows at most one row per owner + mailbox + class with
+`days_dead = 0` and no hour holding 5 or more rows; 7.30c and 7.30e show
+`sent` once per new dead or scope-less mailbox, `already_sent` on the rest,
+`disabled` absent, `failed` rare and `skipped_global_capped` zero; 7.30d
+returns nothing (no recipient got two emails of any kind in one day); 7.30b's
+and 7.30f's `reconnect_started` is non-zero for most emailed owners within a
+week. Pair with the ledger itself (branch DB or a
 read-only production query): `SELECT account_email, last_reason,
 failure_count, notified_count, first_failed_at, notified_at FROM
 google_grant_failures ORDER BY last_failed_at DESC LIMIT 20`. Under this rule

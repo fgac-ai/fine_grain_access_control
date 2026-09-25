@@ -169,7 +169,10 @@ export const googleGrantFailures = pgTable('google_grant_failures', {
   userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
   // The mailbox whose grant failed, lower-cased (one row per owner + mailbox).
   accountEmail: text('account_email').notNull(),
-  // Latest classified reason (`no_token` / `refresh_failed` / `grant_revoked`).
+  // Latest classified reason: a dead-grant class (`no_token` /
+  // `refresh_failed` / `grant_revoked`) or, since 2026-09-25, a scope-missing
+  // refusal (`gmail_scope_missing` / `drive_file_scope_missing`). A change
+  // between the two classes starts a new episode (googleGrantFailures.ts).
   lastReason: text('last_reason').notNull(),
   // Episode bookkeeping: a failure arriving more than GRANT_DEAD_EPISODE_GAP
   // after the previous one starts a new episode (count and notices reset).

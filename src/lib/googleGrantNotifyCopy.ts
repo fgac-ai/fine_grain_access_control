@@ -21,6 +21,11 @@
  * A "second failure" rule would have emailed neither of those two, so the
  * first non-retryable failure triggers the notice.
  *
+ * Since 2026-09-25 the same notice covers the scope-missing refusals
+ * (`ScopeMissingReason` below): same ledger, sender, caps and breaker, a
+ * scope-specific cause paragraph and subject, and a class change on the same
+ * mailbox starts a new episode.
+ *
  * Third member of the owner-notice family (approval-link reminder, account
  * refusal): same sender (FGAC's support mailbox through FGAC's own proxy API,
  * never a user's grant — 2026-09-15), same transport, same 3-per-owner daily
@@ -34,6 +39,44 @@ import type { GoogleTokenFailureReason } from './googleTokenFailure';
 /** Reasons the notice covers: the deterministic failures a reconnect repairs
  * (the same set `list_accounts` mints a reconnect link for). */
 export type DeadGrantReason = Extract<GoogleTokenFailureReason, 'no_token' | 'refresh_failed' | 'grant_revoked'>;
+
+/**
+ * Fourth trigger (2026-09-25): the grant is alive but lacks a scope the
+ * surface rides on — the MCP pre-flight refusals `gmailScopeDenial` /
+ * `driveFileScopeDenial` (`denial_code` of the same name). Measured in the
+ * 30 d to 2026-09-25 (production): 24 people were refused this way and none
+ * had a dead grant; of the nine refused for drive.file in the last week,
+ * eight were launch-cohort accounts (one sign-in ever, 2026-08-16 → 20)
+ * connected before drive.file was in the sign-in scope set — the permission
+ * was never asked of them — and one was a same-day sign-up who left both
+ * consent checkboxes unchecked, then ran the reconnect twice and came back
+ * without the scopes both times. Two started a reconnect within 24 h of the
+ * first refusal; the rest never opened the dashboard. Same delivery gap as
+ * the dead grant: the agent holds the link and the owner never hears.
+ */
+export type ScopeMissingReason = 'gmail_scope_missing' | 'drive_file_scope_missing';
+
+/** Everything the (owner, mailbox) ledger records and the notice covers. */
+export type GrantNoticeReason = DeadGrantReason | ScopeMissingReason;
+
+/** The two episode classes. A change of class on the same mailbox starts a
+ * new episode (googleGrantFailures.ts): a dead grant that the owner
+ * reconnects with a checkbox unchecked is a second event — the reconnect
+ * happened — and the email it earns says something the first could not. */
+export type GrantNoticeClass = 'dead' | 'scope';
+
+export function isScopeMissingReason(reason: string): reason is ScopeMissingReason {
+  return reason === 'gmail_scope_missing' || reason === 'drive_file_scope_missing';
+}
+
+export function grantNoticeClass(reason: GrantNoticeReason): GrantNoticeClass {
+  return isScopeMissingReason(reason) ? 'scope' : 'dead';
+}
+
+/** The scope the analytics `google_scope_missing` event names for a reason. */
+export function missingScopeOf(reason: ScopeMissingReason): 'gmail' | 'drive_file' {
+  return reason === 'gmail_scope_missing' ? 'gmail' : 'drive_file';
+}
 
 /** ONE notice per episode (Ken, 2026-09-21: "I don't want to email someone 3
  * times for an event that occurred once"). The refusal itself recurs on every
@@ -78,7 +121,7 @@ export function grantNoticeDue(row: { notifiedCount: number; notifiedAt: Date | 
 export interface DeadGrantNotice {
   /** The mailbox whose grant died — also the owner's FGAC sign-in address. */
   accountEmail: string;
-  reason: DeadGrantReason;
+  reason: GrantNoticeReason;
   /** True when the refused agent belongs to someone else (a delegate). */
   delegated: boolean;
   /** The key owner whose agent was refused — CC'd on a delegated notice. */
@@ -105,8 +148,15 @@ export function daysDead(firstFailedAt: Date, now: Date): number {
 
 /** What went wrong, in the owner's voice — mirrors the agent-facing text in
  * googleTokenFailure.ts so the two never disagree about the cause. */
-export function deadGrantCause(reason: DeadGrantReason): string {
+export function deadGrantCause(reason: GrantNoticeReason): string {
   switch (reason) {
+    case 'drive_file_scope_missing':
+      // Ordered by measured frequency (8 of 9 in the week to 2026-09-25 were
+      // pre-drive.file connections); the copy must never lead with "you
+      // signed in again", which the sign-in scope set stopped causing.
+      return 'This Google account is connected to FGAC WITHOUT the Google Drive file permission (drive.file), which every Sheets, Docs, Slides and Drive request needs. Most accounts in this state were connected before FGAC asked for that permission; the other cause is the Google Drive checkbox being left unchecked on Google\'s consent screen. Gmail is unaffected.';
+    case 'gmail_scope_missing':
+      return 'This Google account is connected to FGAC WITHOUT Gmail permission (gmail.modify) — the Gmail checkbox was left unchecked on Google\'s consent screen when the account was connected. Sheets, Docs and Slides are unaffected.';
     case 'grant_revoked':
       return 'Google has expired or revoked FGAC\'s access to this account — this happens when FGAC is removed under the Google account\'s third-party access, when the Google password changes, or when a grant ages out.';
     case 'refresh_failed':
@@ -116,12 +166,25 @@ export function deadGrantCause(reason: DeadGrantReason): string {
   }
 }
 
-export function deadGrantEmailSubject(notice: Pick<DeadGrantNotice, 'accountEmail' | 'delegated'>): string {
+/** The permission a scope-missing notice is about, in the owner's words. */
+export function missingPermissionName(reason: ScopeMissingReason): string {
+  return reason === 'gmail_scope_missing' ? 'the Gmail permission' : 'the Google Drive file permission';
+}
+
+/** The tools that fail while the scope is missing — mirrors the refusal. */
+function affectedSurfaces(reason: ScopeMissingReason): string {
+  return reason === 'gmail_scope_missing' ? 'Every Gmail call' : 'Every Sheets, Docs, Slides and Drive call';
+}
+
+export function deadGrantEmailSubject(notice: Pick<DeadGrantNotice, 'accountEmail' | 'delegated' | 'reason'>): string {
   const account = sanitizeLine(notice.accountEmail, 80);
+  const state = isScopeMissingReason(notice.reason)
+    ? `is missing ${missingPermissionName(notice.reason)}`
+    : 'is disconnected';
   return sanitizeLine(
     notice.delegated
-      ? `Google access to ${account} is disconnected — an agent you delegated to is being refused`
-      : `Google access to ${account} is disconnected — your agent is being refused`,
+      ? `Google access to ${account} ${state} — an agent you delegated to is being refused`
+      : `Google access to ${account} ${state} — your agent is being refused`,
     160,
   );
 }
@@ -142,25 +205,43 @@ export function deadGrantEmailBody(opts: DeadGrantNotice & { now: Date }): strin
     ? `today (first at ${whenUtc(opts.firstFailedAt)})`
     : `${times} since ${whenUtc(opts.firstFailedAt)} — ${days} day${days === 1 ? '' : 's'} so far`;
 
+  const scope = isScopeMissingReason(opts.reason) ? opts.reason : null;
+  const because = scope
+    ? 'because the Google account below is connected to FGAC without a permission it needs:'
+    : 'because FGAC can no longer reach Google on behalf of:';
+
   const lines: string[] = [];
   if (opts.delegated) {
-    lines.push(
-      `${agent}, run by ${keyOwner} under the mailbox access you delegated, has been refused ${since} because FGAC can no longer reach Google on behalf of:`,
-    );
+    lines.push(`${agent}, run by ${keyOwner} under the mailbox access you delegated, has been refused ${since} ${because}`);
   } else {
-    lines.push(`${agent} has been refused ${since} because FGAC can no longer reach Google on behalf of:`);
+    lines.push(`${agent} has been refused ${since} ${because}`);
   }
   lines.push('', `    ${account}`, '', deadGrantCause(opts.reason), '');
-  lines.push(
-    'Every call on this account fails until it is reconnected, and the agent has been told to stop retrying. Only you can repair it — reconnecting takes one click and shows Google\'s consent screen again:',
-    opts.reconnectUrl,
-    '',
-    `Open the link while signed in to FGAC as ${account}; it will not run for any other account.`,
-    // Sent the moment the agent is first refused — an owner who is driving the
-    // agent interactively may have reconnected before reading this (one
-    // production owner recovered 99 s after the first refusal, 2026-09-21).
-    'If you have already reconnected, no action is needed — this email was sent the moment the agent was first refused.',
-  );
+  if (scope) {
+    lines.push(
+      `${affectedSurfaces(scope)} on this account fails until the permission is granted, and the agent has been told to stop retrying. Only you can grant it — this link takes one click and shows Google's consent screen again:`,
+      opts.reconnectUrl,
+      '',
+      // Measured 2026-09-24: one owner ran this reconnect twice inside a
+      // minute and came back without the scopes both times. Google's
+      // granular consent leaves a permission the account previously declined
+      // UNCHECKED on later screens, so "Continue" alone changes nothing.
+      `On that screen, tick the box next to ${scope === 'gmail_scope_missing' ? 'Gmail' : 'Google Drive'} before you continue — Google leaves a permission that was declined before unchecked, and finishing the screen without ticking it changes nothing.`,
+      `Open the link while signed in to FGAC as ${account}; it will not run for any other account.`,
+      'If you have already reconnected and approved it, no action is needed — this email was sent the moment the agent was first refused.',
+    );
+  } else {
+    lines.push(
+      'Every call on this account fails until it is reconnected, and the agent has been told to stop retrying. Only you can repair it — reconnecting takes one click and shows Google\'s consent screen again:',
+      opts.reconnectUrl,
+      '',
+      `Open the link while signed in to FGAC as ${account}; it will not run for any other account.`,
+      // Sent the moment the agent is first refused — an owner who is driving the
+      // agent interactively may have reconnected before reading this (one
+      // production owner recovered 99 s after the first refusal, 2026-09-21).
+      'If you have already reconnected, no action is needed — this email was sent the moment the agent was first refused.',
+    );
+  }
   if (opts.delegated) {
     lines.push(
       '',
@@ -169,7 +250,9 @@ export function deadGrantEmailBody(opts: DeadGrantNotice & { now: Date }): strin
   }
   lines.push(
     '',
-    'This is the only email FGAC will send about this account unless it is repaired and disconnects again. If you intentionally disconnected it, do nothing — the agent stays refused. Reply to this email if you need a hand.',
+    scope
+      ? 'This is the only email FGAC will send about this permission unless it is granted and goes missing again. If you do not want the agent to have it, do nothing — the agent stays refused. Reply to this email if you need a hand.'
+      : 'This is the only email FGAC will send about this account unless it is repaired and disconnects again. If you intentionally disconnected it, do nothing — the agent stays refused. Reply to this email if you need a hand.',
     '',
     `Connected accounts: ${base}/dashboard/accounts`,
     `— FGAC (${opts.supportAddress})`,
@@ -178,9 +261,11 @@ export function deadGrantEmailBody(opts: DeadGrantNotice & { now: Date }): strin
 }
 
 /**
- * The sentence appended to the agent's 🚫 refusal after the notice. Only the
- * two states a human can act on get a line; every other outcome adds nothing
- * (the refusal and its link are exactly what they were before).
+ * The sentence appended to the agent's 🚫 refusal after the notice — the
+ * dead-grant refusal and the scope-missing refusals alike (both carry the same
+ * owner-bound reconnect link). Only the two states a human can act on get a
+ * line; every other outcome adds nothing (the refusal and its link are exactly
+ * what they were before).
  */
 export function deadGrantDenialLine(
   status: string,

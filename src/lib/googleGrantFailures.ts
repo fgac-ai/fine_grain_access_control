@@ -18,8 +18,8 @@ import { googleGrantFailures } from '@/db/schema';
 import { and, eq, isNull, lt, sql } from 'drizzle-orm';
 import { recentNotificationCountSql } from './approvalRequests';
 import {
-  GRANT_DEAD_EPISODE_GAP_MS, GRANT_DEAD_GLOBAL_HOURLY_MAX, GRANT_DEAD_NOTICES_PER_EPISODE, grantNoticeDue, normalizeAccountEmail,
-  type DeadGrantReason,
+  GRANT_DEAD_EPISODE_GAP_MS, GRANT_DEAD_GLOBAL_HOURLY_MAX, GRANT_DEAD_NOTICES_PER_EPISODE, grantNoticeDue, isScopeMissingReason, normalizeAccountEmail,
+  type GrantNoticeReason,
 } from './googleGrantNotifyCopy';
 
 export { grantNoticeDue, normalizeAccountEmail };
@@ -35,19 +35,28 @@ export interface GrantFailureRow {
 }
 
 /**
- * Record one reconnect-repairable failure. First failure inserts; later ones
- * either extend the current episode or — when the previous failure is older
- * than the episode gap — start a new one (count and notices reset). Returns
- * the resulting row, or null if the write failed.
+ * Record one reconnect-repairable failure — a dead grant, or since 2026-09-25
+ * a grant missing a scope. First failure inserts; later ones either extend
+ * the current episode or start a new one (count and notices reset) when the
+ * previous failure is older than the episode gap OR belongs to the other
+ * class: a dead grant the owner reconnects with a checkbox unchecked flips
+ * from `grant_revoked` to `drive_file_scope_missing`, and that reconnect is a
+ * new event whose email says what the first could not (tick the box). The
+ * two scope reasons are ONE class — a mailbox missing both scopes is told
+ * once, and the reconnect repairs both. Returns the resulting row, or null
+ * if the write failed.
  */
 export async function recordGrantFailure(opts: {
-  userId: string; accountEmail: string; reason: DeadGrantReason;
+  userId: string; accountEmail: string; reason: GrantNoticeReason;
 }): Promise<GrantFailureRow | null> {
   try {
     const gapSeconds = Math.round(GRANT_DEAD_EPISODE_GAP_MS / 1000);
+    const scopeClass = isScopeMissingReason(opts.reason);
     // Compile-time constant, so it is inlined rather than bound (a bound
     // parameter inside an interval expression has no inferable type).
-    const stale = sql`${googleGrantFailures.lastFailedAt} < now() - ${sql.raw(`interval '${gapSeconds} seconds'`)}`;
+    const aged = sql`${googleGrantFailures.lastFailedAt} < now() - ${sql.raw(`interval '${gapSeconds} seconds'`)}`;
+    const classChanged = sql`(${googleGrantFailures.lastReason} IN ('gmail_scope_missing', 'drive_file_scope_missing')) IS DISTINCT FROM ${scopeClass}`;
+    const stale = sql`(${aged} OR ${classChanged})`;
     const [row] = await db.insert(googleGrantFailures)
       .values({
         userId: opts.userId,
