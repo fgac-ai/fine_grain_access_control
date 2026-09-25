@@ -39,7 +39,7 @@ import { classifyMcpClient, classifyTransportRejection, installFingerprint, pars
 import { recordEagerResolve, shouldSkipEagerResolve } from '@/lib/connectionTouchMemo';
 import { after } from 'next/server';
 import { notifyOwnerOfAccountRefusal, notifyOwnerOfApprovalLinks, notifyOwnerOfDeadGrant, type NotifyLink } from '@/lib/approvalNotify';
-import { deadGrantDenialLine, type DeadGrantReason } from '@/lib/googleGrantNotifyCopy';
+import { deadGrantDenialLine, type DeadGrantReason, type ScopeMissingReason } from '@/lib/googleGrantNotifyCopy';
 import { accountRefusalDenialLine, notifyDenialLine } from '@/lib/approvalNotifyCopy';
 import { agentLabel as buildAgentLabel } from '@/lib/agentLabel';
 import { normalizeRequestedEmail } from '@/lib/accountRefusals';
@@ -423,6 +423,10 @@ type GoogleTokenResult = {
   hasGmailScope?: boolean;
   /** undefined = Clerk did not report scopes; never enforce on missing metadata. */
   hasDriveFileScope?: boolean;
+  /** The mailbox OWNER the token belongs to — the key owner for an own
+   * mailbox, the grantor for a delegated one. The scope-missing owner
+   * notice emails this person (they are the only one who can reconnect). */
+  owner: { id: string; email: string; clerkUserId: string };
 };
 
 /** Why no token came back — the caller turns this into class-specific
@@ -623,7 +627,7 @@ async function getGoogleToken(
     if (verdict.recordStale) addToolCallProps({ clerk_scope_cache_stale: true });
     if (verdict.recordOverstates) addToolCallProps({ clerk_scope_record_overstates: true });
   }
-  return { token: grant.token, hasGmailScope: verdict.hasGmailScope, hasDriveFileScope: verdict.hasDriveFileScope };
+  return { token: grant.token, hasGmailScope: verdict.hasGmailScope, hasDriveFileScope: verdict.hasDriveFileScope, owner: tokenOwner };
 }
 
 // loadApplicableRules / checkReadRestrictions moved to src/lib/gmailRules.ts —
@@ -1887,6 +1891,8 @@ type ResolvedAccount = {
   proxyKeyId: string;
   hasGmailScope?: boolean;
   hasDriveFileScope?: boolean;
+  /** Mailbox owner (see GoogleTokenResult.owner) — recipient of the scope-missing notice. */
+  owner: { id: string; email: string; clerkUserId: string };
   /** Every other mailbox this key reaches — empty for single-mailbox keys. Drives the cross-mailbox 404 hint (withMailboxContext). */
   otherAccounts: string[];
 };
@@ -2037,6 +2043,7 @@ async function resolveAccountAndToken(
     proxyKeyId: conn.proxyKeyId,
     hasGmailScope: googleToken.hasGmailScope,
     hasDriveFileScope: googleToken.hasDriveFileScope,
+    owner: googleToken.owner,
     otherAccounts: emails
       .map(e => e.targetEmail)
       .filter(e => e.toLowerCase() !== targetEmail.toLowerCase()),
@@ -2062,7 +2069,7 @@ async function resolveAccountAndToken(
  * unsampled and independent of $mcp_tool_call, so `uniq(person)` over it is
  * exactly the locked-out population (docs/monitoring.md 7.6).
  */
-function gmailScopeDenial(conn: ConnectionApproved, resolved: ResolvedAccount) {
+async function gmailScopeDenial(conn: ConnectionApproved, resolved: ResolvedAccount) {
   if (resolved.hasGmailScope !== false) return null;
   addToolCallProps({ failure_reason: 'gmail_scope_missing', denial_code: 'gmail_scope_missing', google_scope_missing: true });
   captureServerEvent(conn.user.clerkUserId, 'google_scope_missing', {
@@ -2070,14 +2077,45 @@ function gmailScopeDenial(conn: ConnectionApproved, resolved: ResolvedAccount) {
     scope: 'gmail',
     account_delegated: resolved.targetEmail.toLowerCase() !== conn.user.email.toLowerCase(),
   });
+  const emailed = await notifyOwnerOfMissingScope(conn, resolved, 'gmail_scope_missing');
   return textResult(
     `🚫 Not available yet: the Google account '${resolved.targetEmail}' is connected WITHOUT Gmail permission — ` +
     `most likely the Gmail checkbox was left unchecked on Google's consent screen when connecting. ` +
     `STOP — every Gmail call on this account will fail until it is reconnected; retrying will NOT help. ` +
-    `👉 Send the account owner this one-click link — it opens Google's consent screen directly; they must approve Gmail access there: ` +
+    `👉 Send the account owner this one-click link — it opens Google's consent screen directly; they must tick the Gmail box there (Google leaves a permission that was declined before unchecked): ` +
     `${reconnectLink(resolved.targetEmail)} — then retry once after they confirm. ` +
-    `Non-Gmail tools (sheets, docs) are unaffected.`,
+    `Non-Gmail tools (sheets, docs) are unaffected.` +
+    (emailed ? `\n${emailed}` : ''),
   );
+}
+
+/**
+ * The owner notice for a scope-missing refusal (fourth trigger, 2026-09-25):
+ * the same ledger, sender, caps, breaker and one-per-episode rule as the
+ * dead-grant notice, keyed on the mailbox OWNER (for a delegated mailbox
+ * that is the grantor, CC the key owner). Returns the 📧 line to append to
+ * the refusal, or '' when nothing a human can act on happened. Best-effort:
+ * every failure degrades to the refusal exactly as it was. Never reached by
+ * the quiet list_accounts probes — they do not call the denial helpers.
+ */
+async function notifyOwnerOfMissingScope(
+  conn: ConnectionApproved, resolved: ResolvedAccount, reason: ScopeMissingReason,
+): Promise<string> {
+  const notify = await notifyOwnerOfDeadGrant({
+    owner: resolved.owner, accountEmail: resolved.targetEmail, reason,
+    keyOwnerEmail: conn.user.email, agentLabel: agentLabel(conn),
+    reconnectUrl: reconnectLink(resolved.targetEmail), dashboardUrl: DASHBOARD_URL,
+  });
+  addToolCallProps({
+    notify_status: notify.status,
+    ...(notify.failureCount !== null ? { grant_failure_count: notify.failureCount } : {}),
+    ...(notify.daysDead !== null ? { grant_days_dead: notify.daysDead } : {}),
+  });
+  return deadGrantDenialLine(notify.status, {
+    notifiedAt: notify.notifiedAt,
+    delegated: resolved.targetEmail.toLowerCase() !== conn.user.email.toLowerCase(),
+    ccDelegate: notify.ccDelegate,
+  });
 }
 
 /**
@@ -2092,7 +2130,7 @@ function gmailScopeDenial(conn: ConnectionApproved, resolved: ResolvedAccount) {
  * gmailScopeDenial above. Applied by every typed per-file tool (sheets_*,
  * docs_*, comments_*) and by non-Gmail raw google_api_get/modify calls.
  */
-function driveFileScopeDenial(conn: ConnectionApproved, resolved: ResolvedAccount) {
+async function driveFileScopeDenial(conn: ConnectionApproved, resolved: ResolvedAccount) {
   if (resolved.hasDriveFileScope !== false) return null;
   addToolCallProps({ failure_reason: 'drive_file_scope_missing', denial_code: 'drive_file_scope_missing', google_scope_missing: true });
   captureServerEvent(conn.user.clerkUserId, 'google_scope_missing', {
@@ -2100,14 +2138,19 @@ function driveFileScopeDenial(conn: ConnectionApproved, resolved: ResolvedAccoun
     scope: 'drive_file',
     account_delegated: resolved.targetEmail.toLowerCase() !== conn.user.email.toLowerCase(),
   });
+  const emailed = await notifyOwnerOfMissingScope(conn, resolved, 'drive_file_scope_missing');
+  // Causes in measured order (9 of 9 in the week to 2026-09-25 had ONE
+  // sign-in ever, so "signed in again" — the old first cause — was wrong for
+  // all of them). STOP leads, as in gmailScopeDenial: one agent sent six
+  // identical calls in eight minutes against the old text.
   return textResult(
     `🚫 Not available yet: the Google account '${resolved.targetEmail}' is connected WITHOUT the Google Drive file permission (drive.file) — ` +
-    `most likely the owner signed in to FGAC with Google again since connecting (a plain sign-in resets the Drive permission), ` +
-    `the account was connected before FGAC requested it, or the Drive checkbox was left unchecked on Google's consent screen. ` +
-    `Every Sheets, Docs, Slides, and Drive call on this account will fail until it is reconnected; retrying will NOT help. ` +
-    `👉 Send the account owner this one-click link — it opens Google's consent screen directly; they must approve Drive file access there: ` +
+    `most likely the account was connected before FGAC asked for it, or the Google Drive checkbox was left unchecked on Google's consent screen. ` +
+    `STOP — every Sheets, Docs, Slides, and Drive call on this account will fail until it is reconnected; retrying will NOT help. ` +
+    `👉 Send the account owner this one-click link — it opens Google's consent screen directly; they must tick the Google Drive box there (Google leaves a permission that was declined before unchecked): ` +
     `${reconnectLink(resolved.targetEmail)} — then retry once after they confirm. ` +
-    `Gmail tools are unaffected.`,
+    `Gmail tools are unaffected.` +
+    (emailed ? `\n${emailed}` : ''),
   );
 }
 
@@ -2300,10 +2343,10 @@ async function executeRawGoogleCall(
   // the scope fails deterministically at Google, so calling it is pointless —
   // and its 403 body often gives the agent nothing to act on.
   if (family === 'gmail') {
-    const scopeDenial = gmailScopeDenial(conn, resolved);
+    const scopeDenial = await gmailScopeDenial(conn, resolved);
     if (scopeDenial) return scopeDenial;
   } else {
-    const scopeDenial = driveFileScopeDenial(conn, resolved);
+    const scopeDenial = await driveFileScopeDenial(conn, resolved);
     if (scopeDenial) return scopeDenial;
   }
 
@@ -2659,7 +2702,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = gmailScopeDenial(conn, resolved);
+        const scopeDenial = await gmailScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const params = new URLSearchParams();
@@ -2697,7 +2740,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = gmailScopeDenial(conn, resolved);
+        const scopeDenial = await gmailScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         // Read-time enforcement: label blacklist/whitelist + content blacklist
@@ -2756,7 +2799,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = gmailScopeDenial(conn, resolved);
+        const scopeDenial = await gmailScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         // Read-time enforcement on the parent message (labels + content rules):
@@ -2933,7 +2976,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = gmailScopeDenial(conn, resolved);
+        const scopeDenial = await gmailScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         // Enforce send whitelist
@@ -2964,7 +3007,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = gmailScopeDenial(conn, resolved);
+        const scopeDenial = await gmailScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const result = await gmailFetch(resolved.token, resolved.targetEmail, 'labels');
@@ -2988,7 +3031,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        const scopeDenial = await driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const sid = resolveDriveFileId('sheet', spreadsheetId);
@@ -3024,7 +3067,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        const scopeDenial = await driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const sid = resolveDriveFileId('sheet', spreadsheetId);
@@ -3058,7 +3101,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        const scopeDenial = await driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const sid = resolveDriveFileId('sheet', spreadsheetId);
@@ -3093,7 +3136,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        const scopeDenial = await driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const sid = resolveDriveFileId('sheet', spreadsheetId);
@@ -3127,7 +3170,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        const scopeDenial = await driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const sid = resolveDriveFileId('sheet', spreadsheetId);
@@ -3159,7 +3202,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        const scopeDenial = await driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const did = resolveDriveFileId('doc', documentId);
@@ -3195,7 +3238,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        const scopeDenial = await driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const did = resolveDriveFileId('doc', documentId);
@@ -3244,7 +3287,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        const scopeDenial = await driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const pid = resolveDriveFileId('slide', presentationId);
@@ -3280,7 +3323,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        const scopeDenial = await driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const pid = resolveDriveFileId('slide', presentationId);
@@ -3310,7 +3353,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        const scopeDenial = await driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const fid = resolveDriveFileId(null, fileId);
@@ -3345,7 +3388,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        const scopeDenial = await driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const fid = resolveDriveFileId(null, fileId);

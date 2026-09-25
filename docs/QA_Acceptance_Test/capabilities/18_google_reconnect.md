@@ -264,3 +264,124 @@
   scripts/test-google-grant-notify-copy.ts` pins the copy, the Cc header and
   the one-per-episode rule — record the assertion as covered by unit test,
   with the reason, not as a pass
+
+### A14: A missing scope emails the mailbox owner exactly once per episode, with "tick the box"
+- **Why**: the scope pre-flight refusals (`gmailScopeDenial` /
+  `driveFileScopeDenial`) carried the owner-bound reconnect link for the
+  agent only. Measured 7 d to 2026-09-25 (production): nine people refused for
+  `drive.file`, two started a reconnect, one verified, none had a later
+  Sheets/Docs success — eight of the nine had ONE sign-in ever and were
+  connected before `drive.file` joined the sign-in scope set, so the
+  permission had never been asked of them. Same sender fixture and cap
+  headroom rules as A13; without the sender every refusal carries
+  `notify_status: 'disabled'`, the ledger row is still written, and the
+  assertion is `blocked`, not `skip`
+- **Fixture**: a QA account whose live token LACKS `drive.file` while its
+  grant is otherwise alive. Arrange it through the real flow, in two steps,
+  because Google only offers per-scope checkboxes when at least one requested
+  scope is NOT already granted (measured 2026-09-25, both QA accounts, dev
+  client: an account holding every scope gets the read-only
+  `consentsummary` page — "accounts.dev already has some access", zero
+  checkboxes — however many times "Reconnect Google" runs). Step 1 is the
+  A12 Google-side removal: Google Account → Security → Third-party apps →
+  "Dev FGAC AI" → Remove access. **The harness classifies that click as an
+  irreversible deletion and refuses it for a runner** (2026-09-25), so a
+  human, or a session with that approval, does step 1 and says so. Step 2:
+  as the QA user, click "Reconnect Google" on `/dashboard/accounts`; Google
+  now shows the consent screen with checkboxes — UNTICK the Google Drive box
+  (leave Gmail ticked), continue, and return — the page renders the A7
+  failure state naming `drive.file`, and `GET /api/auth/google-picker-token`
+  returns `hasDriveFileScope: false`. (A Google surface: `computer` clicks,
+  never JS clicks.) Do NOT touch Clerk or the database. For the Gmail leg,
+  untick Gmail instead. Restore the grant at the end (A1, both boxes ticked)
+  so the dev grant is left healthy. Until step 1 is arranged, the ledger
+  episode rule and the scope email are covered by `npx tsx
+  scripts/test-grant-failure-episodes.ts` (branch DB, throwaway
+  example.com owner, captured send) — record A14 as `blocked` with that
+  script's result, never as `skip`
+- Own-mailbox leg: as the agent, call `sheets_get_spreadsheet` (any id) on
+  that account three times a few seconds apart
+- **Expected**: every call is the 🚫 `drive_file_scope_missing` refusal —
+  opening "Not available yet: the Google account '<email>' is connected
+  WITHOUT the Google Drive file permission (drive.file) — most likely the
+  account was connected before FGAC asked for it, or the Google Drive checkbox
+  was left unchecked", then "STOP — every Sheets, Docs, Slides, and Drive call
+  … retrying will NOT help", the one-click link, "they must tick the Google
+  Drive box there (Google leaves a permission that was declined before
+  unchecked)", "Gmail tools are unaffected" — and it must NOT lead with
+  "signed in to FGAC with Google again" (the old first cause; 9 of 9 refused
+  accounts in the week to 2026-09-25 had one sign-in ever). The FIRST
+  additionally ends with the 📧 line "FGAC has also emailed the user just now
+  with this reconnect link — do not re-ask"; the second and third say FGAC
+  emailed the user "at <date HH:MM UTC>" and that no further email is sent
+  while it keeps failing. The sender's inbox holds exactly ONE message to the
+  account, From `FGAC <support address>`, NO Cc, subject `Google access to
+  <address> is missing the Google Drive file permission — your agent is being
+  refused`, plain text, body opening "<agent> has been refused today (first at
+  <date HH:MM UTC>) because the Google account below is connected to FGAC
+  without a permission it needs:", the address on its own line, the cause
+  paragraph ("connected before FGAC asked for that permission; the other cause
+  is the Google Drive checkbox being left unchecked … Gmail is unaffected"),
+  "Every Sheets, Docs, Slides and Drive call on this account fails until the
+  permission is granted, and the agent has been told to stop retrying", the
+  SAME `?reconnect=1&for=<address>` link as the refusal, "tick the box next to
+  Google Drive before you continue — Google leaves a permission that was
+  declined before unchecked", "Open the link while signed in to FGAC as
+  <address>", "do nothing — the agent stays refused", and "This is the only
+  email FGAC will send about this permission unless it is granted and goes
+  missing again" — never a promise of a reminder. A `gmail_list` on the same
+  account still succeeds (Gmail is unaffected) and sends nothing
+- Delegated leg: as the OTHER account's agent, call `docs_read_document` with
+  `account` = the scope-less mailbox, twice
+- **Expected**: the refusal is the same text, and the FIRST ends with "FGAC
+  has also emailed the owner of the mailbox (and copied this user) just now";
+  the second says it was emailed "at <date HH:MM UTC>". The sender's inbox
+  holds ONE new message To the mailbox AND Cc the key owner, subject `Google
+  access to <address> is missing the Google Drive file permission — an agent
+  you delegated to is being refused`, body opening "<agent>, run by <key
+  owner> under the mailbox access you delegated, has been refused …", and the
+  A13 paragraph addressed to the key owner ("copied on this email … nothing on
+  your own Accounts page fixes it"). If the own-mailbox leg already emailed
+  this owner for the same mailbox, the delegated leg's first refusal says
+  "emailed … at <time>" and sends nothing — the ledger is per (owner,
+  mailbox), not per key or scope
+- **Gmail leg** (fixture with Gmail unticked instead): `gmail_list` is the 🚫
+  `gmail_scope_missing` refusal ending "they must tick the Gmail box there",
+  the FIRST with the 📧 line; ONE email with subject `… is missing the Gmail
+  permission — your agent is being refused`, cause "the Gmail checkbox was
+  left unchecked … Sheets, Docs and Slides are unaffected", "Every Gmail call
+  on this account fails", "tick the box next to Gmail". A mailbox missing BOTH
+  scopes is emailed ONCE — whichever refusal comes first — and the other
+  scope's refusals read `already_sent` (one episode class)
+- **Class change**: with the A13 fixture (dead grant) emailed for this
+  mailbox inside the last 14 d, arrange the A14 fixture on the same mailbox
+  (reconnect with the Drive box unticked) and call `sheets_get_spreadsheet`
+- **Expected**: the first scope refusal carries `notify_status: 'sent'` and a
+  SECOND email goes out — the reconnect the owner just ran is a new event and
+  this email is the one that says "tick the box"; the ledger row's
+  `last_reason` flips to `drive_file_scope_missing`, `failure_count` resets to
+  1, `first_failed_at` to now, `notified_count` to 1. The reverse flip (scope
+  → dead) behaves the same. Two refusals of the SAME class inside 14 d never
+  send twice (A13's rule, unchanged)
+- **Ledger** (read-only query on the branch DB): one `google_grant_failures`
+  row per (owner, mailbox), `last_reason` = `drive_file_scope_missing` (or
+  `gmail_scope_missing`), `failure_count` = total refusals across both legs,
+  `notified_count` 1, `notified_at` set once
+- **Dashboard**: signed in as the scope-less account, `/dashboard` shows the
+  amber card "Action Required: Grant Google Drive file access" whose body says
+  the account was "connected before FGAC asked for it, or the Drive box was
+  left unchecked" and "tick the Google Drive box" — never leading with "after
+  signing in with Google again"; `/dashboard/accounts?reconnected=1` after a
+  pass that still lacks the scope (A7) reads "Google leaves a permission that
+  was declined before UNCHECKED on the consent screen … tick every box before
+  you continue"
+- **Cap / breaker / never**: exactly as A13 — the 3-a-day cap is shared across
+  all three ledgers and the two classes (`skipped_rate_capped`, row keeps
+  `notified_at` NULL); the 10-per-hour global breaker is covered by unit test
+  (`npx tsx scripts/test-google-grant-notify-copy.ts` pins the scope copy,
+  subjects, class rule and `missing_scope` join); never emails from the quiet
+  `list_accounts` probes (five `list_accounts` calls: `drive_file: 'missing'`
+  with a `reconnect_url`, no new message, no ledger change); never emails
+  from the proxy-path Gmail scope refusal; never sends through a user's Google
+  grant; never asserts on a production account's inbox
+

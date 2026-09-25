@@ -17,7 +17,8 @@
  * Run: npx tsx scripts/test-google-grant-notify-copy.ts (part of `npm run mcp:lint`).
  */
 import {
-  daysDead, deadGrantCause, deadGrantDenialLine, deadGrantEmailBody, deadGrantEmailSubject, grantNoticeDue, normalizeAccountEmail,
+  daysDead, deadGrantCause, deadGrantDenialLine, deadGrantEmailBody, deadGrantEmailSubject, grantNoticeDue, grantNoticeClass,
+  isScopeMissingReason, missingScopeOf, normalizeAccountEmail,
   GRANT_DEAD_EPISODE_GAP_MS, GRANT_DEAD_GLOBAL_HOURLY_MAX, GRANT_DEAD_NOTICES_PER_EPISODE,
 } from '../src/lib/googleGrantNotifyCopy';
 import { approvalEmailRaw, NOTIFY_MAX_PER_DAY } from '../src/lib/approvalNotifyCopy';
@@ -52,11 +53,11 @@ check('never negative', daysDead(new Date(now.getTime() + DAY), now) === 0);
 check('account email lower-cased and trimmed', normalizeAccountEmail('  Owner@Example.COM ') === 'owner@example.com');
 
 console.log('subject');
-const ownSubject = deadGrantEmailSubject({ accountEmail: 'owner@example.com', delegated: false });
+const ownSubject = deadGrantEmailSubject({ accountEmail: 'owner@example.com', delegated: false, reason: 'grant_revoked' });
 check('own-mailbox subject names the account and the agent being refused', /owner@example\.com/.test(ownSubject) && /your agent is being refused/.test(ownSubject));
-const delSubject = deadGrantEmailSubject({ accountEmail: 'owner@example.com', delegated: true });
+const delSubject = deadGrantEmailSubject({ accountEmail: 'owner@example.com', delegated: true, reason: 'refresh_failed' });
 check('delegated subject says "an agent you delegated to"', /is disconnected — an agent you delegated to is being refused/.test(delSubject));
-check('subject strips CR/LF from the account', !/[\r\n]/.test(deadGrantEmailSubject({ accountEmail: 'x\r\nBcc: victim@example.com', delegated: false })));
+check('subject strips CR/LF from the account', !/[\r\n]/.test(deadGrantEmailSubject({ accountEmail: 'x\r\nBcc: victim@example.com', delegated: false, reason: 'no_token' })));
 
 console.log('cause copy mirrors the agent-facing taxonomy');
 check('grant_revoked names Google revoking / password change', /revoked/.test(deadGrantCause('grant_revoked')) && /password/.test(deadGrantCause('grant_revoked')));
@@ -117,6 +118,38 @@ check('Cc header present when given, after To', /\r\nTo: owner@example\.com\r\nC
 const rawNoCc = approvalEmailRaw({ from: 'support@fgac.ai', to: 'owner@example.com', cc: null, subject: 'S', body: 'B' });
 check('no Cc header when null', !/Cc:/.test(rawNoCc));
 check('Cc cannot inject a header', !/\r\nBcc/.test(approvalEmailRaw({ from: 'support@example.com', to: 'owner@example.com', cc: 'delegate@example.org\r\nBcc: victim@example.com', subject: 'S', body: 'B' })));
+
+console.log('scope-missing (fourth trigger, 2026-09-25)');
+check('the two scope reasons are the scope class, the token classes are dead', grantNoticeClass('drive_file_scope_missing') === 'scope' && grantNoticeClass('gmail_scope_missing') === 'scope' && grantNoticeClass('grant_revoked') === 'dead' && grantNoticeClass('no_token') === 'dead');
+check('isScopeMissingReason accepts only the two denial codes', isScopeMissingReason('gmail_scope_missing') && isScopeMissingReason('drive_file_scope_missing') && !isScopeMissingReason('refresh_failed') && !isScopeMissingReason(''));
+check('missing_scope joins to the google_scope_missing scope value', missingScopeOf('gmail_scope_missing') === 'gmail' && missingScopeOf('drive_file_scope_missing') === 'drive_file');
+check('drive cause leads with the pre-drive.file connection, then the checkbox, never a sign-in', /connected before FGAC asked/.test(deadGrantCause('drive_file_scope_missing')) && /checkbox/.test(deadGrantCause('drive_file_scope_missing')) && !/sign/.test(deadGrantCause('drive_file_scope_missing')));
+check('drive cause says Gmail is unaffected', /Gmail is unaffected/.test(deadGrantCause('drive_file_scope_missing')));
+check('gmail cause names the unchecked Gmail checkbox and spares Sheets/Docs', /Gmail checkbox/.test(deadGrantCause('gmail_scope_missing')) && /Sheets, Docs and Slides are unaffected/.test(deadGrantCause('gmail_scope_missing')));
+const driveSubject = deadGrantEmailSubject({ accountEmail: 'owner@example.com', delegated: false, reason: 'drive_file_scope_missing' });
+check('drive subject says the Drive file permission is missing, not "disconnected"', driveSubject === 'Google access to owner@example.com is missing the Google Drive file permission — your agent is being refused');
+check('gmail delegated subject names the Gmail permission and the delegation', deadGrantEmailSubject({ accountEmail: 'owner@example.com', delegated: true, reason: 'gmail_scope_missing' }) === 'Google access to owner@example.com is missing the Gmail permission — an agent you delegated to is being refused');
+const driveBody = deadGrantEmailBody({
+  accountEmail: 'owner@example.com', reason: 'drive_file_scope_missing', delegated: false, keyOwnerEmail: 'owner@example.com',
+  agentLabel: 'Claude', reconnectUrl: reconnect, failureCount: 1, firstFailedAt: new Date('2026-09-25T13:20:00Z'),
+  dashboardUrl: 'https://fgac.ai/', supportAddress: 'support@fgac.ai', now: new Date('2026-09-25T13:25:00Z'),
+});
+check('scope body opens with the permission framing, not "can no longer reach Google"', driveBody.startsWith('Claude has been refused today (first at 2026-09-25 13:20 UTC) because the Google account below is connected to FGAC without a permission it needs:') && !/can no longer reach Google/.test(driveBody));
+check('scope body names the surfaces that fail and says the agent was told to stop', /Every Sheets, Docs, Slides and Drive call on this account fails until the permission is granted, and the agent has been told to stop retrying/.test(driveBody));
+check('scope body carries the same reconnect link', driveBody.includes(`\n${reconnect}\n`));
+check('scope body tells the owner to TICK the Google Drive box and why', /tick the box next to Google Drive before you continue/.test(driveBody) && /leaves a permission that was declined before unchecked/.test(driveBody));
+check('scope body says who may open the link', /Open the link while signed in to FGAC as owner@example.com/.test(driveBody));
+check('scope body: only email unless granted and lost again; decline path is do nothing', /only email FGAC will send about this permission unless it is granted and goes missing again/.test(driveBody) && /do nothing — the agent stays refused/.test(driveBody));
+check('scope body never promises a repeat', !/again only if|at most|in a week|reminder/.test(driveBody));
+const gmailDel = deadGrantEmailBody({
+  accountEmail: 'owner@example.com', reason: 'gmail_scope_missing', delegated: true, keyOwnerEmail: 'delegate@example.org',
+  agentLabel: 'Nightly digest', reconnectUrl: reconnect, failureCount: 11, firstFailedAt: new Date(now.getTime() - 11 * DAY),
+  dashboardUrl: 'https://fgac.ai', supportAddress: 'support@fgac.ai', now,
+});
+check('gmail delegated body: first line names the delegate, "11 times … 11 days", the permission framing', gmailDel.startsWith('Nightly digest, run by delegate@example.org under the mailbox access you delegated, has been refused 11 times since') && /11 days so far because the Google account below is connected to FGAC without a permission it needs:/.test(gmailDel));
+check('gmail delegated body says Every Gmail call fails and to tick the Gmail box', /Every Gmail call on this account fails/.test(gmailDel) && /tick the box next to Gmail before you continue/.test(gmailDel));
+check('gmail delegated body keeps the delegate paragraph', /delegate@example\.org \(copied on this email\): this is the mailbox owner's grant, not yours/.test(gmailDel));
+check('dead-grant body is unchanged by the scope work', /can no longer reach Google on behalf of:/.test(own) && !/tick the box/.test(own));
 
 console.log('denial line');
 check('sent, own mailbox → emailed the user, do not re-ask', /📧 FGAC has also emailed the user just now/.test(deadGrantDenialLine('sent', { delegated: false })) && /do not re-ask/.test(deadGrantDenialLine('sent', { delegated: false })));
