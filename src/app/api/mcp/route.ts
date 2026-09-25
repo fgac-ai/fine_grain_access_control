@@ -36,6 +36,7 @@ import { normalizeToolArguments, describeArgumentFailure, rewriteValidationFailu
 import { cleanResourceName } from '@/lib/pickerRecoveryCopy';
 import { GOOGLE_FETCH_TIMEOUT_MS, CLERK_TOKEN_TIMEOUT_MS, withTimeout, isUpstreamTimeout } from '@/lib/upstreamTimeouts';
 import { classifyMcpClient, classifyTransportRejection, installFingerprint, parseInitializeClientInfo, parseRpcEnvelope, parseValidationFailure, normalizeValidationIssue, resourceIdHash, validationFailureProps, type McpClientInfo } from '@/lib/mcpClientSignals';
+import { classifyClientNameTransition, nextConnectionClientName, toolCallClientName } from '@/lib/mcpClientName';
 import { recordEagerResolve, shouldSkipEagerResolve } from '@/lib/connectionTouchMemo';
 import { after } from 'next/server';
 import { notifyOwnerOfAccountRefusal, notifyOwnerOfApprovalLinks, notifyOwnerOfDeadGrant, type NotifyLink } from '@/lib/approvalNotify';
@@ -252,29 +253,40 @@ async function resolveConnection(
     }
   }
 
-  // Backfill-on-touch: rows created before initialize-time capture (or by a
-  // tool-handler resolve losing the race) hold the opaque client_id as their
-  // name; the next initialize replaces it. Never overwrites a real name.
-  const backfillName =
-    clientHint?.name && connection.clientName === connection.clientId
-      ? { clientName: clientHint.name }
-      : {};
+  // Name-on-touch: the row is almost never created by the initialize POST
+  // itself — the client's concurrent SSE GET (no body, no clientInfo) usually
+  // wins the insert race — so it starts with the opaque client_id and the
+  // handshakes that follow name it. Which handshake gets to is the rule in
+  // src/lib/mcpClientName.ts: an unnamed row takes any name, the directory's
+  // connect-time inspector (`Anthropic/Toolbox`) yields to the first product
+  // name, and after that the most recent product handshake wins — claude.ai
+  // and Claude Code share one registration, so the row tracks whichever is
+  // in use. Until 2026-09-24 the first name stuck, which left 61% of a
+  // week's tool calls labelled with the inspector (docs/monitoring.md 7.32).
+  const nextName = nextConnectionClientName({
+    current: connection.clientName,
+    clientId,
+    incoming: clientHint?.name,
+  });
   await db.update(agentConnections)
-    .set({ lastUsedAt: new Date(), ...backfillName })
+    .set({ lastUsedAt: new Date(), ...(nextName ? { clientName: nextName } : {}) })
     .where(eq(agentConnections.id, connection.id));
-  if (backfillName.clientName) {
-    connection.clientName = backfillName.clientName;
-    // The row is almost never created by the initialize POST itself — the
-    // client's concurrent SSE GET (no body, no clientInfo) usually wins the
-    // insert race — so mcp_connection_created fires nameless (measured
-    // 2026-08-29: 0 of 10 events since 08-27 carried client_name). This
-    // one-time event, on the opaque-id → product-name transition, is the
-    // reliable connection→client mapping; join on connection_id.
+  if (nextName) {
+    const previousName = connection.clientName;
+    connection.clientName = nextName;
+    // One event per name change — the connection→product mapping to join on
+    // connection_id. `transition` = 'first' (placeholder → a name; the
+    // directory's inspector here means "arrived via the directory"),
+    // 'inspector_to_product' (the real client's first handshake after the
+    // inspection), or 'product_switch' (a shared registration changing
+    // hands). The LATEST event per connection is the product in use.
     captureServerEvent(user.clerkUserId, 'mcp_connection_client_identified', {
       connection_id: connection.id,
       client_id: clientId,
-      client_name: clientHint?.name,
+      client_name: nextName,
       client_version: clientHint?.version,
+      previous_client_name: previousName && previousName !== clientId ? previousName : undefined,
+      transition: classifyClientNameTransition(previousName, clientId),
     });
   }
 
@@ -1789,10 +1801,15 @@ async function requireApproval(authInfo: AuthInfo | undefined): Promise<Connecti
   if (!result.authorized) {
     return textResult(pendingMessage(result));
   }
-  // Client-product attribution: today clientName is usually the opaque DCR
-  // client_id (only cli-token registrations send a real name), but stamping
-  // it means events light up as soon as DCR name capture improves.
-  if (result.clientName) addToolCallProps({ client_name: result.clientName });
+  // Client-product attribution: the connection's current name (the most
+  // recent product handshake — see src/lib/mcpClientName.ts), except that the
+  // Claude Code CLI's own user agent is the one per-request product signal a
+  // stateless tool call carries, so it overrides the row.
+  const clientName = toolCallClientName({
+    connectionName: result.clientName,
+    userAgent: authInfo?.extra?.userAgent as string | undefined,
+  });
+  if (clientName) addToolCallProps({ client_name: clientName });
   return result;
 }
 
@@ -4014,9 +4031,10 @@ const verifyMcpAuth = async (req: Request, bearerToken?: string) => {
       // The touch is four sequential Neon round trips whose result nothing
       // here consumes (tool handlers re-resolve in requireApproval). Skip it
       // while the same client was touched within the memo window — an
-      // initialize still runs until the row's product name is backfilled.
+      // initialize still runs whenever the name it reports would change the
+      // row (first name, inspector → product, product switch).
       const memoOn = connectionTouchMemoEnabled();
-      if (memoOn && shouldSkipEagerResolve(userId, clientId, !!clientInfo)) {
+      if (memoOn && shouldSkipEagerResolve(userId, clientId, clientInfo?.name)) {
         connectionResolve = 'skipped';
       } else {
         const t0 = performance.now();
@@ -4024,7 +4042,7 @@ const verifyMcpAuth = async (req: Request, bearerToken?: string) => {
           const result = await resolveConnection(userId, clientId, clientInfo, profileSlug);
           connectionResolve = 'ran';
           if (memoOn && result.authorized) {
-            recordEagerResolve(userId, clientId, result.clientName !== clientId);
+            recordEagerResolve(userId, clientId, result.clientName);
           }
         } catch (err) {
           connectionResolve = 'error';

@@ -50,9 +50,14 @@ reports during the §7 verification step); Smithery **proxies** every request th
 installs show a Smithery user agent. PulseMCP, Glama and awesome-lists cannot
 be told apart from organic (any client). Baseline in the 30 days to
 2026-09-10, before any registry listing: `claude-code` (129 users),
-`Anthropic/ClaudeAI` (179), `Anthropic/Toolbox` (64 — directory inspection),
-`sheet-add-in` (9); **no VS Code, Cursor, Cline or Smithery client at all**, so
-any of those appearing after 2026-09-10 is registry-driven.
+`Anthropic/ClaudeAI` (179), `Anthropic/Toolbox` (64 — the directory's
+connect-time inspection, not a product: it handshakes once per new
+connection and never calls a tool, so on `mcp_client_initialize` it is a
+count of directory connects, and on `$mcp_tool_call` rows before PR
+#162 it is a mislabel to fold into `Anthropic/ClaudeAI` —
+`docs/monitoring.md` 7.32), `sheet-add-in` (9); **no VS Code, Cursor, Cline
+or Smithery client at all**, so any of those appearing after 2026-09-10 is
+registry-driven.
 
 Client families measured so far (the strings as sent; `classifyMcpClient` in
 `src/lib/mcpClientSignals.ts` stamps `client_class_signal = 'product:<family>'`
