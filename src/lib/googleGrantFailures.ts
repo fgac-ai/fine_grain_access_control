@@ -17,6 +17,7 @@ import { db } from '@/db';
 import { googleGrantFailures } from '@/db/schema';
 import { and, eq, isNull, lt, sql } from 'drizzle-orm';
 import { recentNotificationCountSql } from './approvalRequests';
+import { recipientUndeliverableSql } from './emailBounces';
 import {
   GRANT_DEAD_EPISODE_GAP_MS, GRANT_DEAD_GLOBAL_HOURLY_MAX, GRANT_DEAD_NOTICES_PER_EPISODE, grantNoticeDue, normalizeAccountEmail,
   type DeadGrantReason,
@@ -32,6 +33,11 @@ export interface GrantFailureRow {
   failureCount: number;
   notifiedCount: number;
   notifiedAt: Date | null;
+  /** Bounce mark from the sweep (src/lib/emailBounces.ts): when a notice to
+   * this mailbox came back permanently undeliverable, and how. */
+  undeliverableAt: Date | null;
+  undeliverableClass: string | null;
+  undeliverableStatus: string | null;
 }
 
 /**
@@ -73,6 +79,9 @@ export async function recordGrantFailure(opts: {
         failureCount: googleGrantFailures.failureCount,
         notifiedCount: googleGrantFailures.notifiedCount,
         notifiedAt: googleGrantFailures.notifiedAt,
+        undeliverableAt: googleGrantFailures.undeliverableAt,
+        undeliverableClass: googleGrantFailures.undeliverableClass,
+        undeliverableStatus: googleGrantFailures.undeliverableStatus,
       });
     return row ?? null;
   } catch (err) {
@@ -92,12 +101,13 @@ function recentGlobalNoticeCountSql() {
  * bumps `notified_count` atomically, and only while (a) the episode has not
  * been notified, (b) the owner is under `maxPerDay` reminder emails in the
  * last 24 h across all three ledgers, and (c) fewer than
- * GRANT_DEAD_GLOBAL_HOURLY_MAX notices went to anyone in the last hour. One
- * statement, so two refusals landing together cannot both claim.
+ * GRANT_DEAD_GLOBAL_HOURLY_MAX notices went to anyone in the last hour, and
+ * (d) the recipient mailbox is not on the bounce ledger. One statement, so
+ * two refusals landing together cannot both claim.
  */
-export async function claimGrantFailureNotification(id: string, userId: string, maxPerDay: number): Promise<
+export async function claimGrantFailureNotification(id: string, userId: string, maxPerDay: number, recipient: string): Promise<
   { claimed: true; notifiedAt: Date | null }
-  | { claimed: false; notifiedAt: Date | null; reason: 'already' | 'capped' | 'global_capped' | 'missing' | 'error' }
+  | { claimed: false; notifiedAt: Date | null; reason: 'already' | 'capped' | 'global_capped' | 'undeliverable' | 'missing' | 'error' }
 > {
   try {
     const [row] = await db.update(googleGrantFailures)
@@ -106,6 +116,7 @@ export async function claimGrantFailureNotification(id: string, userId: string, 
         eq(googleGrantFailures.id, id),
         isNull(googleGrantFailures.notifiedAt),
         lt(googleGrantFailures.notifiedCount, GRANT_DEAD_NOTICES_PER_EPISODE),
+        sql`NOT ${recipientUndeliverableSql(recipient)}`,
         sql`${recentNotificationCountSql(userId)} < ${maxPerDay}`,
         sql`${recentGlobalNoticeCountSql()} < ${GRANT_DEAD_GLOBAL_HOURLY_MAX}`,
       ))
@@ -115,6 +126,7 @@ export async function claimGrantFailureNotification(id: string, userId: string, 
       notifiedAt: googleGrantFailures.notifiedAt,
       notifiedCount: googleGrantFailures.notifiedCount,
       globalRecent: recentGlobalNoticeCountSql(),
+      undeliverable: recipientUndeliverableSql(recipient),
     })
       .from(googleGrantFailures)
       .where(eq(googleGrantFailures.id, id))
@@ -122,6 +134,9 @@ export async function claimGrantFailureNotification(id: string, userId: string, 
     if (!existing) return { claimed: false, notifiedAt: null, reason: 'missing' };
     if (existing.notifiedAt || !grantNoticeDue(existing)) {
       return { claimed: false, notifiedAt: existing.notifiedAt, reason: 'already' };
+    }
+    if (existing.undeliverable === true || existing.undeliverable === 't') {
+      return { claimed: false, notifiedAt: null, reason: 'undeliverable' };
     }
     if (Number(existing.globalRecent) >= GRANT_DEAD_GLOBAL_HOURLY_MAX) {
       return { claimed: false, notifiedAt: null, reason: 'global_capped' };

@@ -57,7 +57,7 @@
  * auth-provider incident classifying every grant dead at once.
  */
 import { NextRequest } from 'next/server';
-import { POST as proxyPost } from '@/app/api/proxy/[...path]/route';
+import { GET as proxyGetRoute, POST as proxyPost } from '@/app/api/proxy/[...path]/route';
 import {
   accountRefusalEmailBody, accountRefusalEmailSubject, ACCOUNT_REFUSAL_NOTIFY_AFTER,
   approvalEmailBody, approvalEmailRaw, approvalEmailSubject, NOTIFY_MAX_PER_DAY, NOTIFY_MIN_GAP_MS,
@@ -72,6 +72,7 @@ import {
 import {
   daysDead, deadGrantEmailBody, deadGrantEmailSubject, type DeadGrantReason,
 } from './googleGrantNotifyCopy';
+import type { UndeliverableMark } from './emailBounces';
 import {
   claimApprovalNotification, getApprovalNotificationState, releaseApprovalNotification,
 } from './approvalRequests';
@@ -149,6 +150,37 @@ export async function proxySend(cfg: SenderConfig, raw: string): Promise<SendRes
   }
 }
 
+export type GetResult =
+  | { ok: true; json: unknown }
+  | { ok: false; status: number | null; error: string };
+
+/**
+ * The read twin of `proxySend`, for the bounce sweep
+ * (src/lib/emailBounceSweep.ts): a GET on FGAC's proxy API with the support
+ * profile's key, handled in-process by the same route — same auth, same read
+ * rules, same `proxy_request` analytics. The DSNs Gmail mails back to the
+ * envelope sender land in the mailbox that key sends from (the support
+ * address is a send-as alias on it), so this is FGAC reading FGAC's own
+ * mailbox through FGAC's own product. Never a user's grant.
+ */
+export async function proxyGet(cfg: SenderConfig, path: string[], query: Record<string, string> = {}): Promise<GetResult> {
+  try {
+    const qs = new URLSearchParams(query).toString();
+    const req = new NextRequest(`http://fgac.internal/api/proxy/${path.join('/')}${qs ? `?${qs}` : ''}`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${cfg.proxyKey}`, 'User-Agent': 'fgac-bounce-sweep' },
+    });
+    const res = await withTimeout(proxyGetRoute(req, { params: Promise.resolve({ path }) }), SEND_TIMEOUT_MS);
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      return { ok: false, status: res.status, error: `HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ''}` };
+    }
+    return { ok: true, json: await res.json() };
+  } catch (err) {
+    return { ok: false, status: null, error: err instanceof Error ? `${err.name}: ${err.message}` : String(err) };
+  }
+}
+
 /**
  * Consider emailing the owner about `links[0]` (plus any alternatives) on
  * this mint. Returns what happened so the denial text can say so; never
@@ -178,10 +210,11 @@ async function attempt(opts: NotifyOwnerOpts, primary: NotifyLink, sender: Sende
     return { status: 'not_due', notifiedAt: null };
   }
 
-  const claim = await claimApprovalNotification(primary.requestId, opts.owner.id, NOTIFY_MAX_PER_DAY);
+  const claim = await claimApprovalNotification(primary.requestId, opts.owner.id, NOTIFY_MAX_PER_DAY, opts.owner.email);
   if (!claim.claimed) {
     if (claim.reason === 'already') return { status: 'already_sent', notifiedAt: claim.notifiedAt };
     if (claim.reason === 'capped') return { status: 'skipped_rate_capped', notifiedAt: null };
+    if (claim.reason === 'undeliverable') return { status: 'skipped_undeliverable', notifiedAt: null };
     return { status: 'failed', notifiedAt: null };
   }
 
@@ -190,7 +223,7 @@ async function attempt(opts: NotifyOwnerOpts, primary: NotifyLink, sender: Sende
     agentLabel: opts.agentLabel, links: opts.links, times: state.mintCount, firstAskedAt: state.firstMintedAt,
     dashboardUrl: opts.dashboardUrl, supportAddress: sender.address,
   });
-  const raw = Buffer.from(approvalEmailRaw({ from: sender.address, to: opts.owner.email, subject, body })).toString('base64url');
+  const raw = Buffer.from(approvalEmailRaw({ from: sender.address, to: opts.owner.email, subject, body, notice: 'approval_link' })).toString('base64url');
   const sent = await (opts.send ?? proxySend)(sender, raw);
   if (!sent.ok) {
     console.error(`[approvalNotify] send ${sent.definite ? 'refused' : 'unconfirmed'}:`, sent.error);
@@ -268,9 +301,10 @@ async function attemptRefusalNotice(
   sender: SenderConfig,
 ): Promise<NotifyAccountRefusalResult> {
   const now = (opts.now ?? (() => new Date()))();
-  const claim = await claimAccountRefusalNotification(row.id, opts.owner.id, NOTIFY_MAX_PER_DAY);
+  const claim = await claimAccountRefusalNotification(row.id, opts.owner.id, NOTIFY_MAX_PER_DAY, opts.owner.email);
   if (!claim.claimed) {
     if (claim.reason === 'already') return { status: 'already_sent', notifiedAt: claim.notifiedAt, refusalCount: row.windowCount };
+    if (claim.reason === 'undeliverable') return { status: 'skipped_undeliverable', notifiedAt: null, refusalCount: row.windowCount };
     // The owner was emailed about a different refused value inside this
     // episode: no second email, and no 📧 line — the refusal text already
     // names this value and the fixes.
@@ -285,7 +319,7 @@ async function attemptRefusalNotice(
     ownerEmail: opts.owner.email, tool: opts.tool, times: row.windowCount, firstRefusedAt: row.windowStartedAt,
     dashboardUrl: opts.dashboardUrl, supportAddress: sender.address,
   });
-  const raw = Buffer.from(approvalEmailRaw({ from: sender.address, to: opts.owner.email, subject, body })).toString('base64url');
+  const raw = Buffer.from(approvalEmailRaw({ from: sender.address, to: opts.owner.email, subject, body, notice: 'account_refusal' })).toString('base64url');
   const sent = await (opts.send ?? proxySend)(sender, raw);
   if (!sent.ok) {
     console.error(`[approvalNotify] account-refusal send ${sent.definite ? 'refused' : 'unconfirmed'}:`, sent.error);
@@ -335,6 +369,9 @@ export interface NotifyDeadGrantResult {
   failureCount: number | null;
   /** Whole days since the episode began (null = ledger write failed). */
   daysDead: number | null;
+  /** Set when the mailbox is on the bounce ledger (`skipped_undeliverable`):
+   * the class and the DSN that put it there, for the agent's refusal text. */
+  undeliverable: UndeliverableMark | null;
 }
 
 /**
@@ -346,10 +383,20 @@ export interface NotifyDeadGrantResult {
 export async function notifyOwnerOfDeadGrant(opts: NotifyDeadGrantOpts): Promise<NotifyDeadGrantResult> {
   const delegated = opts.keyOwnerEmail.toLowerCase() !== opts.accountEmail.toLowerCase();
   const now = (opts.now ?? (() => new Date()))();
-  const base = { ccDelegate: delegated, failureCount: null, daysDead: null };
+  const base = { ccDelegate: delegated, failureCount: null, daysDead: null, undeliverable: null };
   const row = await recordGrantFailure({ userId: opts.owner.id, accountEmail: opts.accountEmail, reason: opts.reason });
   if (!row) return { status: 'failed', notifiedAt: null, ...base };
-  const known = { ccDelegate: delegated, failureCount: row.failureCount, daysDead: daysDead(row.firstFailedAt, now) };
+  const known = { ccDelegate: delegated, failureCount: row.failureCount, daysDead: daysDead(row.firstFailedAt, now), undeliverable: null };
+  // The mailbox bounced a previous notice as gone or rejecting (the sweep
+  // marked this row): nothing is sent, no claim, no budget spent — and the
+  // caller replaces the reconnect text with the truth. Checked before the
+  // sender, so the mark is honoured even where the sender is off.
+  if (row.undeliverableAt && (row.undeliverableClass === 'mailbox_gone' || row.undeliverableClass === 'rejected')) {
+    return {
+      status: 'skipped_undeliverable', notifiedAt: row.notifiedAt, ...known,
+      undeliverable: { bounceClass: row.undeliverableClass, dsnStatus: row.undeliverableStatus ?? '', bouncedAt: row.undeliverableAt },
+    };
+  }
   const sender = opts.sender === undefined ? senderConfig() : opts.sender;
   if (!sender) return { status: 'disabled', notifiedAt: null, ...known };
   if (!grantNoticeDue(row)) return { status: 'already_sent', notifiedAt: row.notifiedAt, ...known };
@@ -367,12 +414,16 @@ async function attemptDeadGrantNotice(
   sender: SenderConfig,
   delegated: boolean,
   now: Date,
-  known: { ccDelegate: boolean; failureCount: number; daysDead: number },
+  known: { ccDelegate: boolean; failureCount: number; daysDead: number; undeliverable: null },
 ): Promise<NotifyDeadGrantResult> {
-  const claim = await claimGrantFailureNotification(row.id, opts.owner.id, NOTIFY_MAX_PER_DAY);
+  const claim = await claimGrantFailureNotification(row.id, opts.owner.id, NOTIFY_MAX_PER_DAY, opts.accountEmail);
   if (!claim.claimed) {
     if (claim.reason === 'already') return { status: 'already_sent', notifiedAt: claim.notifiedAt, ...known };
     if (claim.reason === 'capped') return { status: 'skipped_rate_capped', notifiedAt: null, ...known };
+    // Raced the sweep: the bounce landed between the ledger read and the
+    // claim. The next refusal reads the mark from the row and carries the
+    // DSN details; this one just sends nothing.
+    if (claim.reason === 'undeliverable') return { status: 'skipped_undeliverable', notifiedAt: null, ...known };
     if (claim.reason === 'global_capped') {
       console.warn('[approvalNotify] dead-grant notice skipped: global hourly circuit breaker tripped');
       return { status: 'skipped_global_capped', notifiedAt: null, ...known };
@@ -392,7 +443,7 @@ async function attemptDeadGrantNotice(
   // delegated row is matched on it; an own mailbox under a drifted
   // `users.email` is still the address the reconnect link is bound to).
   const raw = Buffer.from(approvalEmailRaw({
-    from: sender.address, to: opts.accountEmail, cc: delegated ? opts.keyOwnerEmail : null, subject, body,
+    from: sender.address, to: opts.accountEmail, cc: delegated ? opts.keyOwnerEmail : null, subject, body, notice: 'dead_grant',
   })).toString('base64url');
   const sent = await (opts.send ?? proxySend)(sender, raw);
   if (!sent.ok) {

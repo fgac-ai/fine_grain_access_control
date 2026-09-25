@@ -16,6 +16,7 @@
 import { db } from '@/db';
 import { accountRefusals } from '@/db/schema';
 import { and, eq, isNull, sql } from 'drizzle-orm';
+import { recipientUndeliverableSql } from './emailBounces';
 import { recentNotificationCountSql } from './approvalRequests';
 import { ACCOUNT_REFUSAL_EPISODE_GAP_MS } from './approvalNotifyCopy';
 
@@ -99,9 +100,9 @@ function ownerEpisodeNotifiedSql(userId: string) {
  * ledgers. Once claimed, the row is never emailed again (released only on a
  * definite non-send).
  */
-export async function claimAccountRefusalNotification(id: string, userId: string, maxPerDay: number): Promise<
+export async function claimAccountRefusalNotification(id: string, userId: string, maxPerDay: number, recipient: string): Promise<
   { claimed: true; notifiedAt: Date | null }
-  | { claimed: false; notifiedAt: Date | null; reason: 'already' | 'episode' | 'capped' | 'missing' | 'error' }
+  | { claimed: false; notifiedAt: Date | null; reason: 'already' | 'episode' | 'capped' | 'undeliverable' | 'missing' | 'error' }
 > {
   try {
     const [row] = await db.update(accountRefusals)
@@ -109,6 +110,7 @@ export async function claimAccountRefusalNotification(id: string, userId: string
       .where(and(
         eq(accountRefusals.id, id),
         isNull(accountRefusals.notifiedAt),
+        sql`NOT ${recipientUndeliverableSql(recipient)}`,
         sql`NOT ${ownerEpisodeNotifiedSql(userId)}`,
         sql`${recentNotificationCountSql(userId)} < ${maxPerDay}`,
       ))
@@ -117,12 +119,16 @@ export async function claimAccountRefusalNotification(id: string, userId: string
     const [existing] = await db.select({
       notifiedAt: accountRefusals.notifiedAt,
       episodeNotified: ownerEpisodeNotifiedSql(userId),
+      undeliverable: recipientUndeliverableSql(recipient),
     })
       .from(accountRefusals)
       .where(eq(accountRefusals.id, id))
       .limit(1);
     if (!existing) return { claimed: false, notifiedAt: null, reason: 'missing' };
     if (existing.notifiedAt) return { claimed: false, notifiedAt: existing.notifiedAt, reason: 'already' };
+    if (existing.undeliverable === true || existing.undeliverable === 't') {
+      return { claimed: false, notifiedAt: null, reason: 'undeliverable' };
+    }
     if (existing.episodeNotified === true || existing.episodeNotified === 't') {
       return { claimed: false, notifiedAt: null, reason: 'episode' };
     }

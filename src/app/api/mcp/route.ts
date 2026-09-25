@@ -40,6 +40,7 @@ import { recordEagerResolve, shouldSkipEagerResolve } from '@/lib/connectionTouc
 import { after } from 'next/server';
 import { notifyOwnerOfAccountRefusal, notifyOwnerOfApprovalLinks, notifyOwnerOfDeadGrant, type NotifyLink } from '@/lib/approvalNotify';
 import { deadGrantDenialLine, type DeadGrantReason } from '@/lib/googleGrantNotifyCopy';
+import { lookupUndeliverable } from '@/lib/emailBounces';
 import { accountRefusalDenialLine, notifyDenialLine } from '@/lib/approvalNotifyCopy';
 import { normalizeRequestedEmail } from '@/lib/accountRefusals';
 import { inSuccessSample, AUTH_SUCCESS_SAMPLE } from '@/lib/authSampling';
@@ -66,7 +67,7 @@ import { slugifyProfileLabel } from '@/lib/profileSlugs';
 import { logAndSanitize, describeErrorForLog, toolErrorResult } from '@/lib/serverErrors';
 import {
   classifyClerkTokenError, reconnectRepairs, tokenFailureGuidance,
-  type GoogleTokenFailureReason,
+  type GoogleTokenFailureReason, undeliverableGuidance,
 } from '@/lib/googleTokenFailure';
 import { liveTokenScopes, reconcileScopes } from '@/lib/googleTokenScopes';
 import {
@@ -1980,14 +1981,13 @@ async function resolveAccountAndToken(
     // class has been a race on a healthy account every time it was
     // inspected (2026-09-04). Delegated mailboxes are told WHO must open the
     // link: the reconnect link is bound to the owner and refuses anyone else.
-    const guidance = tokenFailureGuidance({
+    let guidance = tokenFailureGuidance({
       targetEmail,
       keyOwnerEmail: conn.user.email,
       reason: googleToken.failure,
       reconnectUrl: reconnectLink(targetEmail),
       retried: googleToken.retried,
     });
-    if (guidance.denialCode) addToolCallProps({ denial_code: guidance.denialCode });
     // The owner notice: the agent's refusal is the only channel that existed,
     // and it reaches nobody when the owner is not the person running the
     // agent (delegated mailbox) or is not reading its output (scheduled job)
@@ -2007,13 +2007,26 @@ async function resolveAccountAndToken(
         notify_status: notify.status,
         ...(notify.failureCount !== null ? { grant_failure_count: notify.failureCount } : {}),
         ...(notify.daysDead !== null ? { grant_days_dead: notify.daysDead } : {}),
+        ...(notify.undeliverable ? { mailbox_undeliverable: notify.undeliverable.bounceClass } : {}),
       });
-      emailed = deadGrantDenialLine(notify.status, {
-        notifiedAt: notify.notifiedAt,
-        delegated: targetEmail.toLowerCase() !== conn.user.email.toLowerCase(),
-        ccDelegate: notify.ccDelegate,
-      });
+      if (notify.undeliverable) {
+        // The notice to this mailbox bounced permanently (src/lib/emailBounces.ts):
+        // a deleted mailbox has no reconnect, and a rejecting one never heard.
+        // Replace the reconnect story with the truth; no 📧 line either way.
+        guidance = undeliverableGuidance({
+          targetEmail, keyOwnerEmail: conn.user.email, reason: googleToken.failure,
+          bounceClass: notify.undeliverable.bounceClass, dsnStatus: notify.undeliverable.dsnStatus,
+          bouncedAt: notify.undeliverable.bouncedAt, reconnectUrl: reconnectLink(targetEmail), dashboardUrl: DASHBOARD_URL,
+        });
+      } else {
+        emailed = deadGrantDenialLine(notify.status, {
+          notifiedAt: notify.notifiedAt,
+          delegated: targetEmail.toLowerCase() !== conn.user.email.toLowerCase(),
+          ccDelegate: notify.ccDelegate,
+        });
+      }
     }
+    if (guidance.denialCode) addToolCallProps({ denial_code: guidance.denialCode });
     return resolveFailure(
       googleToken.failure === 'delegation_inactive' ? 'delegation_inactive' : 'google_token_unavailable',
       guidance.text + (emailed ? `\n${emailed}` : ''),
@@ -2545,12 +2558,17 @@ function registerFgacTools(server: FgacMcpServer) {
         // accounts riding the full 15 s Clerk timeout each is unacceptable.
         const scopeState = (has: boolean | undefined) =>
           has === undefined ? 'unknown' : has ? 'granted' : 'missing';
-        const probes = await Promise.allSettled(
-          emails.map(e => withTimeout(
-            getGoogleToken(e.targetEmail, conn.user, { quiet: true }),
-            LIST_ACCOUNTS_SCOPE_PROBE_TIMEOUT_MS,
-          )),
-        );
+        const [probes, undeliverable] = await Promise.all([
+          Promise.allSettled(
+            emails.map(e => withTimeout(
+              getGoogleToken(e.targetEmail, conn.user, { quiet: true }),
+              LIST_ACCOUNTS_SCOPE_PROBE_TIMEOUT_MS,
+            )),
+          ),
+          // Bounce ledger, one query for every address: a mailbox whose owner
+          // notice came back "does not exist" gets a stop here, not a link.
+          lookupUndeliverable(emails.map(e => e.targetEmail)),
+        ]);
         const accountDetails = emails.map((e, i) => {
           const probe = probes[i];
           const settled = probe.status === 'fulfilled' ? probe.value : null;
@@ -2565,13 +2583,28 @@ function registerFgacTools(server: FgacMcpServer) {
           // link-free: none of those is fixed by reconnecting, and a false
           // link here sends the agent (and the user) to repair a grant that
           // is fine or does not exist.
-          const needsReconnect = (failure !== null && reconnectRepairs(failure))
-            || gmail === 'missing' || driveFile === 'missing';
+          const bounce = undeliverable.get(e.targetEmail.trim().toLowerCase());
+          // A reconnect-repairable failure on a mailbox Google says no longer
+          // exists is not repairable by anyone: report it as `mailbox_gone`,
+          // with no link (2026-09-23: the agent behind a deleted Workspace
+          // mailbox was handed the dead link on every refusal for two days).
+          const mailboxGone = failure !== null && reconnectRepairs(failure) && bounce?.bounceClass === 'mailbox_gone';
+          const needsReconnect = !mailboxGone && ((failure !== null && reconnectRepairs(failure))
+            || gmail === 'missing' || driveFile === 'missing');
           return {
             email: e.targetEmail,
             delegated: !!e.delegationId,
             google_token: failure ? 'unavailable' : token ? 'ok' : 'unknown',
-            ...(failure ? { google_token_failure: failure } : {}),
+            ...(failure ? { google_token_failure: mailboxGone ? 'mailbox_gone' : failure } : {}),
+            ...(mailboxGone ? {
+              mailbox: 'gone',
+              bounced_at: bounce!.bouncedAt.toISOString(),
+              stop: `'${e.targetEmail}' no longer exists (FGAC's notice to it came back from Google as undeliverable${bounce!.dsnStatus ? ` ${bounce!.dsnStatus}` : ''}, "account does not exist") — nobody can reconnect it; remove it from the task, do not retry, do not give the user a reconnect link.`,
+            } : {}),
+            // The mailbox exists but bounced FGAC's mail: the link is valid,
+            // the owner was NOT told, so the agent must relay it.
+            ...(!mailboxGone && bounce?.bounceClass === 'rejected' && failure !== null && reconnectRepairs(failure)
+              ? { owner_notice: 'undeliverable' } : {}),
             gmail,
             drive_file: driveFile,
             ...(needsReconnect ? {
@@ -2591,6 +2624,7 @@ function registerFgacTools(server: FgacMcpServer) {
         // their first failure and got `google_token: 'unavailable'` with no
         // instruction — then kept retrying (14 identical Sheets failures).
         const tokenBroken = accountDetails.find(d => d.google_token === 'unavailable' && d.reconnect_url);
+        const mailboxGone = accountDetails.find(d => d.mailbox === 'gone');
 
         // Onboarding nudge: list_accounts is most new users' first (and for
         // many, only) call — 2026-08 launch analytics showed a large cohort
@@ -2602,8 +2636,11 @@ function registerFgacTools(server: FgacMcpServer) {
           default: conn.user.email,
           nickname: conn.nickname,
           next_steps: {
+            ...(mailboxGone ? {
+              stop: `'${mailboxGone.email}' no longer exists — Google returned FGAC's notice to it as undeliverable ("account does not exist"), so its revoked grant can never be reconnected by anyone. Do NOT retry calls on it and do NOT give the user a reconnect link; remove the account from the task${mailboxGone.delegated ? ' (the delegation now points at nothing)' : ' (and from this key\'s accounts in the FGAC dashboard)'}.`,
+            } : {}),
             ...(tokenBroken ? {
-              reconnect: `'${tokenBroken.email}' has no working Google grant (${tokenBroken.google_token_failure}) — EVERY call on it will fail until it is reconnected, so do not retry. Give the user this one-click link, to be opened by ${tokenBroken.reconnect_by}: ${tokenBroken.reconnect_url}`,
+              reconnect: `'${tokenBroken.email}' has no working Google grant (${tokenBroken.google_token_failure}) — EVERY call on it will fail until it is reconnected, so do not retry. Give the user this one-click link, to be opened by ${tokenBroken.reconnect_by}: ${tokenBroken.reconnect_url}${tokenBroken.owner_notice === 'undeliverable' ? ' (FGAC\'s own email to the owner about this bounced, so they have NOT been told — relay the link yourself)' : ''}`,
             } : {}),
             gmail: "Read a mailbox with gmail_list (pass account: '<address>' to target a specific one; defaults to the primary). Reads work out of the box.",
             // One entry per per-file kind (sheets / docs / slides), keyed by

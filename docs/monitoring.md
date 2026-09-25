@@ -2490,9 +2490,17 @@ GROUP BY owner ORDER BY failures_after DESC
 -- APPROVAL_LINK_EMAIL=off); `failed` = the send or the ledger write failed
 -- (server logs: "[approvalNotify] dead-grant"); `skipped_rate_capped` = the
 -- owner already had 3 notices of any kind today; `skipped_global_capped` =
--- the 10-per-hour breaker tripped — pair it with 7.13a's incident shape.
+-- the 10-per-hour breaker tripped — pair it with 7.13a's incident shape;
+-- `skipped_undeliverable` (since 2026-09-25) = the mailbox bounced an earlier
+-- notice and is on `email_bounces` — nothing is sent, and `mailbox_undeliverable`
+-- says whether the agent got the stop (`mailbox_gone`, no reconnect link) or
+-- the "owner was not told, relay the link" text (`rejected`). A mailbox that
+-- keeps refusing under `mailbox_gone` for days is an agent that ignored the
+-- stop — the same reading as 7.13a's retry pressure, and the connection is
+-- the lever, not more mail.
 SELECT toDate(timestamp) AS day, properties.google_token_error AS reason,
        properties.account_delegated AS delegated, properties.notify_status AS notify,
+       properties.mailbox_undeliverable AS undeliverable,
        max(toInt64(properties.grant_days_dead)) AS max_days_dead,
        count() AS refusals, uniq(person_id) AS key_owners
 FROM events
@@ -2500,7 +2508,7 @@ WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
   AND properties.denial_code = 'google_token_unavailable'
   AND properties.google_token_error IN ('grant_revoked', 'refresh_failed', 'no_token')
   AND timestamp > now() - INTERVAL 7 DAY
-GROUP BY day, reason, delegated, notify ORDER BY day DESC, refusals DESC
+GROUP BY day, reason, delegated, notify, undeliverable ORDER BY day DESC, refusals DESC
 ```
 
 ```sql
@@ -2523,15 +2531,64 @@ WHERE event IN ('approval_link_notified', 'account_refusal_notified', 'google_gr
 GROUP BY recipient, day HAVING total > 1 ORDER BY total DESC, day DESC
 ```
 
+```sql
+-- 7.30e — bounces (30 d): notices that came back undeliverable, by week.
+-- Added 2026-09-25 (src/lib/emailBounceSweep.ts, hourly cron
+-- /api/cron/sweep-bounces; `docs/implementation_plans/claude_festive-nightingale-9126ed_v1.md`).
+-- Gmail has no bounce webhook: the DSN Google mails back to the support
+-- address (a send-as alias on the operator mailbox) is the only signal, and
+-- the sweep reads it through the SAME support-profile key the notices are
+-- sent with, then files it on `email_bounces`. From then on no trigger emails
+-- that address (`notify_status: 'skipped_undeliverable'`) and a dead-grant
+-- refusal on a `mailbox_gone` address carries a stop instead of a reconnect
+-- link. `mailbox_gone` (5.1.3 "account does not exist" from Google's own MTA
+-- on a Workspace domain) = the mailbox was DELETED — Google's token endpoint
+-- says `invalid_grant` for that and for a revoked grant alike, so before this
+-- the agent was handed a dead reconnect link on every refusal (2026-09-23,
+-- four refusals over two days). One row per DSN, captured for the recipient.
+-- Baseline at introduction: one bounce in 30 d (that case). Two or more
+-- `rejected` in a week from different domains = the support sender is being
+-- treated as spam somewhere — check the alias's SPF/DKIM before anything else.
+SELECT toStartOfWeek(timestamp) AS week, properties.notice_kind AS notice,
+       properties.bounce_class AS class, properties.dsn_status AS dsn,
+       count() AS bounces, uniq(person_id) AS recipients,
+       round(avg(toFloat64OrNull(toString(properties.hours_after_send))), 1) AS avg_hours_after_send
+FROM events
+WHERE event = 'notice_bounce_recorded' AND properties.environment = 'production'
+  AND timestamp > now() - INTERVAL 30 DAY
+GROUP BY week, notice, class, dsn ORDER BY week DESC, bounces DESC
+```
+
+Did the stop land? For each `mailbox_gone` recipient, the refusals on that
+mailbox AFTER the bounce was filed should carry `notify_status =
+'skipped_undeliverable'` and `mailbox_undeliverable = 'mailbox_gone'` (7.30c),
+and should then STOP within a day — the text tells the agent to remove the
+account from the task. An agent still calling a `mailbox_gone` mailbox a week
+later is the 7.13a retry-pressure reading, and the fix is on the connection,
+never another email. Ledger, read-only: `SELECT address, bounce_class,
+dsn_status, notice_kind, bounced_at FROM email_bounces WHERE bounce_class IN
+('mailbox_gone','rejected') ORDER BY bounced_at DESC` — `transient` and
+`unmatched` rows are the sweep's own memory (each DSN is fetched once, ever)
+and suppress nothing. The cron's own response
+(`listed/fresh/recorded/failed`) is in the Vercel function logs under
+`[Cron:sweep-bounces]`; `status: 'disabled'` means the sender variables are
+unset in that environment, `failed` with a 401 means the support key was
+revoked, a 403 that the support profile grew a read rule that blocks DSNs.
+
 Healthy: 7.30a shows at most one row per owner + mailbox with `days_dead = 0`
 and no hour holding 5 or more rows; 7.30c shows `sent` once per new dead
-mailbox, `already_sent` on the rest, `disabled` absent, `failed` rare and
-`skipped_global_capped` zero; 7.30d returns nothing (no recipient got two
-emails of any kind in one day); 7.30b's `reconnect_started` is non-zero for
-most emailed owners within a week. Pair with the ledger itself (branch DB or a
-read-only production query): `SELECT account_email, last_reason,
-failure_count, notified_count, first_failed_at, notified_at FROM
-google_grant_failures ORDER BY last_failed_at DESC LIMIT 20`. Under this rule
+mailbox, `already_sent` on the rest, `disabled` absent, `failed` rare,
+`skipped_global_capped` zero, and any `skipped_undeliverable` mailbox going
+quiet within a day of its first stop; 7.30d returns nothing (no recipient got
+two emails of any kind in one day); 7.30e shows a bounce at most rarely, and
+never a second notice to a bounced address (a `google_grant_dead_notified` /
+`approval_link_notified` / `account_refusal_notified` row for a person AFTER
+their `notice_bounce_recorded` is the suppression failing — FLAG); 7.30b's
+`reconnect_started` is non-zero for most emailed owners within a week. Pair
+with the ledger itself (branch DB or a read-only production query): `SELECT
+account_email, last_reason, failure_count, notified_count, first_failed_at,
+notified_at, undeliverable_at, undeliverable_class FROM google_grant_failures
+ORDER BY last_failed_at DESC LIMIT 20`. Under this rule
 the 30-day delegated case would have emailed its owner (CC the delegate) once,
 on 2026-09-06 — the first day PR #127 classified it `refresh_failed`; before
 that it was `clerk_error`, which is retried and never notifies — and never

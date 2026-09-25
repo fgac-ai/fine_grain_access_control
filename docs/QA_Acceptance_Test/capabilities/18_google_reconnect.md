@@ -261,3 +261,107 @@
   scripts/test-google-grant-notify-copy.ts` pins the copy, the Cc header and
   the one-per-episode rule — record the assertion as covered by unit test,
   with the reason, not as a pass
+
+### A14: The bounce sweep files a real DSN once, attributes it, and ignores mail that is not ours
+- **Why (2026-09-23):** the first dead-grant notice to a deleted Google
+  Workspace mailbox came back from Google's own MTA two seconds later as
+  `5.1.3` "The email account that you tried to reach does not exist", and
+  nothing recorded it — the agent was handed the dead reconnect link on every
+  refusal for two days. Gmail has no bounce webhook: the DSN in the sender's
+  mailbox is the only signal. The sweep (`src/lib/emailBounceSweep.ts`,
+  hourly cron `/api/cron/sweep-bounces`) reads it through the SAME
+  support-profile key the notices are sent with and files it on
+  `email_bounces` — FGAC's own mailbox through FGAC's own proxy API, never a
+  user's grant
+- Sender configured exactly as A13 (USER_A stands in via `.secrets/sender.env`
+  and `fgac-dev-sender`; without it `GET /api/cron/sweep-bounces` answers
+  `{ status: 'disabled' }` and this assertion is `blocked`, not `skip`).
+  Locally `CRON_SECRET` is unset, so the route needs no header
+- **Fixture — a real bounce of our own mail**: as USER_A's agent, on a key
+  whose profile has a Gmail send whitelist that covers the target, `gmail_send`
+  a plain-text message whose raw headers include `X-FGAC-Notice: dead_grant`
+  to a nonexistent address on gmail.com (a long random local part — never a
+  real person's address, never a customer domain). Google's MTA returns a DSN
+  to USER_A's inbox within seconds. Then send a second message WITHOUT the
+  header (through the same tool, or from USER_A's own Gmail) to a different
+  nonexistent gmail.com address, so a second DSN arrives that the sweep must
+  treat as NOT ours. Wait for both DSNs (`gmail_list` with
+  `from:mailer-daemon`)
+- Call `GET /api/cron/sweep-bounces` on the dev server, then call it again
+- **Expected**: the first response is `status: 'ok'` with `listed ≥ 2`,
+  `fresh ≥ 2`, `recorded.mailbox_gone: 1` (the tagged probe: `5.1.1` from
+  gmail.com maps to `mailbox_gone`) and `recorded.unmatched: 1` (the untagged
+  one — no notice header, recipient in no ledger); the second response has
+  `fresh: 0` and every `recorded` count 0 (idempotent on the Gmail message
+  id). Read-only on the branch DB: `email_bounces` holds one row per DSN —
+  the probe's row with `address` = the nonexistent address lower-cased,
+  `bounce_class: 'mailbox_gone'`, `dsn_status: '5.1.1'`, `dsn_diagnostic`
+  starting with Google's "550-5.1.1 The email account that you tried to reach
+  does not exist" on one line, `notice_kind: 'dead_grant'`, `user_id` NULL
+  (the header matched, no FGAC user has that address), `bounced_at` = the
+  DSN's time; the untagged DSN's row has `bounce_class: 'unmatched'`,
+  `address` EMPTY (the operator's own correspondence is never stored) and
+  `notice_kind: 'unknown'`. Server log shows `[Cron:sweep-bounces] ok …
+  gone=1 … unmatched=1` then `fresh=0`. The sweep's reads are `proxy_request`
+  rows under USER_A's key with `User-Agent: fgac-bounce-sweep`; no
+  `notice_bounce_recorded` event fires for the probe (no owner resolved) —
+  the event is asserted in A15
+- **Never**: never stores a body or a subject; never fetches a DSN twice
+  (`fresh: 0` on the re-run); never files a 4.x.x delayed notice as anything
+  but `transient`; never touches a user's Google grant (the reads carry the
+  support key only); never runs where the sender is off. If a bounce cannot
+  be produced in the environment, `npx tsx scripts/test-email-bounces.ts`
+  pins the parser on a DSN in the 09-23 shape (folded Diagnostic-Code,
+  echoed `X-FGAC-Notice`, lower-cased Final-Recipient), the class map (5.1.x /
+  5.2.1 → `mailbox_gone`, other 5.x → `rejected`, 4.x → `transient`) and the
+  header every notice now emits — record the assertion as covered by unit
+  test, with the reason, not as a pass
+
+### A15: An undeliverable mailbox is never emailed again, and the agent gets a truthful stop instead of a dead reconnect link
+- Depends on A14's ledger. The suppression cannot be produced end to end on
+  the QA accounts (their mailboxes exist and Database Rule 7 forbids writing
+  the bounce row by hand), so this assertion has a unit-test leg and a
+  **production observation leg**; the production leg is read-only PostHog
+  and never touches a production inbox
+- **Unit-test leg**: `npx tsx scripts/test-email-bounces.ts` pins that the
+  `mailbox_gone` refusal text (`undeliverableGuidance` in
+  `src/lib/googleTokenFailure.ts`) is a 🚫 with `denial_code:
+  google_token_unavailable`, names the mailbox as no longer existing, quotes
+  the DSN code and date, says STOP / retrying will NOT help, carries NO
+  reconnect link and tells the agent not to hand one out, says to remove the
+  account from the task (own mailbox: and from the key's accounts; delegated:
+  the delegation now points at nothing); and that the `rejected` text keeps
+  the link, says the owner has NOT been told and FGAC will not email that
+  address again, and asks the agent to relay the link. Record as covered by
+  unit test
+- **Expected in code review** (`src/lib/approvalNotify.ts`,
+  `src/lib/approvalRequests.ts`, `src/lib/accountRefusals.ts`,
+  `src/lib/googleGrantFailures.ts`): every one of the three notice claims
+  embeds `NOT EXISTS (… email_bounces WHERE address = <recipient> AND
+  bounce_class IN ('mailbox_gone','rejected'))` in the same UPDATE as the
+  cap, so a bounce filed between the ledger read and the claim still wins;
+  a blocked claim reports `skipped_undeliverable` and stamps no `notified_at`
+  (no daily-cap budget spent); the dead-grant path returns
+  `skipped_undeliverable` from the row's `undeliverable_at` mark BEFORE the
+  sender check, so the stop text shows even where the sender is off
+- **Production observation leg (after deploy, read-only)**: within an hour
+  of the deploy the first sweep must file the 2026-09-23 DSN — runbook 7.30e
+  shows ONE `notice_bounce_recorded` row with `notice_kind: 'unknown'` (sent
+  before the header existed, matched by recipient), `bounce_class:
+  'mailbox_gone'`, `dsn_status: '5.1.3'`, `grant_rows_marked: 1`. The next
+  refusal from that account's connection (it was still calling on 09-24)
+  carries `notify_status: 'skipped_undeliverable'`,
+  `mailbox_undeliverable: 'mailbox_gone'`, `denial_code:
+  'google_token_unavailable'` (7.30c), and its `list_accounts` reports the
+  account as `google_token: 'unavailable'`, `google_token_failure:
+  'mailbox_gone'`, `mailbox: 'gone'`, `bounced_at` set, NO `reconnect_url` /
+  `reconnect_by`, with `next_steps.stop` in place of `next_steps.reconnect`.
+  No `google_grant_dead_notified` / `approval_link_notified` /
+  `account_refusal_notified` row for that person ever follows the bounce
+  (7.30e "Healthy"). The connection should go quiet within a day; if it does
+  not, that is the 7.13a retry-pressure reading, not a notice problem
+- **Never**: never a second email to a bounced address by any trigger; never
+  a reconnect link for a `mailbox_gone` address (in the refusal, in
+  `list_accounts`, or in `next_steps`); never a 📧 "do not re-ask" line on an
+  undeliverable mailbox; never any new outbound email — this is a suppression
+  feature

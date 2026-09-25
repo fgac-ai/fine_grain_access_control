@@ -15,6 +15,7 @@
 import { db } from '@/db';
 import { accountRefusals, approvalRequests, googleGrantFailures } from '@/db/schema';
 import { and, eq, isNotNull, isNull, sql } from 'drizzle-orm';
+import { recipientUndeliverableSql } from './emailBounces';
 
 /**
  * Record one mint ATTEMPT. First attempt inserts; retries increment
@@ -154,9 +155,9 @@ export function recentNotificationCountSql(userId: string) {
  * claimed; otherwise says why (already emailed, capped, no ledger row, or a
  * DB error — the last two are delivery failures, never "already emailed").
  */
-export async function claimApprovalNotification(requestId: string, userId: string, maxPerDay: number): Promise<
+export async function claimApprovalNotification(requestId: string, userId: string, maxPerDay: number, recipient: string): Promise<
   { claimed: true; notifiedAt: Date | null }
-  | { claimed: false; notifiedAt: Date | null; reason: 'already' | 'capped' | 'missing' | 'error' }
+  | { claimed: false; notifiedAt: Date | null; reason: 'already' | 'capped' | 'undeliverable' | 'missing' | 'error' }
 > {
   try {
     const [row] = await db.update(approvalRequests)
@@ -164,16 +165,20 @@ export async function claimApprovalNotification(requestId: string, userId: strin
       .where(and(
         eq(approvalRequests.requestId, requestId),
         isNull(approvalRequests.notifiedAt),
+        // A recipient whose earlier notice bounced permanently (email_bounces)
+        // is never emailed again — by any of the three triggers.
+        sql`NOT ${recipientUndeliverableSql(recipient)}`,
         sql`${recentNotificationCountSql(userId)} < ${maxPerDay}`,
       ))
       .returning({ notifiedAt: approvalRequests.notifiedAt });
     if (row) return { claimed: true, notifiedAt: row.notifiedAt };
-    const existing = await db.select({ notifiedAt: approvalRequests.notifiedAt })
+    const existing = await db.select({ notifiedAt: approvalRequests.notifiedAt, undeliverable: recipientUndeliverableSql(recipient) })
       .from(approvalRequests)
       .where(eq(approvalRequests.requestId, requestId))
       .limit(1).then(r => r[0]);
     if (!existing) return { claimed: false, notifiedAt: null, reason: 'missing' };
     if (existing.notifiedAt) return { claimed: false, notifiedAt: existing.notifiedAt, reason: 'already' };
+    if (existing.undeliverable === true || existing.undeliverable === 't') return { claimed: false, notifiedAt: null, reason: 'undeliverable' };
     return { claimed: false, notifiedAt: null, reason: 'capped' };
   } catch (err) {
     console.error('[approvalRequests] notification claim failed:', err);
