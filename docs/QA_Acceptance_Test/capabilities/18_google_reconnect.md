@@ -211,14 +211,17 @@
   address>`, Reply-To the support address, NO Cc, subject `Google access to
   <address> is disconnected — your agent is being refused`, plain text, body
   opening "<agent> has been refused today (first at <date HH:MM UTC>) because
-  FGAC can no longer reach Google on behalf of:", the address on its own
+  FGAC can no longer reach Google on behalf of:" — `<agent>` capitalised at
+  the sentence start and reading like "Your Claude agent on the Default
+  Profile" (nickname or client plus profile, never an id), the address on its own
   line, the cause paragraph matching the refusal's class (`grant_revoked` →
   "expired or revoked"; `refresh_failed` → "no usable refresh token"), the
   SAME `?reconnect=1&for=<address>` link as the refusal, "Open the link while
   signed in to FGAC as <address>", "do nothing — the agent stays refused", and
   "This is the only email FGAC will send about this account unless it is
-  repaired and disconnects again" — never a promise of a reminder. Opening the
-  emailed link signed in as that account runs A4
+  repaired and disconnects again" — never a promise of a reminder — and the
+  signature `— FGAC support (support@fgac.ai)`, never the QA sender's
+  address. Opening the emailed link signed in as that account runs A4
 - Delegated leg: as the OTHER account's agent, call `gmail_list` with
   `account` = the dead mailbox, twice
 - **Expected**: the refusal is the A12 delegated text (only the owner can

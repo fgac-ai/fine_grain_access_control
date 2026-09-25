@@ -28,7 +28,7 @@
  * own. One email per episode. Every agent-controlled string goes through
  * `sanitizeLine`. Plain text, no HTML.
  */
-import { sanitizeLine } from './approvalNotifyCopy';
+import { capitalize, sanitizeLine, signatureLine } from './approvalNotifyCopy';
 import type { GoogleTokenFailureReason } from './googleTokenFailure';
 
 /** Reasons the notice covers: the deterministic failures a reconnect repairs
@@ -132,7 +132,8 @@ export function deadGrantEmailSubject(notice: Pick<DeadGrantNotice, 'accountEmai
  * body also tells them, in one line, what they can and cannot do.
  */
 export function deadGrantEmailBody(opts: DeadGrantNotice & { now: Date }): string {
-  const agent = sanitizeLine(opts.agentLabel, 80) || 'An AI agent';
+  // Sentence-initial: the label reads "your Claude agent on the Default Profile".
+  const agent = capitalize(sanitizeLine(opts.agentLabel, 80) || 'an AI agent');
   const account = sanitizeLine(opts.accountEmail, 254);
   const keyOwner = sanitizeLine(opts.keyOwnerEmail, 254);
   const base = opts.dashboardUrl.trim().replace(/\/+$/, '');
@@ -172,7 +173,7 @@ export function deadGrantEmailBody(opts: DeadGrantNotice & { now: Date }): strin
     'This is the only email FGAC will send about this account unless it is repaired and disconnects again. If you intentionally disconnected it, do nothing — the agent stays refused. Reply to this email if you need a hand.',
     '',
     `Connected accounts: ${base}/dashboard/accounts`,
-    `— FGAC (${opts.supportAddress})`,
+    signatureLine(),
   );
   return lines.join('\n');
 }

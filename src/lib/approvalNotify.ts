@@ -18,12 +18,17 @@
  *   - Due only on a repeat: the request must have been minted before, the
  *     current mint must be at least NOTIFY_MIN_GAP_MS after the first, and
  *     the approve page must never have been opened for it.
- *   - AT MOST one email per request id, and at most NOTIFY_MAX_PER_DAY per
- *     person per rolling 24 h. `claimApprovalNotification` flips
- *     `approval_requests.notified_at` atomically — cap included in the same
- *     statement — before anything is sent, so a concurrent mint or a job
- *     re-minting hourly cannot produce a second email and parallel claims
- *     cannot each pass a separate count. The claim is released only on a
+ *   - AT MOST one email per request id, one per owner per agent turn, and
+ *     at most NOTIFY_MAX_PER_DAY per person per rolling 24 h.
+ *     `claimApprovalNotification` flips `approval_requests.notified_at`
+ *     atomically — cap and same-turn rule in the same statement — before
+ *     anything is sent, so a concurrent mint or a job re-minting hourly
+ *     cannot produce a second email for one request. The cap and the
+ *     same-turn rule look at the owner's OTHER rows, which one statement's
+ *     snapshot cannot protect: two claims on two rows started together
+ *     both passed (production 2026-09-17, two emails 108 ms apart), so
+ *     every claim runs under a per-owner advisory lock in one transaction
+ *     (src/lib/notifyClaimLock.ts). The claim is released only on a
  *     DEFINITE non-send (FGAC or Google refused the message with a 4xx); an
  *     ambiguous outcome — timeout, 5xx — keeps it, because a lost email
  *     costs a channel the chat link still covers while a duplicate costs
@@ -60,7 +65,7 @@ import { NextRequest } from 'next/server';
 import { GET as proxyGetRoute, POST as proxyPost } from '@/app/api/proxy/[...path]/route';
 import {
   accountRefusalEmailBody, accountRefusalEmailSubject, ACCOUNT_REFUSAL_NOTIFY_AFTER,
-  approvalEmailBody, approvalEmailRaw, approvalEmailSubject, NOTIFY_MAX_PER_DAY, NOTIFY_MIN_GAP_MS,
+  approvalEmailBody, approvalEmailRaw, approvalEmailSubject, notifyBaseUrl, NOTIFY_MAX_PER_DAY, NOTIFY_MIN_GAP_MS,
   type NotifyLink, type NotifyStatus,
 } from './approvalNotifyCopy';
 import {
@@ -111,7 +116,8 @@ export type SendResult =
 
 export interface NotifyOwnerOpts {
   owner: { id: string; email: string; clerkUserId: string };
-  /** Connection nickname or client name, for the email's first line. */
+  /** What the email calls the agent (src/lib/agentLabel.ts — nickname or
+   * client, plus profile; never an id). */
   agentLabel: string;
   /** First entry is the request the claim is made on; the rest ride along. */
   links: NotifyLink[];
@@ -213,6 +219,10 @@ async function attempt(opts: NotifyOwnerOpts, primary: NotifyLink, sender: Sende
   const claim = await claimApprovalNotification(primary.requestId, opts.owner.id, NOTIFY_MAX_PER_DAY, opts.owner.email);
   if (!claim.claimed) {
     if (claim.reason === 'already') return { status: 'already_sent', notifiedAt: claim.notifiedAt };
+    // Another of this owner's links was emailed moments ago (same agent
+    // turn): one email per turn. The row keeps notified_at NULL, so a later
+    // turn's repeat can still email this link.
+    if (claim.reason === 'burst') return { status: 'skipped_burst', notifiedAt: null };
     if (claim.reason === 'capped') return { status: 'skipped_rate_capped', notifiedAt: null };
     if (claim.reason === 'undeliverable') return { status: 'skipped_undeliverable', notifiedAt: null };
     return { status: 'failed', notifiedAt: null };
@@ -221,7 +231,7 @@ async function attempt(opts: NotifyOwnerOpts, primary: NotifyLink, sender: Sende
   const subject = approvalEmailSubject(primary, state.mintCount);
   const body = approvalEmailBody({
     agentLabel: opts.agentLabel, links: opts.links, times: state.mintCount, firstAskedAt: state.firstMintedAt,
-    dashboardUrl: opts.dashboardUrl, supportAddress: sender.address,
+    dashboardUrl: notifyBaseUrl(opts.dashboardUrl), supportAddress: sender.address,
   });
   const raw = Buffer.from(approvalEmailRaw({ from: sender.address, to: opts.owner.email, subject, body, notice: 'approval_link' })).toString('base64url');
   const sent = await (opts.send ?? proxySend)(sender, raw);
@@ -317,7 +327,7 @@ async function attemptRefusalNotice(
   const body = accountRefusalEmailBody({
     agentLabel: opts.agentLabel, requestedAccount: opts.requestedAccount, usableAccounts: opts.usableAccounts,
     ownerEmail: opts.owner.email, tool: opts.tool, times: row.windowCount, firstRefusedAt: row.windowStartedAt,
-    dashboardUrl: opts.dashboardUrl, supportAddress: sender.address,
+    dashboardUrl: notifyBaseUrl(opts.dashboardUrl), supportAddress: sender.address,
   });
   const raw = Buffer.from(approvalEmailRaw({ from: sender.address, to: opts.owner.email, subject, body, notice: 'account_refusal' })).toString('base64url');
   const sent = await (opts.send ?? proxySend)(sender, raw);
@@ -434,7 +444,7 @@ async function attemptDeadGrantNotice(
   const notice = {
     accountEmail: opts.accountEmail, reason: opts.reason, delegated, keyOwnerEmail: opts.keyOwnerEmail,
     agentLabel: opts.agentLabel, reconnectUrl: opts.reconnectUrl, failureCount: row.failureCount,
-    firstFailedAt: row.firstFailedAt, dashboardUrl: opts.dashboardUrl,
+    firstFailedAt: row.firstFailedAt, dashboardUrl: notifyBaseUrl(opts.dashboardUrl),
     supportAddress: sender.address,
   };
   const subject = deadGrantEmailSubject(notice);
