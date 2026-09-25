@@ -203,10 +203,19 @@
   exactly ONE message to USER_A's address, From `FGAC <support address>`,
   Reply-To the support address, subject `Your agent has asked 3 times to
   send email to … — approve it?`, plain text, body opening "FGAC has detected
-  <agent> asking 3 times, without approval, to:", naming the first request
-  time in UTC, carrying BOTH approval URLs from the denial each with
-  `&src=email` appended and the signed `a`/`k`/`r`/`s` params byte-identical,
-  and offering "do nothing" and "reply to this email" as the decline paths.
+  <agent> asking 3 times, without approval, to:" where `<agent>` is the
+  connection's nickname or "your <client> agent" plus the profile ("your
+  Claude agent on the Default Profile") and NEVER an id-shaped string,
+  naming the first request time in UTC, carrying BOTH approval URLs from
+  the denial each with `&src=email` appended and the signed `a`/`k`/`r`/`s`
+  params byte-identical, offering "do nothing" and "reply to this email" as
+  the decline paths, and signing `— FGAC support (support@fgac.ai)` — the
+  fixed support contact, NOT the QA sender address standing in for the
+  mailbox (that address appears only in From / Reply-To). A second request
+  re-minted to a due repeat within 5 minutes of that email sends NOTHING:
+  its mint carries `notify_status: 'skipped_burst'`, no 📧 line, and its
+  ledger row keeps `notified_at` NULL (one email per agent turn; the link
+  is still emailed on a later turn's repeat).
   A FOURTH denial says the link was emailed "at <date HH:MM UTC>" and no
   further email is sent; the mailbox still holds one message. Opening the
   emailed link resolves and approves exactly like the chat link (A2), and
@@ -245,12 +254,19 @@
   `Your agent keeps asking for '<value>', an account it cannot use — a
   change is needed`, plain text, body opening "FGAC has refused <agent> 3
   times since <date HH:MM UTC> (its sheets_read_range calls) because it asks
-  for the Google account:", the value on its own line, "The account(s) it
+  for the Google account:" where `<agent>` reads like "your Claude agent on
+  the Default Profile" (nickname or client plus profile — NEVER an id-shaped
+  string such as the connection's client id; Ken's 2026-09-23 QA copy read
+  "refused JkGUAFOdt9Ib0Q7J"), the value on its own line, "The account(s) it
   can use: <every mailbox on the profile>.", "No approval link exists for
-  this", the two
-  numbered fixes (change the task / sign in as that account and delegate to
-  USER_A's address, with the `/dashboard/accounts` URL), and "will not email
-  you about this account again". The FOURTH says FGAC emailed the user about
+  this", the two numbered fixes (change the task / sign in as that account
+  and delegate to USER_A's address, with the `/dashboard/accounts` URL),
+  under fix 2 the line "How delegation works, in two minutes (video):
+  <base>/use-cases/multiple-gmail-accounts", "will not email you about this
+  account again", and the signature `— FGAC support (support@fgac.ai)` (never
+  the QA sender's address, never `localhost` on a preview or production
+  build — on a local build the links are the dev server's origin, which is
+  correct there). The FOURTH says FGAC emailed the user about
   this account "at <date HH:MM UTC>" and no further email is sent; the
   mailbox still holds one message. The DIFFERENT value starts its own count
   (no 📧 line on its first refusal) — and even on its THIRD refusal within

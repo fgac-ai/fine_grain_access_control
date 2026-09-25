@@ -15,10 +15,13 @@
  */
 import {
   accountRefusalDenialLine, accountRefusalEmailBody, accountRefusalEmailSubject,
-  approvalEmailBody, approvalEmailRaw, approvalEmailSubject, emailLinkUrl, encodeHeaderWord, notifyDenialLine, sanitizeLine, shortGrant,
-  ACCOUNT_REFUSAL_EPISODE_GAP_MS, ACCOUNT_REFUSAL_NOTIFY_AFTER, NOTIFY_MAX_PER_DAY, NOTIFY_MIN_GAP_MS, type NotifyLink,
+  approvalEmailBody, approvalEmailRaw, approvalEmailSubject, capitalize, emailLinkUrl, encodeHeaderWord, notifyBaseUrl, notifyDenialLine,
+  sanitizeLine, shortGrant, signatureLine,
+  ACCOUNT_REFUSAL_EPISODE_GAP_MS, ACCOUNT_REFUSAL_NOTIFY_AFTER, DELEGATION_HOWTO_PATH, NOTIFY_MAX_PER_DAY, NOTIFY_MIN_GAP_MS,
+  PRODUCTION_SITE_URL, SUPPORT_CONTACT_ADDRESS, type NotifyLink,
 } from '../src/lib/approvalNotifyCopy';
 import { normalizeRequestedEmail } from '../src/lib/accountRefusals';
+import { agentLabel, looksLikeId } from '../src/lib/agentLabel';
 
 let failures = 0;
 function check(name: string, cond: boolean) {
@@ -57,16 +60,44 @@ check('carries the primary link with src=email', body.includes(`${url}&src=email
 check('carries the alternative link', body.includes(`${anyLink.url}&src=email`) && body.includes('Or instead:'));
 check('offers the do-nothing and reply paths', body.includes('do nothing') && body.includes('reply to this email'));
 check('links to the dashboard without a double slash', body.includes('https://fgac.ai/dashboard') && !body.includes('fgac.ai//dashboard'));
-check('signs as FGAC with the support address', body.trimEnd().endsWith('— FGAC (support@fgac.ai)'));
+check('signs as FGAC support with the fixed support contact', body.trimEnd().endsWith('— FGAC support (support@fgac.ai)') && signatureLine() === `— FGAC support (${SUPPORT_CONTACT_ADDRESS})`);
 check('is plain text (no markup)', !/<[a-z]+>/i.test(body));
-check('empty agent label falls back', approvalEmailBody({ agentLabel: '', links: [link], times: 2, firstAskedAt: first, dashboardUrl: 'https://fgac.ai', supportAddress: 'support@fgac.ai' }).includes('Your AI agent asking 2 times'));
+check('empty agent label falls back', approvalEmailBody({ agentLabel: '', links: [link], times: 2, firstAskedAt: first, dashboardUrl: 'https://fgac.ai', supportAddress: 'support@fgac.ai' }).includes('your AI agent asking 2 times'));
 check('never mentions the user\'s own account as the sender', !/your own gmail/i.test(body));
+// A dev or preview build stands a QA account in for the support mailbox
+// (Reply-To); the body must never render that address as who is writing.
+const devSent = approvalEmailBody({ agentLabel: 'Claude', links: [link], times: 2, firstAskedAt: first, dashboardUrl: 'https://fgac.ai', supportAddress: 'qa-owner@example.com' });
+check('a QA sender address never appears in the body', !devSent.includes('qa-owner@example.com') && devSent.includes('— FGAC support (support@fgac.ai)'));
+check('a production-base body never links localhost', !/localhost|127\.0\.0\.1/.test(body));
+
+console.log('notifyBaseUrl (what the emailed links are built on)');
+check('trims the trailing slash', notifyBaseUrl('https://fgac.ai/', { VERCEL_ENV: 'production' }) === 'https://fgac.ai');
+check('a preview host passes through', notifyBaseUrl('https://fgac-git-x.vercel.app', { VERCEL_ENV: 'preview' }) === 'https://fgac-git-x.vercel.app');
+check('localhost in production becomes the canonical site', notifyBaseUrl('http://localhost:3000', { VERCEL_ENV: 'production' }) === PRODUCTION_SITE_URL);
+check('loopback IP in production becomes the canonical site', notifyBaseUrl('http://127.0.0.1:3000/', { VERCEL_ENV: 'production' }) === PRODUCTION_SITE_URL);
+check('empty base in production becomes the canonical site', notifyBaseUrl('', { VERCEL_ENV: 'production' }) === PRODUCTION_SITE_URL);
+check('localhost on a dev build is left alone (QA reads it)', notifyBaseUrl('http://localhost:3000', {}) === 'http://localhost:3000');
+check('a real host in production is never rewritten', notifyBaseUrl('https://fgac.ai', { VERCEL_ENV: 'production' }) === 'https://fgac.ai');
+
+console.log('agentLabel (what the emails call the agent)');
+check('an opaque client id is an id', looksLikeId('JkGUAFOdt9Ib0Q7J') && looksLikeId('72T5NfMmQXkq') && looksLikeId('cl_9aB8cD7eF6gH5iJ4'));
+check('product names are not ids', !looksLikeId('claude-desktop') && !looksLikeId('Claude Code') && !looksLikeId('cursor') && !looksLikeId('Nightly digest'));
+check('nickname wins and carries the profile', agentLabel({ nickname: 'Nightly digest', clientName: 'Claude', clientId: 'abc', profileLabel: 'Default Profile' }) === 'Nightly digest on the Default Profile');
+check('client name becomes "your <client> agent"', agentLabel({ nickname: null, clientName: 'Claude', clientId: 'abc', profileLabel: 'Default Profile' }) === 'your Claude agent on the Default Profile');
+check('a client name that is still the client id is never rendered', agentLabel({ nickname: null, clientName: 'JkGUAFOdt9Ib0Q7J', clientId: 'JkGUAFOdt9Ib0Q7J', profileLabel: 'Default Profile' }) === 'your AI agent on the Default Profile');
+check('an id-shaped client name is caught even when the id is unknown', agentLabel({ nickname: null, clientName: 'JkGUAFOdt9Ib0Q7J', profileLabel: null }) === 'your AI agent');
+check('an id-shaped nickname falls through to the client', agentLabel({ nickname: '72T5NfMmQXkq', clientName: 'Claude Desktop', clientId: 'x', profileLabel: null }) === 'your Claude Desktop agent');
+check('a profile label without "Profile" gets the word', agentLabel({ nickname: null, clientName: 'Claude', clientId: 'x', profileLabel: 'Work inbox' }) === 'your Claude agent on the Work inbox profile');
+check('nothing known → generic', agentLabel({ nickname: null, clientName: null, clientId: 'x', profileLabel: null }) === 'your AI agent');
+check('capitalize for a sentence start', capitalize('your Claude agent') === 'Your Claude agent' && capitalize('') === '');
+const labelled = approvalEmailBody({ agentLabel: agentLabel({ nickname: null, clientName: 'Claude', clientId: 'x', profileLabel: 'Default Profile' }), links: [link], times: 2, firstAskedAt: first, dashboardUrl: 'https://fgac.ai', supportAddress: 'support@fgac.ai' });
+check('the reminder reads as a sentence with the label', labelled.startsWith('FGAC has detected your Claude agent on the Default Profile asking 2 times, without approval, to:'));
 
 console.log('denial line');
 check('sent → repeat-request line', notifyDenialLine('sent', {}).startsWith('📧') && notifyDenialLine('sent', {}).includes('repeat request'));
 check('already_sent → names the time in UTC', notifyDenialLine('already_sent', { notifiedAt: first }).includes('2026-09-14 13:05 UTC'));
 check('already_sent without a stamp still reads', notifyDenialLine('already_sent', {}).includes('earlier'));
-for (const s of ['not_due', 'skipped_opened', 'skipped_rate_capped', 'failed', 'disabled', 'skipped_no_links'] as const) {
+for (const s of ['not_due', 'skipped_opened', 'skipped_rate_capped', 'skipped_burst', 'failed', 'disabled', 'skipped_no_links'] as const) {
   check(`${s} → no line`, notifyDenialLine(s, {}) === '');
 }
 
@@ -99,8 +130,18 @@ check('body names the refused account on its own line', refusalBody.includes('\n
 check('body lists the usable account (singular)', refusalBody.includes('The account it can use: me@example.com.'));
 check('body says no approval link exists', refusalBody.includes('No approval link exists for this'));
 check('body offers the task fix and the delegation fix with the accounts URL', refusalBody.includes('1. The task should use an account listed above') && refusalBody.includes('delegate access to me@example.com') && refusalBody.includes('https://fgac.ai/dashboard/accounts'));
+check('body links the delegation walkthrough video next to the delegation fix', refusalBody.includes(`How delegation works, in two minutes (video): https://fgac.ai${DELEGATION_HOWTO_PATH}`) && refusalBody.indexOf(DELEGATION_HOWTO_PATH) > refusalBody.indexOf('2. The task really should use'));
+check('the video path is the multiple-accounts use case page', DELEGATION_HOWTO_PATH === '/use-cases/multiple-gmail-accounts');
 check('body promises no repeat email for this account', refusalBody.includes('will not email you about this account again'));
-check('body signs off with the support address', refusalBody.trimEnd().endsWith('— FGAC (support@fgac.ai)'));
+check('body signs off as FGAC support with the fixed contact', refusalBody.trimEnd().endsWith('— FGAC support (support@fgac.ai)'));
+check('body never links localhost with a production base', !/localhost/.test(refusalBody));
+const humanRefusal = accountRefusalEmailBody({
+  agentLabel: agentLabel({ nickname: null, clientName: 'JkGUAFOdt9Ib0Q7J', clientId: 'JkGUAFOdt9Ib0Q7J', profileLabel: 'Default Profile' }),
+  requestedAccount: 'ops@example.com', usableAccounts: ['me@example.com'], ownerEmail: 'me@example.com',
+  tool: 'sheets_read_range', times: 3, firstRefusedAt: new Date('2026-09-23T02:03:00Z'), dashboardUrl: 'https://fgac.ai', supportAddress: 'qa-owner@example.com',
+});
+check('the 2026-09-23 email now names the agent by profile, not by id', humanRefusal.startsWith('FGAC has refused your AI agent on the Default Profile 3 times since 2026-09-23 02:03 UTC') && !humanRefusal.includes('JkGUAFOdt9Ib0Q7J'));
+check('the 2026-09-23 email never shows the QA sender as the signature', !humanRefusal.includes('qa-owner@example.com') && humanRefusal.includes('— FGAC support (support@fgac.ai)'));
 const pluralBody = accountRefusalEmailBody({
   agentLabel: 'x'.repeat(200), requestedAccount: 'ops@example.com', usableAccounts: ['a@example.com', 'b@example.com'], ownerEmail: 'a@example.com',
   times: 5, firstRefusedAt: new Date('2026-09-09T00:37:00Z'), dashboardUrl: 'https://fgac.ai', supportAddress: 'support@fgac.ai',
