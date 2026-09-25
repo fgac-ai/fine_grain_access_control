@@ -24,6 +24,8 @@ Listing copy source of truth: `docs/connector_submission/listing_copy.md`
 | xAI plugin marketplace (Grok Build) | 2026-09-17 | **submitted** — PR https://github.com/xai-org/plugin-marketplace/pull/766 from the `fgac-ai/plugin-marketplace` fork, pinned to main `952a187`; Socket scan green, Semgrep + catalog validation awaiting first-contributor workflow approval; third-party merges took 3–19 days in Sep 2026 | https://github.com/xai-org/plugin-marketplace |
 | cursor.directory (Cursor community marketplace) | 2026-09-17 | **live** — went live 2026-09-17 (verified ~11:20 UTC in a browser: title "FGAC.ai — Gmail, Google Sheets & Docs", the description, "MCP Servers (1) / Skills (1)", an "Add to Cursor" button and the install config `{"type":"http","url":"https://fgac.ai/api/mcp"}`; the "unpublished" / "Scanning your plugin" text is gone). The listing shows exactly one MCP server, `fgac` — the dev-only PostHog entry from the root `.mcp.json` (removed by hand before publishing; their scanner ignores subdirectory URLs) did NOT come back in the security scan. Plain `curl` to the listing URL returns HTTP 429 from a "Vercel Security Checkpoint" bot challenge, so the daily watch must read it through a real browser, never curl | https://cursor.directory/plugins/fgacai-gmail-google-sheets-docs |
 | Cursor Marketplace (first-party; also Grok Bot's Plugins pane) | 2026-09-17 | **application submitted** — publisher application (org name FGAC.ai, handle `fgac-ai`, contact support@fgac.ai, repo + logo + website) accepted with "Thanks for applying"; manual review, no status page, follow-up comes by email from Cursor's marketplace-publishing mailbox. Watch item: cursor.directory's scanner reads the repo root, so a re-scan would re-add the dev-only PostHog server from the root `.mcp.json` | https://cursor.com/marketplace |
+| Meta Muse Connector Platform (muse.ai/platform) | — | **packet ready, not submitted** (2026-09-25) — paste-ready values for every form field in `docs/connector_submission/muse_connector_packet.md` (+ `muse_submission.json`), icon `public/logo-512.png` (512×512, ≤ 256 KiB). Submission needs the owner signed in to a Muse account (US-only) to tick three attestations; the Muse Connector Terms render only when signed in. Meta reported 2,000+ submissions in the first days, onboarding "in waves", no SLA. Gmail and Google Workspace are already listed there, so our copy leads with multi-account, delegation and rules. Open risk: Muse custom connectors favour API-key auth and our MCP endpoint is OAuth-only — the packet's dry-run step settles it | https://muse.ai/platform |
+| musedirectory.ai (independent Muse directory, not Meta) | — | optional — their scout read our OAuth metadata on 2026-09-23 and did not list us (search "fgac" = 0); the submit form health-checks the endpoint with an MCP handshake, which an OAuth-only server answers with a 401 + resource metadata. Values in the packet's last section | https://musedirectory.ai/submit |
 
 Update the *submitted* and *status* columns as each step lands.
 
@@ -46,7 +48,10 @@ connector directory; VS Code / Copilot client names = GitHub MCP Registry
 marketplace; Grok Build / Grok Bot / Cursor client names = the xAI plugin
 marketplace or the Cursor Marketplace (record the exact `client_name` each
 reports during the §7 verification step); Smithery **proxies** every request through its gateway, so its
-installs show a Smithery user agent. PulseMCP, Glama and awesome-lists cannot
+installs show a Smithery user agent. Meta's Muse runs its MCP client
+from a cloud VM; the `client_name` / user agent it reports is unknown until the
+first connection (record it here when it appears). `musedirectory.ai-scout/1.0`
+is the independent directory's crawler, not Muse. PulseMCP, Glama and awesome-lists cannot
 be told apart from organic (any client). Baseline in the 30 days to
 2026-09-10, before any registry listing: `claude-code` (129 users),
 `Anthropic/ClaudeAI` (179), `Anthropic/Toolbox` (64 — directory inspection),
