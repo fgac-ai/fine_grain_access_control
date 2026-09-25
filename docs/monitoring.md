@@ -26,7 +26,7 @@ Captured in `verifyMcpAuth` (`src/app/api/mcp/route.ts`):
 | `connection_resolve` | what the auth layer's eager `resolveConnection` did on this request: `ran` (four Neon round trips), `skipped` (touched within the last 5 minutes by the same user+client — `src/lib/connectionTouchMemo.ts`), `error`. Added 2026-09-08 |
 | `connection_resolve_ms` | wall time of that eager resolve when it ran; the per-request DB cost of a handshake (see 7.16) |
 | `user_agent`, `client_name` | who failed: the request's UA and, when the unauthenticated request was an MCP `initialize`, its self-reported `clientInfo.name`. Added 2026-09-10 so a 401 spike is diagnosable from this event alone (the registry-launch spike had to be attributed by joining `connector_install_started` by minute) |
-| `client_class`, `client_class_signal` | `claude` \| `internal` \| `scanner` \| `direct`, and the rule that decided it (`ua:SmitheryBot/`, `name:glama`, `keyword:probe`, `ua:self-link`). `scanner` = MCP registry crawlers, directory health probes, "MCP security" scanners, SEO bots — classified from **both** fields because about a third of them run on a stock `node` / `undici` / `Go-http-client` / `python-httpx` UA and only identify themselves in `clientInfo.name`. `classifyMcpClient` in `src/lib/mcpClientSignals.ts`; also stamped on `connector_install_started`. Since 2026-09-12 a `direct` row can carry `client_class_signal = 'ua:stock-runtime-no-name'`: a bare HTTP runtime UA (`Bun/`, `Python/… aiohttp/`, `Go-http-client/`, `node`, `undici`, `python-httpx/`) with no `clientInfo` at all — unnamed automation, still `direct` because the real SDKs run on the same runtimes, but not a client that broke (every SDK's first request is an `initialize` that names itself). A measurement label only: nothing is blocked or rate-limited on it, and a 401 is the correct answer to every probe. Added 2026-09-10; see 7.21 |
+| `client_class`, `client_class_signal` | `claude` \| `internal` \| `scanner` \| `direct`, and the rule that decided it (`ua:SmitheryBot/`, `name:glama`, `keyword:probe`, `ua:self-link`). `scanner` = MCP registry crawlers, directory health probes, "MCP security" scanners, SEO bots — classified from **both** fields because about a third of them run on a stock `node` / `undici` / `Go-http-client` / `python-httpx` UA and only identify themselves in `clientInfo.name`. `classifyMcpClient` in `src/lib/mcpClientSignals.ts`; also stamped on `connector_install_started`. Since 2026-09-12 a `direct` row can carry `client_class_signal = 'ua:stock-runtime-no-name'`: a bare HTTP runtime UA (`Bun/`, `Python/… aiohttp/`, `Go-http-client/`, `node`, `undici`, `python-httpx/`) with no `clientInfo` at all — unnamed automation, still `direct` because the real SDKs run on the same runtimes, but not a client that broke (every SDK's first request is an `initialize` that names itself). Since 2026-09-25 a `direct` row can carry `client_class_signal = 'product:grok'` / `'product:cursor'`: a known third-party product (`PRODUCT_CLIENTS`), matched on `client_name` or user-agent before the scanner rules — Grok's add-time `grok-validator` handshake would otherwise read as a crawler via `keyword:validator`. Still `direct` (7.5 counts Anthropic products only), but named, so it leaves the unlabelled remainder in 7.21e and gets its own row in 7.21f. A measurement label only: nothing is blocked or rate-limited on it, and a 401 is the correct answer to every probe. Added 2026-09-10; see 7.21 |
 
 Volume control: failures always capture; successes are sampled **1 in 20 per
 request** (`success_sample_rate` carries the factor). Multiply `outcome=ok`
@@ -1624,11 +1624,15 @@ GROUP BY 1, 2
 ```sql
 -- 7.21e — the `direct` remainder, split (14 d). `ua:stock-runtime-no-name`
 -- is unnamed automation on a bare runtime (a health check or a crawler that
--- never sends initialize); `unlabelled` is what the review actually has to
--- read — a named client the classifier does not know, or a person on curl /
--- a browser. Only the unlabelled column can contain a real client that broke.
+-- never sends initialize); `product` is a known third-party product (Grok,
+-- Cursor — since 2026-09-25, `product:<name>`; before that deploy their rows
+-- sat in `unlabelled`: 5 ok + 1 no_token Grok rows in the week of 09-22);
+-- `unlabelled` is what the review actually has to read — a named client the
+-- classifier does not know, or a person on curl / a browser. Only the
+-- unlabelled column can contain a real client that broke.
 SELECT toDate(timestamp) AS day,
        countIf(properties.client_class_signal = 'ua:stock-runtime-no-name') AS stock_runtime_no_name,
+       countIf(properties.client_class_signal LIKE 'product:%')               AS product,
        countIf(coalesce(properties.client_class_signal, '') = '')            AS unlabelled,
        uniqIf(properties.user_agent,
               coalesce(properties.client_class_signal, '') = '')              AS unlabelled_uas,
@@ -1651,6 +1655,72 @@ half is unnamed automation and moves with the crawler population. Our own probe 
 UA (since 2026-09-10; before that its `no_token` rows sat under `node`,
 indistinguishable from glama on the same runtime) and its `invalid_token`
 rows still carry `kid = 'probe'` — keep both exclusions.
+
+**7.21f — the per-product split, with the non-Anthropic products on their
+own rows.** Added 2026-09-25, the day after the first Grok install
+(`docs/growth-channels.md`, Attribution). `client_name` and `user_agent`
+map to a product; the expression is the one PR #162's 7.31 uses for the
+inspector fold, plus a row per third-party family. Keep the two in step:
+a product added here is added there. The Grok arm lists both the hosted
+client and its add-time validator; the Cursor arm covers the desktop app
+and its server-side availability check.
+
+```sql
+-- 7.21f product expression. Non-Anthropic families first so their names
+-- never fall through to the raw client_name column.
+multiIf(properties.user_agent LIKE 'grok-connectors-manager/%'
+          OR properties.user_agent = 'Grok'
+          OR properties.client_name IN ('connectors-manager', 'grok-validator'), 'Grok',
+        properties.user_agent LIKE 'Cursor/%' OR properties.user_agent LIKE 'CursorServer/%'
+          OR properties.client_name IN ('Cursor', 'Cursor MCP Availability'),   'Cursor',
+        properties.user_agent LIKE 'claude-code/%',                             'claude-code',
+        properties.client_name = 'Anthropic/Toolbox',                           'Anthropic/ClaudeAI',
+        properties.client_name) AS product
+```
+
+```sql
+-- 7.21f-a — weekly callers and calls per product (8 w). The daily review's
+-- per-product table is this query; a product row that is present one week
+-- and absent the next is the churn signal for that channel.
+SELECT toStartOfWeek(timestamp, 1) AS week,
+       multiIf(properties.user_agent LIKE 'grok-connectors-manager/%'
+                 OR properties.user_agent = 'Grok'
+                 OR properties.client_name IN ('connectors-manager', 'grok-validator'), 'Grok',
+               properties.user_agent LIKE 'Cursor/%' OR properties.user_agent LIKE 'CursorServer/%'
+                 OR properties.client_name IN ('Cursor', 'Cursor MCP Availability'),   'Cursor',
+               properties.user_agent LIKE 'claude-code/%',                             'claude-code',
+               properties.client_name = 'Anthropic/Toolbox',                           'Anthropic/ClaudeAI',
+               properties.client_name) AS product,
+       count() AS calls, uniq(person_id) AS callers,
+       countIf(properties.outcome = 'denied_by_policy') AS denied
+FROM events
+WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
+  AND timestamp > now() - INTERVAL 8 WEEK
+GROUP BY week, product ORDER BY week, calls DESC
+```
+
+```sql
+-- 7.21f-b — install attempts per third-party product (14 d): tokenless
+-- discovery hits, authenticated handshakes and tool calls side by side. A
+-- product with discovery rows and no initialize is an install that stalled
+-- at OAuth (Cursor on 2026-09-24: 6 discovery rows, nothing after).
+SELECT splitByChar(':', properties.client_class_signal)[2] AS product,
+       countIf(event = 'connector_install_started')                 AS discovery,
+       countIf(event = 'mcp_auth_attempt' AND properties.outcome = 'ok') AS auth_ok_sampled,
+       uniqIf(properties.client_id, event = 'mcp_auth_attempt' AND properties.outcome = 'ok') AS clients
+FROM events
+WHERE event IN ('connector_install_started', 'mcp_auth_attempt')
+  AND properties.environment = 'production'
+  AND properties.client_class_signal LIKE 'product:%'
+  AND timestamp > now() - INTERVAL 14 DAY
+GROUP BY product ORDER BY discovery DESC
+```
+
+Measured at the deploy (rows before it carry no `product:` signal, so 7.21f-b
+starts empty; 7.21f-a works on the raw strings and covers the history): Grok
+— 21 `initialize`, 20 tool calls (18 ok, 2 `sheets_not_exposed`), one
+person, 2026-09-24T18:04Z → 09-25T07:57Z; Cursor — 6 tokenless discovery
+rows at 2026-09-24T18:09–18:10Z, no `initialize`, no tool call.
 
 **7.22 — Retry pressure per person and per request.** Added 2026-09-11 with
 the denial-copy change (`src/lib/denialCopy.ts`). Two reads, taken together:
