@@ -180,11 +180,66 @@ export const googleGrantFailures = pgTable('google_grant_failures', {
   // the claim stamp the shared daily cap and the global hourly breaker count.
   notifiedCount: integer('notified_count').notNull().default(0),
   notifiedAt: timestamp('notified_at'),
+  // Set by the bounce sweep (src/lib/emailBounces.ts) when a notice to this
+  // mailbox came back as a permanent DSN — denormalised from `email_bounces`
+  // so the refusal path, which already holds this row, can tell the agent
+  // the truth without a join: `mailbox_gone` (Google: "account does not
+  // exist" — the mailbox was deleted, nobody can reconnect it, the notice
+  // system must never write to it again) or `rejected` (exists, refused
+  // FGAC's mail — the owner was NOT told). 2026-09-23: a dead-grant notice
+  // to a deleted Workspace mailbox bounced 5.1.3 two seconds after sending
+  // and the agent kept being handed the dead reconnect link.
+  undeliverableAt: timestamp('undeliverable_at'),
+  undeliverableClass: text('undeliverable_class'),
+  // The DSN's enhanced status (e.g. `5.1.3`), quoted in the agent's refusal.
+  undeliverableStatus: text('undeliverable_status'),
 }, (table) => [
   uniqueIndex('google_grant_failures_owner_email_unique').on(table.userId, table.accountEmail),
   // Third range scan for the per-owner daily email cap (approvalRequests.ts
   // `recentNotificationCountSql` counts all three ledgers in one statement).
   index('google_grant_failures_user_notified_idx').on(table.userId, table.notifiedAt),
+]);
+
+// ─── Email Bounces ───────────────────────────────────────────────────────────
+// Undeliverable-address ledger for the owner notices (src/lib/emailBounces.ts).
+// FGAC sends its notices through its own proxy API from the support mailbox,
+// and Gmail's only bounce signal is the DSN the receiving MTA mails back to
+// that same mailbox; an hourly sweep reads those DSNs through the same key and
+// records every PERMANENT one (Action failed, Status 5.x.x) that is ours — the
+// echoed `X-FGAC-Notice` header, or a recipient one of the notice ledgers
+// knows. Keyed by ADDRESS, not by ledger row: a deleted mailbox must suppress
+// all three triggers for that person, including approval-link rows that do
+// not exist yet. Every claim checks `NOT EXISTS` here before stamping
+// `notified_at`. One row per DSN message (idempotent re-sweeps); an address
+// can carry several rows.
+export const emailBounces = pgTable('email_bounces', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  // Final-Recipient, lower-cased and trimmed.
+  address: text('address').notNull(),
+  // `mailbox_gone` (5.1.1 / 5.1.2 / 5.1.3 / 5.1.6 / 5.1.10 / 5.2.1: no such
+  // mailbox, or disabled — nobody can reconnect it) or `rejected` (any other
+  // 5.x.x: the mailbox exists but refused FGAC's mail).
+  bounceClass: text('bounce_class').notNull(),
+  // The enhanced status code, e.g. `5.1.3`.
+  dsnStatus: text('dsn_status').notNull(),
+  // First 200 chars of Diagnostic-Code, one line.
+  dsnDiagnostic: text('dsn_diagnostic'),
+  // Which trigger's mail bounced, from the echoed X-FGAC-Notice header
+  // (`dead_grant` / `approval_link` / `account_refusal`); `unknown` for
+  // notices sent before the header existed (matched by recipient instead).
+  noticeKind: text('notice_kind').notNull().default('unknown'),
+  // The FGAC user the address resolved to (a users.email, or the owner of a
+  // google_grant_failures row for it); null when only the header matched.
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
+  // The DSN's Gmail message id — the idempotency key.
+  gmailMessageId: text('gmail_message_id').notNull(),
+  // The DSN's internalDate.
+  bouncedAt: timestamp('bounced_at').notNull(),
+  recordedAt: timestamp('recorded_at').defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex('email_bounces_message_unique').on(table.gmailMessageId),
+  // Every notice claim probes `EXISTS (… WHERE address = $1)`.
+  index('email_bounces_address_idx').on(table.address),
 ]);
 
 // ─── Email Delegations ───────────────────────────────────────────────────────

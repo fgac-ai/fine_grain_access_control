@@ -32,6 +32,11 @@ export type NotifyStatus =
   /** Account-refusal notice only: the owner was already emailed about a
    * refused account inside the current episode (ACCOUNT_REFUSAL_EPISODE_GAP_MS). */
   | 'skipped_episode'
+  /** The recipient address is on the bounce ledger (`email_bounces`): a
+   * previous notice came back as a permanent DSN, so nothing is sent and no
+   * claim is made. For a dead grant the refusal text changes with it
+   * (src/lib/googleTokenFailure.ts `undeliverableGuidance`). */
+  | 'skipped_undeliverable'
   /** Link reminder only: another request of this owner was emailed inside
    * the same-turn window (NOTIFY_MIN_GAP_MS) — one email per turn; this link
    * stays eligible for a later turn. */
@@ -40,6 +45,12 @@ export type NotifyStatus =
   | 'failed'
   | 'disabled';
 
+/** Which trigger a notice belongs to — emitted as the `X-FGAC-Notice` header
+ * so a DSN that echoes the original headers can be attributed to its trigger
+ * by the bounce sweep (src/lib/emailBounces.ts) without guessing from the
+ * subject. */
+export type NoticeKind = 'approval_link' | 'account_refusal' | 'dead_grant';
+export const NOTICE_HEADER = 'X-FGAC-Notice';
 /** What every owner notice signs as and tells people to write to. A fixed
  * address, never the configured sender: on a local or preview build the
  * sender is a QA account standing in for the support mailbox, and a
@@ -182,7 +193,11 @@ export function encodeHeaderWord(value: string): string {
  * the key's own account, so Gmail keeps the From consistent. `cc` is used by
  * the dead-grant notice on a delegated mailbox (the key owner rides along).
  */
-export function approvalEmailRaw(opts: { from: string; to: string; cc?: string | null; subject: string; body: string }): string {
+export function approvalEmailRaw(opts: {
+  from: string; to: string; cc?: string | null; subject: string; body: string;
+  /** Trigger tag, echoed back inside a DSN (see NoticeKind). */
+  notice?: NoticeKind;
+}): string {
   const from = sanitizeLine(opts.from, 254);
   const cc = opts.cc ? sanitizeLine(opts.cc, 254) : '';
   return `From: FGAC <${from}>\r\n` +
@@ -190,6 +205,7 @@ export function approvalEmailRaw(opts: { from: string; to: string; cc?: string |
     `To: ${sanitizeLine(opts.to, 254)}\r\n` +
     (cc ? `Cc: ${cc}\r\n` : '') +
     `Subject: ${encodeHeaderWord(sanitizeLine(opts.subject, 200))}\r\n` +
+    (opts.notice ? `${NOTICE_HEADER}: ${opts.notice}\r\n` : '') +
     `MIME-Version: 1.0\r\n` +
     `Content-Type: text/plain; charset=utf-8\r\n` +
     `Content-Transfer-Encoding: 8bit\r\n\r\n${opts.body}`;
