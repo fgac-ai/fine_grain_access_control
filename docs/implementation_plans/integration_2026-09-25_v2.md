@@ -89,4 +89,7 @@ has two `### A29:` headings (argument aliases from PR #160, dead-grant notice fr
 PR #156) — the same registry collision this train hit with A30 and 7.31, and the
 coverage checker's set-based parser collapses the two into one slot. ADR-002's
 duplicate-id guard is the structural fix; renumbering the second A29 is the
-one-line one.
+one-line one. Resolved on `fix/qa-duplicate-a29-guard` (2026-09-27): the
+dead-grant notice assertion is now A32 (A30/A31 belong to this train) and
+`qa-coverage-check.ts` exits 2 naming the file and id when a capability file
+repeats an `A<n>` heading.
