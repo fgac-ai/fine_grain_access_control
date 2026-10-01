@@ -159,4 +159,26 @@ link whose request Clerk did not classify as a document navigation got a
 `isDocumentNavigation` / Clerk's `protect()` behaviour for non-document
 fetches (approvalWall.ts), not a regression.
 
-**Preview:** filled in below once the Vercel build for PR #172 is Ready.
+**Preview, 2026-10-01 00:40–00:44Z, PR #172 commit e6fdc30 (main merged;
+source identical to 799c334), qa-setup-driver, built-in browser, fresh
+preview Neon branch.** Hosted session confirmed empty on the wall page, so
+the wall hop itself was exercised this time; Clerk returned straight to the
+approve URL after the chooser (no callback loop).
+
+| assertion | result |
+| --- | --- |
+| 14 A20 — wall → chooser → USER_A on USER_B's link | **PASS**: "This link belongs to a different account"; `wrong-account-notice` (owner masked, visitor in full); `delegate-panel` `surface=approve_wall`, `prominent=false`; `wrong-account-sign-out`; "Invalid link" absent; no console errors, approve GET 200 |
+| `/dashboard` as USER_A afterwards | "Default Profile" renders, no error, no second-account prompt |
+| repeat open | same wrong-account card |
+| 14 A5 owner control (USER_A's own link) | **PASS**: "Approve agent permission?", Picker step 1 — the offline mint matches the deployment |
+| 14 A7 tamper control (last signature char changed) | **PASS**: generic "Invalid link" |
+
+PostHog, `environment = 'preview'`, same window: `approval_sign_in_wall`
+(`claude_desktop`, sheets_expose) at 00:41:13 → `approval_link_opened
+{status: wrong_account, delegate_offer: true, request_id: skpRAwjy…}` +
+`delegation_prompt_shown{surface: approve_wall}` at 00:42:53 and again at
+00:43:45 (repeat open) → owner open `{status: fresh, request_id:
+IifCC_VS…}` at 00:44:02 → tampered open `{status: invalid, invalid_reason:
+signature}` at 00:44:16. Exactly the rows the ship list promised; the
+wall-sign-up case now joins PR #158's funnel (§7.29) instead of vanishing
+into `invalid` with no request id.
