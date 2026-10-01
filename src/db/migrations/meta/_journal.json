@@ -113,6 +113,13 @@
       "when": 1790127682189,
       "tag": "0017_google_grant_failures",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1790341512860,
+      "tag": "0018_email_bounces",
+      "breakpoints": true
     }
   ]
 }

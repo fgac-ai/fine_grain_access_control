@@ -1,6 +1,16 @@
 {
   "crons": [
-    { "path": "/api/cron/deliver-webhooks", "schedule": "0 12 * * *" },
-    { "path": "/api/cron/renew-watches", "schedule": "0 6 * * *" }
+    {
+      "path": "/api/cron/deliver-webhooks",
+      "schedule": "0 12 * * *"
+    },
+    {
+      "path": "/api/cron/renew-watches",
+      "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/api/cron/sweep-bounces",
+      "schedule": "30 * * * *"
+    }
   ]
 }

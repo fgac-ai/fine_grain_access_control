@@ -27,10 +27,11 @@ fi
 # allowlist below. Real addresses of any kind — customers, operators, personal
 # accounts — never belong in a commit; use placeholders on example.com.
 #
-# Allowlist: the public support address, noreply senders (includes the
+# Allowlist: the public support address, the RFC 5321 MTA senders that DSN
+# fixtures quote (mailer-daemon, postmaster), noreply senders (includes the
 # Co-Authored-By trailer), GitHub noreply, and RFC 2606 placeholder domains.
 EMAIL_REGEX='[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
-ALLOWED_EMAIL_REGEX='^(support|sales)@fgac\.ai$|^(noreply|no-reply)@|@users\.noreply\.github\.com$|@(example|test|invalid|localhost)\.|@company\.com$'
+ALLOWED_EMAIL_REGEX='^(support|sales)@fgac\.ai$|^(mailer-daemon|postmaster)@|^(noreply|no-reply)@|@users\.noreply\.github\.com$|@(example|test|invalid|localhost)\.|@company\.com$'
 
 # stdin -> prints disallowed addresses found (empty when clean)
 scan_disallowed_emails() {

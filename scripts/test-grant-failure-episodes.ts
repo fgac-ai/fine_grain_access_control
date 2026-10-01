@@ -54,7 +54,7 @@ function check(name: string, cond: boolean, detail?: unknown) {
     console.log('episode 1 — dead grant');
     const r1 = await recordGrantFailure({ userId: user.id, accountEmail: email, reason: 'grant_revoked' });
     check('first failure inserts count 1, unnotified', !!r1 && r1.failureCount === 1 && r1.notifiedCount === 0 && r1.notifiedAt === null);
-    const c1 = await claimGrantFailureNotification(r1!.id, user.id, NOTIFY_MAX_PER_DAY);
+    const c1 = await claimGrantFailureNotification(r1!.id, user.id, NOTIFY_MAX_PER_DAY, email);
     check('claim stamps the dead-grant notice', c1.claimed);
     const r2 = await recordGrantFailure({ userId: user.id, accountEmail: email, reason: 'refresh_failed' });
     check('another dead-grant class extends the episode (count 2, still notified)', !!r2 && r2.failureCount === 2 && r2.notifiedCount === 1 && r2.notifiedAt !== null);
