@@ -134,6 +134,29 @@ Fixture: a fresh `db:branch` (or preview branch) where USER_B has not loaded
 `/dashboard`. Control first (owner opens the link → approve flow). Then
 signed out → link → wall → chooser → USER_B → approve page.
 
-- Pre-fix (local, 2026-09-30): see Established §1 — "Invalid link".
-- Post-fix (local): filled in below.
-- Preview: filled in below.
+**Local, 2026-09-30, commit 799c334 (qa-setup-driver, built-in browser).**
+Owner USER_B (link minted offline, request `skpRAwjy…`), visitor USER_A.
+
+| step | pre-fix (c5237a9) | post-fix (799c334) |
+| --- | --- | --- |
+| signed-out open of the link | wall → hosted Clerk sign-in → chooser → USER_A (consent accepted; the dev instance's accounts.dev callback loop, recovered by loading `/` and refreshing `__session`) | same path, same loop, same recovery |
+| approve page as USER_A | h1 **"Invalid link"**; `wrong-account-notice` absent; `delegate-panel` absent; page has zero testids | h1 **"This link belongs to a different account"**; `wrong-account-notice` present (owner masked as `k•••h@<USER_B domain>`, visitor in full); `delegate-panel` present, `surface=approve_wall`, `prominent=false` (no prior-session markers in that browser); `wrong-account-sign-out` present |
+| server log | — | `[resolveDbUser] Adopting live row for USER_A: clerkUserId <prod id> -> <dev id>` right before the 200; no error lines |
+| `/dashboard` as USER_A afterwards | not loaded (fixture) | 307 → `/dashboard/agents/default-profile`, "Default Profile" renders with its pre-existing history; no second-account prompt |
+| re-open the link (repeat control) | — | the same wrong-account card again, never "Invalid link" |
+
+Honest note on what the fixture exercised: USER_A's address has a live row
+in main (production), so the shared call took `resolveDbUser`'s ADOPT
+branch (repoint the email's row to the dev Clerk id), not the CREATE branch
+a genuinely new Google identity takes in production. Both branches are the
+same function every first dashboard visit runs — the create branch is
+exercised by every production sign-up — so the approve page now does
+exactly what the next dashboard click would have done, one page earlier.
+
+Observation outside this change's scope (runner): a signed-out load of the
+link whose request Clerk did not classify as a document navigation got a
+404 at the server before the client went to accounts.dev — that is
+`isDocumentNavigation` / Clerk's `protect()` behaviour for non-document
+fetches (approvalWall.ts), not a regression.
+
+**Preview:** filled in below once the Vercel build for PR #172 is Ready.
