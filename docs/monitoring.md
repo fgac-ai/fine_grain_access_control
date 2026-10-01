@@ -3180,3 +3180,96 @@ GROUP BY week, product ORDER BY week, calls DESC
 
 Healthy: 7.32a's `toolbox` column at zero a week after the deploy; 7.32b shows
 no transition whose `to_name` is `Anthropic/Toolbox` other than `first`.
+
+**7.33 — Directory connections stop while everything else is green (the
+2026-09-27..30 gap).** Added 2026-10-01
+(`docs/implementation_plans/claude_suspicious-lederberg-bef39d_v1.md`). From
+2026-09-26 23:51Z to 2026-09-30 22:59Z no `mcp_connection_created` row was
+written (prior ten days: 4.7/day, so three empty days is not noise), while
+tool calls, auth-health, the synthetic probe, discovery and every Vercel log
+stayed normal, and then connections resumed with no change on our side. The
+connect flow has a blind segment: after Claude's unauthenticated `initialize`
+(our 401) and its discovery fetches, everything up to the Clerk `user.created`
+webhook runs on Clerk's hosts (`clerk.fgac.ai/oauth/authorize` →
+`accounts.fgac.ai/sign-in` → Google → `accounts.fgac.ai/oauth-consent` →
+Claude's callback → Clerk token endpoint). FGAC sees nothing of it, and the
+website's own sign-up does not exercise it either (the site uses Clerk's modal
+on fgac.ai; the hosted portal is used **only** by the connector flow). Run the
+checks in this order; each one localises the break further.
+
+1. **Is it real, and where in the funnel?** Compare, per day, the 7.5
+   `claudeai_unauth_initializes` (upper bound on Connect clicks — they stayed
+   at 16–24/day through the gap, spread over 13–16 hours, so they do not
+   prove clicks either way), connector sign-ups, and connections:
+
+   ```sql
+   SELECT toDate(timestamp) AS day,
+          countIf(event = 'sign_up_completed')                                   AS signups,
+          countIf(event = 'mcp_connection_created')                              AS connections,
+          countIf(event = 'mcp_connection_created'
+                  AND properties.account_age_seconds < 600)                      AS connector_signups,
+          countIf(event = 'mcp_client_initialize'
+                  AND properties.client_name = 'Anthropic/Toolbox')              AS inspector_handshakes
+   FROM events
+   WHERE properties.environment = 'production'
+     AND event IN ('sign_up_completed', 'mcp_connection_created', 'mcp_client_initialize')
+     AND timestamp > now() - INTERVAL 14 DAY
+   GROUP BY day ORDER BY day
+   ```
+
+   `sign_up_completed` is the Clerk `user.created` webhook (fires for every
+   flow). Sign-ups continuing while `connector_signups` is 0 means the
+   website flow works and whoever tried the connector never reached Clerk
+   account creation — the break is at or before the hosted sign-in page, or
+   nobody arrived. Sign-ups from the connector with no connection row means
+   the break is after consent (token exchange, Claude's callback, or our
+   first-request auto-attach — check `mcp_auth_attempt` outcomes and Vercel
+   errors on `/api/mcp`).
+
+2. **Outside-in, read-only, from this machine:** the 401 challenge
+   (`www-authenticate … resource_metadata=`), both well-known documents on
+   fgac.ai and clerk.fgac.ai, Claude's client-metadata document
+   (`https://claude.ai/oauth/mcp-oauth-client-metadata`, 200 for any user
+   agent), the authorize redirect chain with that client id (302 → `/continue`
+   → `accounts.fgac.ai/sign-in?redirect_url=…oauth-consent…`; a bogus client
+   id gets 401 `invalid_client`, so Clerk is resolving the document), and
+   `scripts/mcp-auth-probe.ts`. **Expect `curl` to get HTTP 403 "Just a
+   moment" (`cf-mitigated: challenge`) on every `accounts.fgac.ai` path** —
+   that is Clerk's zone-wide Cloudflare managed challenge for non-browser
+   clients (identical on accounts.clerk.com and other Clerk portals), not an
+   outage; real browsers pass it without an interstitial.
+
+3. **A real browser through the real URL** (a `qa-setup-driver` run with
+   USER_A — never the main session): open the exact authorize URL Claude
+   opens, with fresh PKCE, and walk sign-in → Google chooser → consent →
+   Allow. The browser lands on `claude.ai/api/mcp/auth_callback`, which
+   Claude rejects (it did not start the flow) **and answers with
+   `/logout?involuntary=1`** — so do this in a pane that holds no claude.ai
+   session you care about. Every hop reaching the callback clears the Clerk
+   side; the code itself is consumed server-side by Claude and cannot be
+   exchanged from the pane (a Path B run listening for the consent 303 could).
+
+4. **Clerk's view (Ken, Dashboard):** Logs for the window — request volume
+   and errors on `/oauth/authorize`, `/oauth-consent`, `/oauth/token`, and
+   sign-in/sign-up attempts that never completed. This is the only record
+   that separates "nobody arrived" (Anthropic side: directory listing,
+   popup) from "arrived and stalled on the portal". Also OAuth
+   applications: Claude registers via its client-metadata URL since
+   2026-09-10 (no DCR rows since), so new `Claude` DCR registrations would
+   mean Claude changed behaviour; `GET /v1/oauth_applications` with the
+   production secret from `.secrets/prod.env` lists them.
+
+5. **Vercel runtime logs** (`vercel logs <prod deployment url> --since 24h
+   --level error --json`; the project-wide form 504s past ~48h): the
+   `/api/mcp` 401 "Invalid OAuth access token" rows are the 15-minute
+   synthetic probe (`error_class = internal`), not users.
+
+What this gap did **not** show: no `invalid_token` from the `claude` client
+class, no `audience_mismatch`, no 5xx, no eager-resolve errors, no Clerk or
+Anthropic status incident covering the days, no deploy (last one 09-25
+13:00Z, with a successful connection after it). Treat a recurrence as external
+until step 4 says otherwise; the structural fix, if Ken wants one, is to host
+sign-in and the OAuth consent page on fgac.ai (Clerk's `<OAuthConsent />`,
+Configure → Paths, and a `/sign-in` page), which moves the blind segment onto
+our Vercel logs and PostHog.
+
