@@ -1,6 +1,6 @@
 # `client_name` on tool calls: the proxied claude.ai vs Claude Code split is a latest-handshake proxy
 
-Branch: `claude/mcp-client-name-shared-registrations` — revision 1 (2026-10-01)
+Branch: `claude/mcp-client-name-shared-registrations` — PR #175 — revision 1 (2026-10-01)
 
 Follows `mcp-client-name-inspector_v1.md` (PR #162, deployed 2026-10-01 ~00:03Z
 in train #168). Runbook: `docs/monitoring.md` 7.32, revision 2026-10-01.
