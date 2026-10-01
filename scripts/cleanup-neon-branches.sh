@@ -19,6 +19,12 @@
 # would make every branch look idle). Pass --dry-run to print the plan without
 # deleting.
 #
+# The Neon CLI is PINNED in scripts/lib/neonctl.ts — unpinned `npx neonctl`
+# followed a registry that shipped three major versions in one week, and the
+# 2026-09-26 daily run died on its first delete mid-drift. A failed delete is
+# reported and skipped (exit code 1 at the end), never an abort: the kept table
+# and the 💰 line always print.
+#
 # Leftover git worktrees no longer keep database branches alive — that coupling
 # is gone. `npm run worktrees:report` lists finished worktree directories; it
 # only reports, and removing them is a separate, manual decision.

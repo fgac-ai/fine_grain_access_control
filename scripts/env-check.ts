@@ -124,8 +124,10 @@ console.log('\nPOSTHOG (query access)');
 // (Vercel env). The key must belong to a profile that allows sending.
 if (process.env.SUPPORT_FGAC_PROXY_KEY && process.env.SUPPORT_SENDER_EMAIL) {
   console.log(`Approval reminder email: ON, from ${process.env.SUPPORT_SENDER_EMAIL} through FGAC's proxy API (key ${process.env.SUPPORT_FGAC_PROXY_KEY.slice(0, 12)}…)`);
+  console.log('Bounce sweep (/api/cron/sweep-bounces): ON — reads that mailbox\'s DSNs with the same key and suppresses undeliverable recipients');
 } else {
   console.log('Approval reminder email: off (SUPPORT_FGAC_PROXY_KEY / SUPPORT_SENDER_EMAIL not set)');
+  console.log('Bounce sweep: off (same two variables)');
 }
 
 const phKey = process.env.POSTHOG_PERSONAL_API_KEY;

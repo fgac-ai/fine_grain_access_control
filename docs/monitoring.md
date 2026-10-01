@@ -1178,14 +1178,89 @@ SELECT toStartOfWeek(first_conn, 1) AS connect_week,
 FROM per GROUP BY connect_week ORDER BY connect_week
 ```
 
-Healthy: `called_then_silent_7d` ≈ 0 (a non-zero value here is a real
-regression — someone who used the tools and left) and
-`never_called_silent_7d` concentrated in old cohorts. The pool to work on is
-`never_called_still_pinging`: Claude loads the connector in their sessions and
-it never gets used (the 2026-09-08 baseline was 39 people, most never having
-opened the dashboard — see 7.18 for the split). Watch this weekly; a rising
-never-called share in NEW cohorts is the only thing that would push the
-published rate back up once the launch window has aged out.
+Healthy — **corrected 2026-09-30** (plan
+`docs/implementation_plans/claude-goofy-keller-80448e_v1.md`).
+`called_then_silent_7d` is a **stock, not a flow**: a caller who stops stays
+counted until their connect week ages out of the 6-week window, so the
+"≈ 0" criterion written on 2026-09-08 only held while the listing was 23
+days old. Re-run as of 09-08 / 09-15 / 09-22 / 09-30 with the same 6-week
+window it reads 0 / 5 / 11 / 17; the like-for-like 23-day window on 09-30
+reads 8 of 76 ever-called. None of it is re-installs (every silent caller
+has one person id and no connection created after the last call), and the
+set churns daily — between 09-27 and 09-30, 6 of 18 left (3 aged out of the
+window, 3 pinged again with the connector still installed) and 5 entered.
+A non-zero value is therefore not a flag. Read 7.17b instead:
+
+- **Activated-then-silent** (≥ 5 successful calls, then 7 d without a
+  message) is the number that would mean "used it and left". 2026-09-30:
+  10 of 120 activated callers in the window, 0–3 per week of last call.
+  4 of the 5 heaviest ended their last session on successes with the
+  connector still pinging for days to weeks afterwards (dormant Claude use,
+  not a wall); the fifth ended on an unopened `docs_not_exposed` link after
+  27 earlier approvals. Flag only when a week's `activated_now_silent`
+  exceeds 5 or 20% of that week's `activated`, or when an activated caller's
+  last call was a denial/error (`activated_silent_ended_on_failure` — list
+  the denial codes; 0 of 10 on 09-30, 1 of 8 in the 09-27 set).
+- **Bounced-then-silent** (< 5 successes) is the 7.18
+  `sheets_docs_tried_never_succeeded` population re-surfacing here because a
+  single call counts as "called". 2026-09-30: 7 of 23. Their walls were
+  scope-missing (3), dead Google grant (2), approval link opened but the
+  Picker cancelled/abandoned or opened under the person's other Google
+  account (2), first-call 404/error (2), link never opened (1) — each with a
+  shipped or in-train fix (PR #156 dead-grant notice, #166 scope-missing
+  notice, #158 second-account pairing, #123 Picker cancel), all deployed
+  AFTER these people went quiet. Report it under activation (7.18), not
+  under disconnects.
+- `never_called_silent_7d` concentrated in old cohorts; the pool to work on
+  is still `never_called_still_pinging`: Claude loads the connector in their
+  sessions and it never gets used (2026-09-08 baseline 39 people, most never
+  having opened the dashboard — see 7.18). A rising never-called share in
+  NEW cohorts is the only thing that would push the published rate back up
+  once the launch window has aged out.
+- Upper bound for the published badge: silent callers + never-called silent
+  over accounts messaging in 30 d — 09-30: (17 + 9) / 246 = 10.6% if every
+  silent account had clicked disconnect (the 3 that pinged again had not).
+  Compare with the badge Ken reads on the listing dashboard; never infer it.
+- No owner email (`approval_link_notified` / `account_refusal_notified` /
+  `google_grant_dead_notified`) reached any of the 18 silent callers of
+  09-27 — those triggers went live 09-16..23 and none of the 18 tripped
+  one — so "emails are not read" cannot be concluded from this cohort.
+
+```sql
+-- 7.17b — Silence as a weekly flow, split by activation. Person-level,
+-- same exclusions and window as 7.17; `ok_calls >= 5` is the activation bar.
+WITH per AS (
+  SELECT person_id,
+         toDate(minIf(timestamp, event = 'mcp_connection_created')) AS first_conn,
+         maxIf(timestamp, event IN ('mcp_client_initialize', '$mcp_tool_call')) AS last_msg,
+         maxIf(timestamp, event = '$mcp_tool_call') AS last_call,
+         countIf(event = '$mcp_tool_call') AS calls,
+         countIf(event = '$mcp_tool_call' AND properties.outcome = 'success') AS ok_calls,
+         argMaxIf(properties.outcome, timestamp, event = '$mcp_tool_call') AS last_outcome
+  FROM events
+  WHERE event IN ('mcp_connection_created', 'mcp_client_initialize', '$mcp_tool_call')
+    AND properties.environment = 'production'
+    AND timestamp > now() - INTERVAL 6 WEEK
+    AND person.properties.email NOT IN (/* internal + QA accounts: the same list every query in §7 uses, plus the demo account */)
+  GROUP BY person_id
+  HAVING first_conn > toDate('2000-01-01') AND calls > 0
+)
+SELECT toStartOfWeek(last_call, 1) AS last_call_week,
+       count()                                                           AS callers,
+       countIf(ok_calls >= 5)                                            AS activated,
+       countIf(ok_calls >= 5 AND last_msg < now() - INTERVAL 7 DAY)      AS activated_now_silent,
+       countIf(ok_calls >= 5 AND last_msg < now() - INTERVAL 7 DAY
+               AND last_outcome != 'success')                            AS activated_silent_ended_on_failure,
+       countIf(ok_calls < 5)                                             AS bounced,
+       countIf(ok_calls < 5 AND last_msg < now() - INTERVAL 7 DAY)       AS bounced_now_silent
+FROM per GROUP BY last_call_week ORDER BY last_call_week
+```
+
+Baseline 2026-09-30 (`last_call_week`: callers / activated / activated_now_silent
+/ bounced / bounced_now_silent): 08-24 8/5/2/3/0 · 08-31 8/3/1/5/2 ·
+09-07 14/9/3/5/3 · 09-14 17/10/1/7/2 · 09-21 29/26/3/3/0 · 09-28 67/67/0/0/0.
+The current week always reads 0 silent (nobody can be 7 d quiet yet) and the
+week before is still settling; judge weeks that are ≥ 14 d old.
 
 **7.18 — Acquisition funnel, per person.** Stages: (1) Connect click →
 7.5 upper bound; (2) Clerk account created → `sign_up_completed`
@@ -1661,9 +1736,10 @@ rows still carry `kid = 'probe'` — keep both exclusions.
 **7.21f — the per-product split, with the non-Anthropic products on their
 own rows.** Added 2026-09-25, the day after the first Grok install
 (`docs/growth-channels.md`, Attribution). `client_name` and `user_agent`
-map to a product; the expression is the one PR #162's 7.31 uses for the
-inspector fold, plus a row per third-party family. Keep the two in step:
-a product added here is added there. The Grok arm lists both the hosted
+map to a product; the expression is the one 7.32 uses for the inspector
+fold (PR #162, numbered 7.31 while that PR was open), plus a row per
+third-party family. 7.32's own expressions carry the same arms since
+2026-10-01. Keep the two in step: a product added here is added there. The Grok arm lists both the hosted
 client and its add-time validator; the Cursor arm covers the desktop app
 and its server-side availability check.
 
@@ -2599,9 +2675,17 @@ GROUP BY owner ORDER BY failures_after DESC
 -- APPROVAL_LINK_EMAIL=off); `failed` = the send or the ledger write failed
 -- (server logs: "[approvalNotify] dead-grant"); `skipped_rate_capped` = the
 -- owner already had 3 notices of any kind today; `skipped_global_capped` =
--- the 10-per-hour breaker tripped — pair it with 7.13a's incident shape.
+-- the 10-per-hour breaker tripped — pair it with 7.13a's incident shape;
+-- `skipped_undeliverable` (since 2026-09-25) = the mailbox bounced an earlier
+-- notice and is on `email_bounces` — nothing is sent, and `mailbox_undeliverable`
+-- says whether the agent got the stop (`mailbox_gone`, no reconnect link) or
+-- the "owner was not told, relay the link" text (`rejected`). A mailbox that
+-- keeps refusing under `mailbox_gone` for days is an agent that ignored the
+-- stop — the same reading as 7.13a's retry pressure, and the connection is
+-- the lever, not more mail.
 SELECT toDate(timestamp) AS day, properties.google_token_error AS reason,
        properties.account_delegated AS delegated, properties.notify_status AS notify,
+       properties.mailbox_undeliverable AS undeliverable,
        max(toInt64(properties.grant_days_dead)) AS max_days_dead,
        count() AS refusals, uniq(person_id) AS key_owners
 FROM events
@@ -2609,7 +2693,7 @@ WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
   AND properties.denial_code = 'google_token_unavailable'
   AND properties.google_token_error IN ('grant_revoked', 'refresh_failed', 'no_token')
   AND timestamp > now() - INTERVAL 7 DAY
-GROUP BY day, reason, delegated, notify ORDER BY day DESC, refusals DESC
+GROUP BY day, reason, delegated, notify, undeliverable ORDER BY day DESC, refusals DESC
 ```
 
 ```sql
@@ -2700,16 +2784,70 @@ WHERE e.timestamp > now() - INTERVAL 30 DAY
 GROUP BY owner ORDER BY refusals_after DESC
 ```
 
+-- 7.30g — bounces (30 d): notices that came back undeliverable, by week.
+-- Added 2026-09-25 (src/lib/emailBounceSweep.ts, hourly cron
+-- /api/cron/sweep-bounces; `docs/implementation_plans/claude_festive-nightingale-9126ed_v1.md`).
+-- Gmail has no bounce webhook: the DSN Google mails back to the support
+-- address (a send-as alias on the operator mailbox) is the only signal, and
+-- the sweep reads it through the SAME support-profile key the notices are
+-- sent with, then files it on `email_bounces`. From then on no trigger emails
+-- that address (`notify_status: 'skipped_undeliverable'`) and a dead-grant
+-- refusal on a `mailbox_gone` address carries a stop instead of a reconnect
+-- link. `mailbox_gone` (5.1.3 "account does not exist" from Google's own MTA
+-- on a Workspace domain) = the mailbox was DELETED — Google's token endpoint
+-- says `invalid_grant` for that and for a revoked grant alike, so before this
+-- the agent was handed a dead reconnect link on every refusal (2026-09-23,
+-- four refusals over two days). One row per DSN, captured for the recipient.
+-- Baseline at introduction: one bounce in 30 d (that case). Two or more
+-- `rejected` in a week from different domains = the support sender is being
+-- treated as spam somewhere — check the alias's SPF/DKIM before anything else.
+SELECT toStartOfWeek(timestamp) AS week, properties.notice_kind AS notice,
+       properties.bounce_class AS class, properties.dsn_status AS dsn,
+       count() AS bounces, uniq(person_id) AS recipients,
+       round(avg(toFloat64OrNull(toString(properties.hours_after_send))), 1) AS avg_hours_after_send
+FROM events
+WHERE event = 'notice_bounce_recorded' AND properties.environment = 'production'
+  AND timestamp > now() - INTERVAL 30 DAY
+GROUP BY week, notice, class, dsn ORDER BY week DESC, bounces DESC
+```
+
+Did the stop land? For each `mailbox_gone` recipient, the refusals on that
+mailbox AFTER the bounce was filed should carry `notify_status =
+'skipped_undeliverable'` and `mailbox_undeliverable = 'mailbox_gone'` (7.30c),
+and should then STOP within a day — the text tells the agent to remove the
+account from the task. An agent still calling a `mailbox_gone` mailbox a week
+later is the 7.13a retry-pressure reading, and the fix is on the connection,
+never another email. Ledger, read-only: `SELECT address, bounce_class,
+dsn_status, notice_kind, bounced_at FROM email_bounces WHERE bounce_class IN
+('mailbox_gone','rejected') ORDER BY bounced_at DESC` — `transient` and
+`unmatched` rows are the sweep's own memory (each DSN is fetched once, ever)
+and suppress nothing. The cron's own response
+(`listed/fresh/recorded/failed`) is in the Vercel function logs under
+`[Cron:sweep-bounces]`; `status: 'disabled'` means the sender variables are
+unset in that environment, `failed` with a 401 means the support key was
+revoked, a 403 that the support profile grew a read rule that blocks DSNs.
+No log line at all, hour after hour, means the cron itself is being refused:
+every `/api/cron/*` route answers 401 to Vercel's scheduler unless
+`CRON_SECRET` is set in the Production environment (Vercel sends it as the
+bearer; `docs/partner_onboarding_runbook.md` step 2) — as of 2026-09-25 it
+was NOT set, so this is the first thing to check when 7.30g stays empty.
+
 Healthy: 7.30a shows at most one row per owner + mailbox + class with
 `days_dead = 0` and no hour holding 5 or more rows; 7.30c and 7.30e show
 `sent` once per new dead or scope-less mailbox, `already_sent` on the rest,
-`disabled` absent, `failed` rare and `skipped_global_capped` zero; 7.30d
-returns nothing (no recipient got two emails of any kind in one day); 7.30b's
-and 7.30f's `reconnect_started` is non-zero for most emailed owners within a
+`disabled` absent, `failed` rare, `skipped_global_capped` zero, and any
+`skipped_undeliverable` mailbox going quiet within a day of its first stop;
+7.30d returns nothing (no recipient got two emails of any kind in one day);
+7.30g shows a bounce at most rarely, and never a second notice to a bounced
+address (a `google_grant_dead_notified` / `approval_link_notified` /
+`account_refusal_notified` row for a person AFTER their
+`notice_bounce_recorded` is the suppression failing — FLAG); 7.30b's and
+7.30f's `reconnect_started` is non-zero for most emailed owners within a
 week. Pair with the ledger itself (branch DB or a
 read-only production query): `SELECT account_email, last_reason,
-failure_count, notified_count, first_failed_at, notified_at FROM
-google_grant_failures ORDER BY last_failed_at DESC LIMIT 20`. Under this rule
+failure_count, notified_count, first_failed_at, notified_at,
+undeliverable_at, undeliverable_class FROM google_grant_failures ORDER BY
+last_failed_at DESC LIMIT 20`. Under this rule
 the 30-day delegated case would have emailed its owner (CC the delegate) once,
 on 2026-09-06 — the first day PR #127 classified it `refresh_failed`; before
 that it was `clerk_error`, which is retried and never notifies — and never
@@ -2917,9 +3055,15 @@ the CLI's own calls are separable by user agent, remote Claude Code on the
 `Claude-User` agent is not.
 
 ```sql
--- 7.32 product expression, valid on both sides of the deploy.
-multiIf(properties.user_agent LIKE 'claude-code/%', 'claude-code',
-        properties.client_name = 'Anthropic/Toolbox', 'Anthropic/ClaudeAI',
+-- 7.32 product expression, valid on both sides of the deploy. The Grok and
+-- Cursor arms are 7.21f's (same strings; keep the two in step).
+multiIf(properties.user_agent LIKE 'grok-connectors-manager/%'
+          OR properties.user_agent = 'Grok'
+          OR properties.client_name IN ('connectors-manager', 'grok-validator'), 'Grok',
+        properties.user_agent LIKE 'Cursor/%' OR properties.user_agent LIKE 'CursorServer/%'
+          OR properties.client_name IN ('Cursor', 'Cursor MCP Availability'),   'Cursor',
+        properties.user_agent LIKE 'claude-code/%',                             'claude-code',
+        properties.client_name = 'Anthropic/Toolbox',                           'Anthropic/ClaudeAI',
         properties.client_name) AS product
 ```
 
@@ -2958,8 +3102,13 @@ GROUP BY day, transition, from_name, to_name ORDER BY day, n DESC
 -- 7.32c — the per-product split the directory-parity review wants, using the
 -- fold so the pre-deploy weeks are comparable.
 SELECT toStartOfWeek(timestamp, 1) AS week,
-       multiIf(properties.user_agent LIKE 'claude-code/%', 'claude-code',
-               properties.client_name = 'Anthropic/Toolbox', 'Anthropic/ClaudeAI',
+       multiIf(properties.user_agent LIKE 'grok-connectors-manager/%'
+                 OR properties.user_agent = 'Grok'
+                 OR properties.client_name IN ('connectors-manager', 'grok-validator'), 'Grok',
+               properties.user_agent LIKE 'Cursor/%' OR properties.user_agent LIKE 'CursorServer/%'
+                 OR properties.client_name IN ('Cursor', 'Cursor MCP Availability'),   'Cursor',
+               properties.user_agent LIKE 'claude-code/%',                             'claude-code',
+               properties.client_name = 'Anthropic/Toolbox',                           'Anthropic/ClaudeAI',
                properties.client_name) AS product,
        count() AS calls, uniq(person_id) AS callers
 FROM events

@@ -667,7 +667,7 @@ attributable to it.
   {cta_location: 'pricing_free'}` so the sign-up funnel keeps counting
   pricing-page sign-ups
 
-### A29: The dead-grant owner notice is measurable, captured for the owner
+### A32: The dead-grant owner notice is measurable, captured for the owner
 - Run capability 18 A13 (both legs), then query the last hour:
   `SELECT event, distinct_id, properties.$mcp_tool_name, properties.denial_code,
   properties.google_token_error, properties.account_delegated,

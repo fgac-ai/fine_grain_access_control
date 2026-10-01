@@ -107,13 +107,13 @@ function check(name: string, cond: boolean, detail?: unknown) {
     console.log('2. verify — serialized claims: link reminders, one per owner per turn');
     {
       const ids = await linkRows(6, 'link');
-      const results = await Promise.all(ids.map(id => claimApprovalNotification(id, user.id, NOTIFY_MAX_PER_DAY)));
+      const results = await Promise.all(ids.map(id => claimApprovalNotification(id, user.id, NOTIFY_MAX_PER_DAY, user.email)));
       const claimed = results.filter(r => r.claimed).length;
       const reasons = results.flatMap(r => r.claimed ? [] : [r.reason]);
       check('six concurrent due links → exactly one email', claimed === 1, { claimed, reasons });
       check('the other five are refused as a same-turn burst, not capped', reasons.length === 5 && reasons.every(r => r === 'burst'), reasons);
       const winner = ids[results.findIndex(r => r.claimed)];
-      const again = await claimApprovalNotification(winner, user.id, NOTIFY_MAX_PER_DAY);
+      const again = await claimApprovalNotification(winner, user.id, NOTIFY_MAX_PER_DAY, user.email);
       check('re-claiming the emailed request says already', !again.claimed && again.reason === 'already' && again.notifiedAt instanceof Date);
       const stamped = await db.select({ n: sql<number>`count(*)` }).from(approvalRequests)
         .where(sql`${approvalRequests.userId} = ${user.id} AND ${approvalRequests.notifiedAt} IS NOT NULL`);
@@ -124,7 +124,7 @@ function check(name: string, cond: boolean, detail?: unknown) {
     console.log('3. verify — serialized claims: refusal notices, one per owner per episode');
     {
       const ids = await refusalRows(4, 'ref');
-      const results = await Promise.all(ids.map(id => claimAccountRefusalNotification(id, user.id, NOTIFY_MAX_PER_DAY)));
+      const results = await Promise.all(ids.map(id => claimAccountRefusalNotification(id, user.id, NOTIFY_MAX_PER_DAY, user.email)));
       const claimed = results.filter(r => r.claimed).length;
       const reasons = results.flatMap(r => r.claimed ? [] : [r.reason]);
       check('four values refused together → exactly one email', claimed === 1, { claimed, reasons });
@@ -135,7 +135,7 @@ function check(name: string, cond: boolean, detail?: unknown) {
     console.log('4. verify — serialized claims: the daily cap is exact across mailboxes');
     {
       const ids = await grantRows(NOTIFY_MAX_PER_DAY + 2, 'grant');
-      const results = await Promise.all(ids.map(id => claimGrantFailureNotification(id, user.id, NOTIFY_MAX_PER_DAY)));
+      const results = await Promise.all(ids.map(id => claimGrantFailureNotification(id, user.id, NOTIFY_MAX_PER_DAY, user.email)));
       const claimed = results.filter(r => r.claimed).length;
       const reasons = results.flatMap(r => r.claimed ? [] : [r.reason]);
       check(`${ids.length} dead mailboxes at once → exactly ${NOTIFY_MAX_PER_DAY} emails (the cap)`, claimed === NOTIFY_MAX_PER_DAY, { claimed, reasons });

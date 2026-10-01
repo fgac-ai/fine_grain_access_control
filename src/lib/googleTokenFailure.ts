@@ -218,3 +218,64 @@ export function tokenFailureGuidance(input: TokenFailureGuidanceInput): TokenFai
       `Retry ONCE after a few seconds. If the retry fails the same way, the account's Google grant needs reconnecting: ${reconnect} — then retry once after they confirm.`,
   };
 }
+
+// ─── Undeliverable mailbox: the truthful stop ───────────────────────────────
+// When FGAC's own notice to the mailbox came back as a permanent DSN
+// (src/lib/emailBounces.ts), the reconnect story above is false in one of
+// two ways, and the agent must be told which:
+//   - `mailbox_gone` (Google: "The email account that you tried to reach
+//     does not exist", 5.1.3 on a Workspace domain = the mailbox was
+//     deleted): nobody can reconnect it. The 09-23 account was refused four
+//     more times over two days, each time handed a dead link.
+//   - `rejected` (the mailbox exists but refused FGAC's mail): the link is
+//     fine, but the owner has NOT been told — the 📧 "do not re-ask" line
+//     would be a lie, so the agent is asked to relay the link itself.
+
+export interface UndeliverableGuidanceInput {
+  targetEmail: string;
+  keyOwnerEmail: string;
+  reason: GoogleTokenFailureReason;
+  bounceClass: 'mailbox_gone' | 'rejected';
+  /** The DSN's enhanced status, e.g. `5.1.3`; '' when unknown. */
+  dsnStatus: string;
+  bouncedAt: Date;
+  reconnectUrl: string;
+  dashboardUrl: string;
+}
+
+function whenUtcDay(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Replacement 🚫 text for a reconnect-repairable refusal whose mailbox is on
+ * the bounce ledger. Always a refusal (`google_token_unavailable`): the
+ * series in monitoring.md 7.13a / 7.30c stays comparable.
+ */
+export function undeliverableGuidance(input: UndeliverableGuidanceInput): TokenFailureGuidance {
+  const { targetEmail, keyOwnerEmail, bounceClass } = input;
+  const delegated = targetEmail.toLowerCase() !== keyOwnerEmail.toLowerCase();
+  const code = input.dsnStatus ? ` (${input.dsnStatus})` : '';
+  const base = input.dashboardUrl.trim().replace(/\/+$/, '');
+  if (bounceClass === 'mailbox_gone') {
+    const remove = delegated
+      ? `Remove '${targetEmail}' from this task. The delegation that put it on this key is now pointing at nothing; '${keyOwnerEmail}' can drop it from "Delegations You've Received" on their Accounts page (${base}/dashboard/accounts).`
+      : `Remove '${targetEmail}' from this task and from this key's accounts on the FGAC dashboard (${base}/dashboard/accounts). If the person now uses a different address, they must sign in to FGAC with that address and connect Google there — this account cannot be transferred.`;
+    return {
+      denialCode: 'google_token_unavailable',
+      text: `🚫 Not available: the mailbox '${targetEmail}' no longer exists. ` +
+        `Google's grant for it was revoked, and when FGAC emailed the owner about that on ${whenUtcDay(input.bouncedAt)}, Google's own mail server returned the message as undeliverable${code}: "The email account that you tried to reach does not exist" — on a Google Workspace domain that means the account was deleted. ` +
+        `STOP — retrying will NOT help, and there is no reconnect: nobody can repair a deleted account, so do not give the user a reconnect link. ` +
+        remove,
+    };
+  }
+  // rejected: the grant story stands; only the "owner was told" part does not.
+  const reconnect = delegated
+    ? `Ask the user to forward this one-click link to the owner of '${targetEmail}', who must open it while signed in to FGAC as that account: ${input.reconnectUrl}`
+    : `Send the user this one-click link — it opens Google's consent screen directly: ${input.reconnectUrl}`;
+  return {
+    denialCode: 'google_token_unavailable',
+    text: `🚫 Not available yet: Google has expired or revoked FGAC's access to '${targetEmail}', and every call on this account fails until it is reconnected — retrying will NOT help. ` +
+      `FGAC tried to email the owner about this on ${whenUtcDay(input.bouncedAt)} and the message was rejected by their mail server${code}, so the owner has NOT been told and FGAC will not email that address again — you must relay the fix yourself. 👉 ${reconnect} — then retry once after they confirm.`,
+  };
+}
