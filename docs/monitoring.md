@@ -26,7 +26,7 @@ Captured in `verifyMcpAuth` (`src/app/api/mcp/route.ts`):
 | `connection_resolve` | what the auth layer's eager `resolveConnection` did on this request: `ran` (four Neon round trips), `skipped` (touched within the last 5 minutes by the same user+client — `src/lib/connectionTouchMemo.ts`), `error`. Added 2026-09-08 |
 | `connection_resolve_ms` | wall time of that eager resolve when it ran; the per-request DB cost of a handshake (see 7.16) |
 | `user_agent`, `client_name` | who failed: the request's UA and, when the unauthenticated request was an MCP `initialize`, its self-reported `clientInfo.name`. Added 2026-09-10 so a 401 spike is diagnosable from this event alone (the registry-launch spike had to be attributed by joining `connector_install_started` by minute) |
-| `client_class`, `client_class_signal` | `claude` \| `internal` \| `scanner` \| `direct`, and the rule that decided it (`ua:SmitheryBot/`, `name:glama`, `keyword:probe`, `ua:self-link`). `scanner` = MCP registry crawlers, directory health probes, "MCP security" scanners, SEO bots — classified from **both** fields because about a third of them run on a stock `node` / `undici` / `Go-http-client` / `python-httpx` UA and only identify themselves in `clientInfo.name`. `classifyMcpClient` in `src/lib/mcpClientSignals.ts`; also stamped on `connector_install_started`. Since 2026-09-12 a `direct` row can carry `client_class_signal = 'ua:stock-runtime-no-name'`: a bare HTTP runtime UA (`Bun/`, `Python/… aiohttp/`, `Go-http-client/`, `node`, `undici`, `python-httpx/`) with no `clientInfo` at all — unnamed automation, still `direct` because the real SDKs run on the same runtimes, but not a client that broke (every SDK's first request is an `initialize` that names itself). A measurement label only: nothing is blocked or rate-limited on it, and a 401 is the correct answer to every probe. Added 2026-09-10; see 7.21 |
+| `client_class`, `client_class_signal` | `claude` \| `internal` \| `scanner` \| `direct`, and the rule that decided it (`ua:SmitheryBot/`, `name:glama`, `keyword:probe`, `ua:self-link`). `scanner` = MCP registry crawlers, directory health probes, "MCP security" scanners, SEO bots — classified from **both** fields because about a third of them run on a stock `node` / `undici` / `Go-http-client` / `python-httpx` UA and only identify themselves in `clientInfo.name`. `classifyMcpClient` in `src/lib/mcpClientSignals.ts`; also stamped on `connector_install_started`. Since 2026-09-12 a `direct` row can carry `client_class_signal = 'ua:stock-runtime-no-name'`: a bare HTTP runtime UA (`Bun/`, `Python/… aiohttp/`, `Go-http-client/`, `node`, `undici`, `python-httpx/`) with no `clientInfo` at all — unnamed automation, still `direct` because the real SDKs run on the same runtimes, but not a client that broke (every SDK's first request is an `initialize` that names itself). Since 2026-09-25 a `direct` row can carry `client_class_signal = 'product:grok'` / `'product:cursor'`: a known third-party product (`PRODUCT_CLIENTS`), matched on `client_name` or user-agent before the scanner rules — Grok's add-time `grok-validator` handshake would otherwise read as a crawler via `keyword:validator`. Still `direct` (7.5 counts Anthropic products only), but named, so it leaves the unlabelled remainder in 7.21e and gets its own row in 7.21f. A measurement label only: nothing is blocked or rate-limited on it, and a 401 is the correct answer to every probe. Added 2026-09-10; see 7.21 |
 
 Volume control: failures always capture; successes are sampled **1 in 20 per
 request** (`success_sample_rate` carries the factor). Multiply `outcome=ok`
@@ -98,6 +98,7 @@ are the trustworthy series for any historical question.
 | --- | --- | --- | --- |
 | MCP tool-call volume floor | [MFYwjsQU](https://us.posthog.com/project/343912/insights/MFYwjsQU) | completed day < 50 tool calls | observed daily range 168–1,203 post-launch; near-zero = clients silently locked out |
 | MCP invalid_token spike | [mGzUClRs](https://us.posthog.com/project/343912/insights/mGzUClRs) | day (incl. today) > 50 invalid_token failures, **excluding `kid = 'probe'` and `client_class IN ('scanner', 'internal')`** | real-user baseline is **0–2/day**; a spike means verification broke or a rejection storm |
+| Clerk redirect loop | [XKnzwDVm](https://us.posthog.com/project/343912/insights/XKnzwDVm) | hour (incl. the current one) > 0 `clerk_auth_redirect` hops with `bounce_count ≥ 5`, `environment = production` | one browser sent to Clerk sign-in/handshake five times in five minutes is a loop, never normal traffic; Clerk's own detector only catches sub-2-s hops (§7.31) |
 
 **The invalid_token alert must exclude our own synthetic probes.** Every
 `invalid_token` event carrying `kid = 'probe'` comes from
@@ -1147,8 +1148,9 @@ Established 2026-09-08 (listing live since 2026-08-16):
   `$mcp_tool_call` or a connection row (verified 2026-09-10: no scanner
   `client_name` on any authenticated event; the only names there are
   `claude-code`, `Anthropic/ClaudeAI`, `Anthropic/Toolbox`, `sheet-add-in`,
-  `claude-ai`). Anthropic's denominator counts *Claude accounts* that sent a
-  message, which a tokenless crawler is not.
+  `claude-ai` — and `Anthropic/Toolbox` is not a product but the directory's
+  connect-time inspector, see 7.31). Anthropic's denominator counts *Claude
+  accounts* that sent a message, which a tokenless crawler is not.
 
 ```sql
 -- Never-called accounts that have gone quiet, by week of first connection.
@@ -1624,11 +1626,15 @@ GROUP BY 1, 2
 ```sql
 -- 7.21e — the `direct` remainder, split (14 d). `ua:stock-runtime-no-name`
 -- is unnamed automation on a bare runtime (a health check or a crawler that
--- never sends initialize); `unlabelled` is what the review actually has to
--- read — a named client the classifier does not know, or a person on curl /
--- a browser. Only the unlabelled column can contain a real client that broke.
+-- never sends initialize); `product` is a known third-party product (Grok,
+-- Cursor — since 2026-09-25, `product:<name>`; before that deploy their rows
+-- sat in `unlabelled`: 5 ok + 1 no_token Grok rows in the week of 09-22);
+-- `unlabelled` is what the review actually has to read — a named client the
+-- classifier does not know, or a person on curl / a browser. Only the
+-- unlabelled column can contain a real client that broke.
 SELECT toDate(timestamp) AS day,
        countIf(properties.client_class_signal = 'ua:stock-runtime-no-name') AS stock_runtime_no_name,
+       countIf(properties.client_class_signal LIKE 'product:%')               AS product,
        countIf(coalesce(properties.client_class_signal, '') = '')            AS unlabelled,
        uniqIf(properties.user_agent,
               coalesce(properties.client_class_signal, '') = '')              AS unlabelled_uas,
@@ -1651,6 +1657,72 @@ half is unnamed automation and moves with the crawler population. Our own probe 
 UA (since 2026-09-10; before that its `no_token` rows sat under `node`,
 indistinguishable from glama on the same runtime) and its `invalid_token`
 rows still carry `kid = 'probe'` — keep both exclusions.
+
+**7.21f — the per-product split, with the non-Anthropic products on their
+own rows.** Added 2026-09-25, the day after the first Grok install
+(`docs/growth-channels.md`, Attribution). `client_name` and `user_agent`
+map to a product; the expression is the one PR #162's 7.31 uses for the
+inspector fold, plus a row per third-party family. Keep the two in step:
+a product added here is added there. The Grok arm lists both the hosted
+client and its add-time validator; the Cursor arm covers the desktop app
+and its server-side availability check.
+
+```sql
+-- 7.21f product expression. Non-Anthropic families first so their names
+-- never fall through to the raw client_name column.
+multiIf(properties.user_agent LIKE 'grok-connectors-manager/%'
+          OR properties.user_agent = 'Grok'
+          OR properties.client_name IN ('connectors-manager', 'grok-validator'), 'Grok',
+        properties.user_agent LIKE 'Cursor/%' OR properties.user_agent LIKE 'CursorServer/%'
+          OR properties.client_name IN ('Cursor', 'Cursor MCP Availability'),   'Cursor',
+        properties.user_agent LIKE 'claude-code/%',                             'claude-code',
+        properties.client_name = 'Anthropic/Toolbox',                           'Anthropic/ClaudeAI',
+        properties.client_name) AS product
+```
+
+```sql
+-- 7.21f-a — weekly callers and calls per product (8 w). The daily review's
+-- per-product table is this query; a product row that is present one week
+-- and absent the next is the churn signal for that channel.
+SELECT toStartOfWeek(timestamp, 1) AS week,
+       multiIf(properties.user_agent LIKE 'grok-connectors-manager/%'
+                 OR properties.user_agent = 'Grok'
+                 OR properties.client_name IN ('connectors-manager', 'grok-validator'), 'Grok',
+               properties.user_agent LIKE 'Cursor/%' OR properties.user_agent LIKE 'CursorServer/%'
+                 OR properties.client_name IN ('Cursor', 'Cursor MCP Availability'),   'Cursor',
+               properties.user_agent LIKE 'claude-code/%',                             'claude-code',
+               properties.client_name = 'Anthropic/Toolbox',                           'Anthropic/ClaudeAI',
+               properties.client_name) AS product,
+       count() AS calls, uniq(person_id) AS callers,
+       countIf(properties.outcome = 'denied_by_policy') AS denied
+FROM events
+WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
+  AND timestamp > now() - INTERVAL 8 WEEK
+GROUP BY week, product ORDER BY week, calls DESC
+```
+
+```sql
+-- 7.21f-b — install attempts per third-party product (14 d): tokenless
+-- discovery hits, authenticated handshakes and tool calls side by side. A
+-- product with discovery rows and no initialize is an install that stalled
+-- at OAuth (Cursor on 2026-09-24: 6 discovery rows, nothing after).
+SELECT splitByChar(':', properties.client_class_signal)[2] AS product,
+       countIf(event = 'connector_install_started')                 AS discovery,
+       countIf(event = 'mcp_auth_attempt' AND properties.outcome = 'ok') AS auth_ok_sampled,
+       uniqIf(properties.client_id, event = 'mcp_auth_attempt' AND properties.outcome = 'ok') AS clients
+FROM events
+WHERE event IN ('connector_install_started', 'mcp_auth_attempt')
+  AND properties.environment = 'production'
+  AND properties.client_class_signal LIKE 'product:%'
+  AND timestamp > now() - INTERVAL 14 DAY
+GROUP BY product ORDER BY discovery DESC
+```
+
+Measured at the deploy (rows before it carry no `product:` signal, so 7.21f-b
+starts empty; 7.21f-a works on the raw strings and covers the history): Grok
+— 21 `initialize`, 20 tool calls (18 ok, 2 `sheets_not_exposed`), one
+person, 2026-09-24T18:04Z → 09-25T07:57Z; Cursor — 6 tokenless discovery
+rows at 2026-09-24T18:09–18:10Z, no `initialize`, no tool call.
 
 **7.22 — Retry pressure per person and per request.** Added 2026-09-11 with
 the denial-copy change (`src/lib/denialCopy.ts`). Two reads, taken together:
@@ -1700,6 +1772,34 @@ twelve-recipient batch, and a 9-mint `sheets_write` from a user stuck on the
 pre-2026-09-09 Picker page. `analytics.md` (the approval funnel section) has
 the reading; the change is judged working if same-target mints stop
 climbing while distinct-target batches are unaffected.
+
+Since 2026-09-24 `account_not_permitted` bursts split by
+`account_requested_placeholder`: a burst whose refused value is on a reserved
+or template domain (`reserved_domain` / `synthetic` / `malformed`,
+`src/lib/placeholderEmail.ts`) is an agent inventing addresses, not a task
+naming a real mailbox the key lacks — one Claude.ai agent re-sent
+`ufficio@example.com` + `direzione@example.com` in parallel on every turn,
+140 refusals in three days (2026-09-21 → 23), verbatim after every denial.
+Those rows still count as retry pressure here (the calls were made), but
+they never reach the refusal ledger or the owner email, and the 🚫 text
+tells the agent the value is fictional. Watch: the same person + placeholder
+value still bursting after the copy change means the agent is not reading
+the text at all (a task or system prompt carries the value) and the next
+lever is the owner, via the dashboard, not more copy.
+
+```sql
+-- placeholder guesses (7 d): who, which invented value, how often, last seen
+SELECT person.properties.email AS who,
+       toString(properties.account_requested) AS requested,
+       toString(properties.account_requested_placeholder) AS kind,
+       count() AS refusals, uniq(toDate(timestamp)) AS days, max(timestamp) AS last
+FROM events
+WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
+  AND properties.denial_code = 'account_not_permitted'
+  AND properties.account_requested_placeholder != ''
+  AND timestamp >= now() - INTERVAL 7 DAY
+GROUP BY who, requested, kind ORDER BY refusals DESC LIMIT 20
+```
 
 **7.23 — Cross-mailbox 404s (an id looked up in the wrong mailbox).** Added
 2026-09-15 with the 404 copy change (`googleNotFoundMessage` /
@@ -2173,12 +2273,17 @@ GROUP BY status ORDER BY mints DESC
 -- values — before that an agent guessing three addresses earned three emails
 -- in 16.7 h, 2026-09-20/21); `not_due` on every row of a person with ≥ 3
 -- refusals in a day means the window reset between them (cadence > 24 h) or
--- the sender is off (`disabled`). The per-recipient spam watch is 7.30d. Pair with:
+-- the sender is off (`disabled`). Since 2026-09-24 a placeholder value
+-- (`account_requested_placeholder` set: example.com, a template, not an
+-- address) is never ledgered and stamps `skipped_placeholder` — two of the
+-- four notices ever sent (2026-09-21) named invented example.com addresses;
+-- 7.22 has the per-value watch. The per-recipient spam watch is 7.30d. Pair with:
 --   SELECT * FROM account_refusals ORDER BY last_refused_at DESC LIMIT 20
 -- (branch DB or a read-only production query) for the ledger itself.
 SELECT person.properties.email AS who,
        toString(properties.$mcp_tool_name) AS tool,
        toString(properties.account_requested) AS requested,
+       toString(properties.account_requested_placeholder) AS placeholder,
        count() AS refusals, uniq(toDate(timestamp)) AS days,
        max(toFloat64OrNull(toString(properties.account_refusal_count))) AS max_in_window,
        groupUniqArray(toString(properties.notify_status)) AS notify,
@@ -2188,7 +2293,7 @@ WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
   AND properties.denial_code = 'account_not_permitted'
   AND timestamp > now() - INTERVAL 7 DAY
   AND person.properties.email NOT IN (/* internal + QA accounts */)
-GROUP BY who, tool, requested ORDER BY refusals DESC LIMIT 20
+GROUP BY who, tool, requested, placeholder ORDER BY refusals DESC LIMIT 20
 ```
 
 ```sql
@@ -2419,8 +2524,9 @@ count should recover from the 1–5 of mid-September; `via != 'form'` is the
 share this change created.
 
 
-**7.30 — Dead-grant owner notice: is the owner told once, does the grant come
-back, and is it staying far from spam?** Added 2026-09-20 (PR #156,
+**7.30 — Dead-grant (and, since 2026-09-25, scope-missing) owner notice: is
+the owner told once, does the grant come back, and is it staying far from
+spam?** Added 2026-09-20 (PR #156,
 `src/lib/approvalNotify.ts` `notifyOwnerOfDeadGrant`,
 `docs/implementation_plans/claude_lucid-pare-619cae_v2.md`). The
 `google_token_unavailable` refusal (§7.13a) carries an owner-bound reconnect
@@ -2532,12 +2638,75 @@ WHERE event IN ('approval_link_notified', 'account_refusal_notified', 'google_gr
 GROUP BY recipient, day HAVING total > 1 ORDER BY total DESC, day DESC
 ```
 
-Healthy: 7.30a shows at most one row per owner + mailbox with `days_dead = 0`
-and no hour holding 5 or more rows; 7.30c shows `sent` once per new dead
-mailbox, `already_sent` on the rest, `disabled` absent, `failed` rare and
-`skipped_global_capped` zero; 7.30d returns nothing (no recipient got two
-emails of any kind in one day); 7.30b's `reconnect_started` is non-zero for
-most emailed owners within a week. Pair with the ledger itself (branch DB or a
+```sql
+-- 7.30e — the scope-missing trigger (added 2026-09-25). The same notice now
+-- fires on the first `gmail_scope_missing` / `drive_file_scope_missing`
+-- refusal of an episode: the grant is alive but lacks the scope the tool
+-- rides on, and until now only the agent held the reconnect link. Measured
+-- 7 d to 2026-09-25 (production, external accounts): 9 people refused for
+-- drive.file (22 refusals), 2 started a reconnect inside 24 h, 1 verified,
+-- 0 later Sheets/Docs successes; 8 of the 9 were launch-cohort accounts
+-- with ONE sign-in ever (2026-08-16 → 20), connected before drive.file was
+-- in the sign-in scope set — the permission was never asked of them, so
+-- "signed in again and narrowed the grant" (§7.12) explained none of them
+-- — and the ninth signed up that day, left both consent boxes unchecked,
+-- then ran the reconnect twice inside a minute and came back without either
+-- scope both times (Google leaves a previously declined permission UNCHECKED
+-- on later screens; the copy now says "tick the box"). 30-d baseline before
+-- the trigger: 45 drive.file-refused people, 22 started a reconnect, 9
+-- verified. Per refusal: what the notice did, split by scope and class.
+-- `sent` once per new (owner, mailbox) and `already_sent` afterwards is the
+-- steady state; a `sent` for a mailbox that 7.30a shows was emailed as a
+-- dead grant inside 14 d is the class-change reset working (the owner
+-- reconnected with a box unchecked), not an episode bug — 7.30a's
+-- "2 rows in 14 d" FLAG applies only to two rows of the SAME class.
+SELECT toDate(timestamp) AS day, properties.denial_code AS reason,
+       properties.account_delegated AS delegated, properties.notify_status AS notify,
+       max(toInt64(properties.grant_days_dead)) AS max_days_missing,
+       count() AS refusals, uniq(person_id) AS key_owners
+FROM events
+WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
+  AND properties.denial_code IN ('gmail_scope_missing', 'drive_file_scope_missing')
+  AND timestamp > now() - INTERVAL 7 DAY
+GROUP BY day, reason, delegated, notify ORDER BY day DESC, refusals DESC
+```
+
+```sql
+-- 7.30f — did the scope email work (30 d)? Per notified owner: reconnect
+-- started / verified / incomplete after the email, and the first success on
+-- the surface that was refused. Before-figure (30 d to 2026-09-25, no email):
+-- 22 of 45 drive.file-refused people started a reconnect, 9 verified; in the
+-- last week alone 2 of 9 started and 1 verified. `incomplete` after the
+-- email with `missing_scopes` still listing the scope = the owner clicked
+-- Continue without ticking the box — the copy's job, not a delivery
+-- failure. Three weeks of unconverted recipients means the lever is the
+-- dashboard card, never more mail.
+WITH notified AS (
+  SELECT person_id, min(timestamp) AS emailed_at, any(properties.missing_scope) AS scope
+  FROM events WHERE event = 'google_grant_dead_notified' AND properties.trigger = 'scope_missing'
+    AND properties.environment = 'production' AND timestamp > now() - INTERVAL 30 DAY
+  GROUP BY person_id
+)
+SELECT person.properties.email AS owner, any(n.emailed_at) AS emailed_at, any(n.scope) AS scope,
+       countIf(e.event = 'google_scope_missing' AND e.timestamp >= n.emailed_at) AS refusals_after,
+       countIf(e.event = 'google_reconnect_started' AND e.timestamp >= n.emailed_at) AS reconnect_started,
+       countIf(e.event = 'google_reconnect_verified' AND e.timestamp >= n.emailed_at) AS reconnect_verified,
+       countIf(e.event = 'google_reconnect_incomplete' AND e.timestamp >= n.emailed_at) AS reconnect_incomplete,
+       minIf(e.timestamp, e.event = '$mcp_tool_call' AND e.properties.outcome = 'success' AND e.timestamp >= n.emailed_at
+             AND ((any(n.scope) = 'gmail' AND e.properties.$mcp_tool_name LIKE 'gmail_%')
+                  OR (any(n.scope) = 'drive_file' AND e.properties.$mcp_tool_name NOT LIKE 'gmail_%' AND e.properties.$mcp_tool_name != 'list_accounts'))) AS first_success_after
+FROM events e JOIN notified n ON n.person_id = e.person_id
+WHERE e.timestamp > now() - INTERVAL 30 DAY
+GROUP BY owner ORDER BY refusals_after DESC
+```
+
+Healthy: 7.30a shows at most one row per owner + mailbox + class with
+`days_dead = 0` and no hour holding 5 or more rows; 7.30c and 7.30e show
+`sent` once per new dead or scope-less mailbox, `already_sent` on the rest,
+`disabled` absent, `failed` rare and `skipped_global_capped` zero; 7.30d
+returns nothing (no recipient got two emails of any kind in one day); 7.30b's
+and 7.30f's `reconnect_started` is non-zero for most emailed owners within a
+week. Pair with the ledger itself (branch DB or a
 read-only production query): `SELECT account_email, last_reason,
 failure_count, notified_count, first_failed_at, notified_at FROM
 google_grant_failures ORDER BY last_failed_at DESC LIMIT 20`. Under this rule
@@ -2546,3 +2715,258 @@ on 2026-09-06 — the first day PR #127 classified it `refresh_failed`; before
 that it was `clerk_error`, which is retried and never notifies — and never
 again while the mailbox stayed dead. The own-mailbox owner who went dark on
 2026-09-17 would have been emailed at 22:21 UTC that evening.
+
+**7.31 — Clerk sign-in / handshake redirect loops (browsers that never
+land).** Added 2026-09-24 (`src/lib/clerkAuthRedirect.ts`, the outer wrapper in
+`src/middleware.ts`,
+`docs/implementation_plans/claude_zealous-dhawan-5e92b4_v1.md`). On 2026-09-21
+a localhost session testing the pricing page got stuck bouncing between
+`/dashboard` and Clerk's hosted sign-in: the dev server logged Clerk's
+"Refreshing the session token resulted in an infinite redirect loop" warning
+dozens of times and the browser never landed. The local causes were a pruned
+Neon branch (the dashboard threw on every load) plus stale Clerk cookies, but
+the point is what production would have shown for the same shape: nothing.
+`sign_in_completed` fires only on success, and Clerk's warning goes to
+Vercel's ~1 h runtime log. `clerk_auth_redirect` is one row per hop — every
+time middleware answers a request with a redirect to Clerk's sign-in page
+(`kind = sign_in`) or its handshake endpoint (`kind = handshake`) — with a
+per-browser `bounce_count` from a 5-minute marker cookie, so a loop reads as
+a rising count on one `browser_key` rather than as a query over timestamps.
+Both redirects surface in the outer middleware wrapper and nowhere else
+(clerkMiddleware returns the handshake before our handler runs; the sign-in is
+`auth.protect()`'s thrown control-flow error turned into a response), which is
+why the capture lives there and not beside the approval wall.
+
+**Read production only.** Localhost and previews run the dev Clerk instance,
+where every cookie-less browser's first visit takes a `handshake` hop
+(`reason = dev-browser-missing`) by design, and a dev sign-in callback loop
+(QA 2026-09-16 counted 28 wall hits in three minutes) trips 7.31a on every
+run. `environment = 'production'` is in every query below on purpose.
+
+```sql
+-- 7.31a — looping browsers (24 h): a browser that took 5+ Clerk redirects
+-- inside one 5-minute marker window. bounce_count is the sliding count the
+-- cookie carried on that hop, so max() per series is the loop length.
+SELECT toString(properties.browser_key) AS browser,
+       toString(properties.bounce_id) AS series,
+       max(toInt(properties.bounce_count)) AS hops,
+       min(timestamp) AS first_hop, max(timestamp) AS last_hop,
+       groupUniqArray(toString(properties.kind)) AS kinds,
+       groupUniqArray(toString(properties.reason)) AS reasons,
+       groupUniqArray(toString(properties.path)) AS paths,
+       argMax(toString(properties.client), timestamp) AS client,
+       max(toInt(properties.clerk_redirect_count)) AS clerk_hop_counter
+FROM events
+WHERE event = 'clerk_auth_redirect'
+  AND properties.environment = 'production'
+  AND timestamp >= now() - INTERVAL 24 HOUR
+GROUP BY browser, series
+HAVING hops >= 5
+ORDER BY hops DESC, last_hop DESC
+```
+
+```sql
+-- 7.31a' — the same signal without the cookie (a browser that drops
+-- cookies never grows bounce_count): 5+ hops from one browser_key inside
+-- one fixed 5-minute bucket. Coarser — a loop straddling a bucket edge can
+-- read as two 3s — but it cannot be hidden by cookie policy.
+SELECT toString(properties.browser_key) AS browser,
+       toStartOfFiveMinutes(timestamp) AS bucket,
+       count() AS hops,
+       groupUniqArray(toString(properties.kind)) AS kinds,
+       groupUniqArray(toString(properties.path)) AS paths
+FROM events
+WHERE event = 'clerk_auth_redirect'
+  AND properties.environment = 'production'
+  AND timestamp >= now() - INTERVAL 24 HOUR
+GROUP BY browser, bucket
+HAVING hops >= 5
+ORDER BY hops DESC
+```
+
+```sql
+-- 7.31b — per path (24 h): where the hops happen, and how many were loops.
+SELECT toString(properties.path) AS path,
+       toString(properties.kind) AS kind,
+       toString(properties.reason) AS reason,
+       count() AS hops,
+       uniq(toString(properties.browser_key)) AS browsers,
+       countIf(toInt(properties.bounce_count) >= 5) AS loop_hops,
+       uniqIf(toString(properties.browser_key), toInt(properties.bounce_count) >= 5) AS looping_browsers,
+       countIf(toString(properties.navigation) = 'true') AS navigations
+FROM events
+WHERE event = 'clerk_auth_redirect'
+  AND properties.environment = 'production'
+  AND timestamp >= now() - INTERVAL 24 HOUR
+GROUP BY path, kind, reason
+ORDER BY hops DESC
+```
+
+```sql
+-- 7.31c — baseline (14 d): hops per day by kind and reason. A handshake per
+-- returning browser with an expired token is normal; the day this doubles
+-- with no traffic change is a Clerk or cookie regression.
+SELECT toDate(timestamp) AS day,
+       toString(properties.kind) AS kind,
+       toString(properties.reason) AS reason,
+       count() AS hops,
+       uniq(toString(properties.browser_key)) AS browsers,
+       uniqIf(toString(properties.bounce_id), toInt(properties.bounce_count) >= 5) AS loop_series
+FROM events
+WHERE event = 'clerk_auth_redirect'
+  AND properties.environment = 'production'
+  AND timestamp >= now() - INTERVAL 14 DAY
+GROUP BY day, kind, reason
+ORDER BY day DESC, hops DESC
+```
+
+Healthy: 7.31a and 7.31a' return nothing; 7.31b shows `sign_in` hops on
+`/dashboard` and `/dashboard/approve` with `bounce_count` 1–2 (a person
+signing in takes one hop; the approval wall's Claude-desktop visitors take
+one per link click) and `handshake` hops with `reason = session-token-expired`
+at roughly the returning-browser rate; `clerk_hop_counter` never reaches 3
+(that is the value at which Clerk itself gives up, signs the browser out and
+prints the warning). A row in 7.31a means one browser was sent to Clerk five
+or more times inside five minutes: read `kinds` and `reasons` first —
+`handshake` + `session-token-expired` repeating is Clerk failing to refresh a
+token it keeps re-issuing (instance keys, clock skew, a cookie the browser
+will not keep); `sign_in` repeating is the app rejecting a session Clerk
+considers valid (the 2026-09-21 shape: the protected page threw on every
+load, so the browser was bounced back to sign-in it had already completed).
+`paths` says which page; cross-check Vercel's runtime log for the same minute
+while it still exists.
+
+**Do not wait for Clerk's own counter.** `clerk_redirect_count` is Clerk's
+`__clerk_redirect_count` cookie, which Clerk sets with `Max-Age=2` on each
+handshake redirect and reads back to decide (at 3) that it is looping — that
+decision is what prints the "infinite redirect loop" line. Two seconds is
+shorter than most real hops (a Google round trip, a browser retry, a slow
+page), so a loop can run indefinitely with the counter never leaving 0, and
+the log line — the only pre-existing signal — never appears. Measured on the
+day this shipped (2026-09-24, dev instance): the Claude desktop in-app browser
+held a stale `__session` for localhost and no `__client_uat`, and looped
+`handshake` / `session-token-but-no-client-uat` 27 times in 214 s on `/` and
+`/dashboard`, `bounce_count` climbing 1 → 27 on one `bounce_id` while
+`clerk_redirect_count` read 0 on every hop. 7.31a flags that at hop 5;
+Clerk's detector never fired. The marker cookie is the detector. `approval_sign_in_wall` (7.25) still owns the approval
+funnel's join keys; when a looping browser's `paths` include
+`/dashboard/approve`, join on the minute to see which link it was carrying.
+
+**Alert (hourly, email to Ken) — live since 2026-09-24.** Insight
+[XKnzwDVm](https://us.posthog.com/project/343912/insights/XKnzwDVm) is a
+trends count of `clerk_auth_redirect` filtered to `environment = production`
+and `bounce_count > 4` (numeric filter, i.e. ≥ 5), per hour. Alert
+"Clerk redirect loop" (`01a0d396-2dd7-0000-252a-fbe4f35492af`) evaluates it
+hourly, including the in-progress hour, and fires *when value is above 0*.
+Under the reading above that is the first time any production browser
+completes a five-hop loop; `sign_in` and `handshake` both count, so a
+Clerk-side handshake storm and an app-side reject loop page the same way.
+Both were created through the PostHog MCP connector (OAuth as Ken, which has
+`insight:write` — the `phx_` automation key of 2–3 does not, so any change
+to them goes through the connector or the UI, not the runner scripts). Row 4
+of the alerts table in 2–3 lists it. 7.31a is what to run when it fires.
+
+**7.32 — `client_name` on `$mcp_tool_call`: the inspector mislabel (2026-08-29
+→ PR #162) and how to read the per-product split across it.** Added
+2026-09-24 (`src/lib/mcpClientName.ts`,
+`docs/implementation_plans/mcp-client-name-inspector_v1.md`). Every
+`$mcp_tool_call` carries `client_name` copied from the agent connection row,
+and until PR #162 that row kept the FIRST `initialize` name it ever saw.
+Claude's connector directory inspects a server once, at connect time, with a
+handshake named `Anthropic/Toolbox`; the user's real client
+(`Anthropic/ClaudeAI`) handshakes under the same OAuth client_id less than a
+minute later — and never got to rename the row. Measured over
+2026-08-28 → 2026-09-24:
+
+- 137 inspector handshakes from 124 accounts, 114 of them exactly once, and
+  the inspector→ClaudeAI gap under one minute for 114 (the rest under ten). Daily
+  inspector handshakes match the day's `mcp_connection_created` — it is a
+  connect-time event, not a product.
+- Every one of the 135 registrations that reported the inspector also
+  reported `Anthropic/ClaudeAI`; none reported only the inspector. All on the
+  `Claude-User` user agent.
+- 65 of the week's 98 claude.ai callers (week of 2026-09-14) carried the
+  inspector label on every call: 12,431 of 20,235 Claude-User tool calls, 61%.
+  It grew weekly as more directory connections aged in: 110 (week of 08-24),
+  2,126, 6,502, 12,431, 18,027 (week of 09-21, partial).
+- A registration is not a product either: 177 registrations reported both
+  `Anthropic/ClaudeAI` and `claude-code` handshakes (claude.ai-managed
+  connectors are shared with Claude Code). "First real name wins" pinned all of
+  a user's calls to whichever product handshook first.
+
+The rule since PR #162: an unnamed row takes any name, an inspector
+name yields to the first product name, and after that the most recent product
+handshake wins; a tool call whose user agent is the CLI's own
+(`claude-code/<version>`) is stamped `claude-code` regardless of the row.
+Stateless streamable HTTP gives a tool call no session (no Mcp-Session-Id is
+issued, the POST carries no clientInfo), so the row's latest handshake is the
+closest available proxy for "the product in use"; concurrent use of two
+products on one registration is the residual error. No backfill: every one of
+the 65 mislabelled callers handshook as ClaudeAI within the same week (about
+18 handshakes each), so rows heal on the first handshake after the deploy.
+`mcp_connection_client_identified` fires on every change, with `transition`
+(`first` | `inspector_to_product` | `product_switch`) and
+`previous_client_name`; the FIRST event per connection is the how-they-arrived
+signal (`Anthropic/Toolbox` = via the directory), the LATEST is the product.
+
+**Reading rule for rows before the deploy:** fold the inspector into
+claude.ai. It is exact for "claude.ai vs everything else" (no inspector-only
+registration exists) and over-counts claude.ai where a user also drove the
+same registration from Claude Code (79 of the 135 inspector registrations);
+the CLI's own calls are separable by user agent, remote Claude Code on the
+`Claude-User` agent is not.
+
+```sql
+-- 7.32 product expression, valid on both sides of the deploy.
+multiIf(properties.user_agent LIKE 'claude-code/%', 'claude-code',
+        properties.client_name = 'Anthropic/Toolbox', 'Anthropic/ClaudeAI',
+        properties.client_name) AS product
+```
+
+```sql
+-- 7.32a — daily label mix on tool calls. After the deploy the toolbox column
+-- should fall to ~0 within a week (the last rows are connections whose owner
+-- has not handshaken since); a persistent non-zero means a row is being
+-- renamed back, which the rule forbids.
+SELECT toDate(timestamp) AS day,
+       countIf(properties.client_name = 'Anthropic/Toolbox')  AS toolbox,
+       countIf(properties.client_name = 'Anthropic/ClaudeAI') AS claudeai,
+       countIf(properties.client_name = 'claude-code')        AS claude_code,
+       countIf(properties.client_name = properties.client_id) AS opaque_id,
+       count() AS total
+FROM events
+WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
+  AND timestamp > now() - INTERVAL 21 DAY
+GROUP BY day ORDER BY day
+```
+
+```sql
+-- 7.32b — name transitions since the deploy. Expect inspector_to_product once
+-- per directory connection (matching 7.32a's toolbox decline), product_switch
+-- on the shared claude.ai + Claude Code registrations, and 'first' with
+-- client_name = 'Anthropic/Toolbox' for each new directory connection.
+SELECT toDate(timestamp) AS day, properties.transition AS transition,
+       properties.previous_client_name AS from_name, properties.client_name AS to_name,
+       count() AS n, uniq(properties.connection_id) AS connections
+FROM events
+WHERE event = 'mcp_connection_client_identified' AND properties.environment = 'production'
+  AND timestamp > now() - INTERVAL 14 DAY
+GROUP BY day, transition, from_name, to_name ORDER BY day, n DESC
+```
+
+```sql
+-- 7.32c — the per-product split the directory-parity review wants, using the
+-- fold so the pre-deploy weeks are comparable.
+SELECT toStartOfWeek(timestamp, 1) AS week,
+       multiIf(properties.user_agent LIKE 'claude-code/%', 'claude-code',
+               properties.client_name = 'Anthropic/Toolbox', 'Anthropic/ClaudeAI',
+               properties.client_name) AS product,
+       count() AS calls, uniq(person_id) AS callers
+FROM events
+WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
+  AND timestamp > now() - INTERVAL 8 WEEK
+GROUP BY week, product ORDER BY week, calls DESC
+```
+
+Healthy: 7.32a's `toolbox` column at zero a week after the deploy; 7.32b shows
+no transition whose `to_name` is `Anthropic/Toolbox` other than `first`.

@@ -14,6 +14,16 @@ import {
 } from '@/lib/approvalWall';
 import { captureEdgeEvent } from '@/lib/posthogEdge';
 import {
+  CLERK_AUTH_REDIRECT_DISTINCT_ID,
+  CLERK_AUTH_REDIRECT_EVENT,
+  CLERK_BOUNCE_COOKIE,
+  CLERK_BOUNCE_WINDOW_S,
+  advanceBounceMarker,
+  classifyClerkRedirect,
+  describeClerkAuthRedirect,
+  encodeBounceMarker,
+} from '@/lib/clerkAuthRedirect';
+import {
   ACCOUNT_MARKER_MAX_AGE_S,
   LAST_ACCOUNT_COOKIE,
   PREV_ACCOUNT_COOKIE,
@@ -166,6 +176,55 @@ function attachWallMarker(req: NextRequest, res: Response | null | undefined | v
 }
 
 /**
+ * Clerk auth-redirect telemetry (src/lib/clerkAuthRedirect.ts). Both Clerk
+ * redirects surface HERE and nowhere else: the handshake redirect is returned
+ * by clerkMiddleware before our handler runs, and the sign-in redirect is the
+ * control-flow error `auth.protect()` throws, turned into a response by
+ * clerkMiddleware. A browser bouncing between the app and Clerk (2026-09-21:
+ * dozens of "infinite redirect loop" warnings on localhost, no PostHog row)
+ * re-enters this function on every hop, so one `clerk_auth_redirect` per hop
+ * with a per-browser `bounce_count` from the marker cookie is the loop
+ * signal; monitoring.md §7.31 reads it. Fire-and-forget through
+ * `event.waitUntil`, and nothing in here may touch the response's status or
+ * Location — a telemetry failure is a warning, never a broken sign-in.
+ */
+function observeClerkAuthRedirect(req: NextRequest, res: Response | null | undefined | void, event: NextFetchEvent): void {
+  try {
+    if (!res || res.status < 300 || res.status > 399) return;
+    const kind = classifyClerkRedirect(res.headers.get('location'), req.nextUrl.origin);
+    if (!kind) return;
+    const marker = advanceBounceMarker(req.cookies.get(CLERK_BOUNCE_COOKIE)?.value);
+    if (res instanceof NextResponse) {
+      res.cookies.set({
+        name: CLERK_BOUNCE_COOKIE,
+        value: encodeBounceMarker(marker),
+        maxAge: CLERK_BOUNCE_WINDOW_S,
+        path: '/',
+        sameSite: 'lax',
+        secure: req.nextUrl.protocol === 'https:',
+      });
+    }
+    const cookies = Object.fromEntries(req.cookies.getAll().map(c => [c.name, c.value]));
+    event.waitUntil(
+      describeClerkAuthRedirect({
+        kind,
+        url: req.nextUrl,
+        requestHeaders: req.headers,
+        cookies,
+        responseHeaders: res.headers,
+        marker,
+      })
+        .then(hit => captureEdgeEvent(CLERK_AUTH_REDIRECT_DISTINCT_ID, CLERK_AUTH_REDIRECT_EVENT, { ...hit }))
+        .catch(err => {
+          console.warn('[middleware] clerk redirect telemetry failed:', err instanceof Error ? err.message : err);
+        }),
+    );
+  } catch (err) {
+    console.warn('[middleware] clerk redirect telemetry failed:', err instanceof Error ? err.message : err);
+  }
+}
+
+/**
  * Clerk's decodeJwt (@clerk/backend 3.4.7, chunk-HVNR6UQP) JSON-parses the
  * header/payload of any 3-segment Bearer token without a try/catch, so a
  * structurally malformed token (`Bearer bogus.token.value`) throws a raw
@@ -181,6 +240,7 @@ export default async function middleware(req: NextRequest, event: NextFetchEvent
   try {
     const res = await clerkHandler(req, event);
     attachWallMarker(req, res);
+    observeClerkAuthRedirect(req, res, event);
     return res;
   } catch (err) {
     const hasBearer = req.headers.get('authorization')?.toLowerCase().startsWith('bearer ');

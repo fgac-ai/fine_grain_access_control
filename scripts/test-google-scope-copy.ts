@@ -25,11 +25,11 @@ const driveOnly = describeMissingGoogleAccess({ gmail: true, driveFile: false },
 check('drive.file gap names drive.file', driveOnly.missing.length === 1 && driveOnly.missing[0] === 'drive_file');
 check('drive.file gap title mentions Drive', /Drive/.test(driveOnly.title));
 check('drive.file gap never blames Gmail', !/not granted .* Gmail/i.test(driveOnly.body) && !/Gmail access .* missing/i.test(driveOnly.body));
-check('drive.file gap for a Sheets/Docs user explains the sign-in reset', /sign-in resets/.test(driveOnly.body));
+check('drive.file gap for a Sheets/Docs user names the pre-drive.file connection and the unchecked box, never leads with a sign-in reset', /connected before FGAC asked/.test(driveOnly.body) && /Drive box/.test(driveOnly.body) && !/^.{0,160}sign-in/.test(driveOnly.body));
 check('drive.file gap for a Sheets/Docs user says which tools fail', /Sheets and Docs/.test(driveOnly.body));
 
 const driveOnlyNoRules = describeMissingGoogleAccess({ gmail: true, driveFile: false }, false)!;
-check('drive.file gap without Sheets/Docs rules is the softer copy', !/sign-in resets/.test(driveOnlyNoRules.body) && /Sheets and Docs/.test(driveOnlyNoRules.body));
+check('drive.file gap without Sheets/Docs rules is the softer copy and says to tick the box', !/rules depend/.test(driveOnlyNoRules.body) && /Sheets and Docs/.test(driveOnlyNoRules.body) && /tick the Google Drive box/.test(driveOnlyNoRules.body));
 
 const gmailOnly = describeMissingGoogleAccess({ gmail: false, driveFile: true }, false)!;
 check('gmail gap names gmail', gmailOnly.missing.length === 1 && gmailOnly.missing[0] === 'gmail');
