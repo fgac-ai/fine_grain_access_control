@@ -34,6 +34,8 @@
  *     failures returned a bare "Access Denied" with no next step at all.
  */
 
+import type { PlaceholderKind } from './placeholderEmail';
+
 /**
  * Appended to every denial that carries an approval link.
  *
@@ -97,11 +99,36 @@ export function recipientNotWhitelistedMessage(recipient: string): string {
  * user-configured policy) with the fix stated twice — once for an
  * interactive agent, once for the scheduled task that cannot learn.
  */
-export function accountNotPermittedByCaller(targetEmail: string, usable: string): string {
+export function accountNotPermittedByCaller(targetEmail: string, usable: string, placeholder?: PlaceholderKind | null): string {
+  if (placeholder) return accountNotPermittedPlaceholder(targetEmail, usable, placeholder);
   return `🚫 This connection cannot use the account '${targetEmail}'. Accounts it can use: ${usable}. ` +
     'Omit the "account" parameter to use the default account, or pass one of the listed addresses. ' +
     `Do not retry with '${targetEmail}' — it is refused every time, and no approval link exists for it: only the user can add an account to this key, from the FGAC dashboard. ` +
     'If this call comes from a scheduled or automated task, the task will send the same value again on its next run — tell the user which account it names so they can correct the task itself.';
+}
+
+/**
+ * `account_not_permitted` for a value that cannot be anyone's mailbox — an
+ * RFC 2606 example domain, a documentation template, or not an address at
+ * all (`src/lib/placeholderEmail.ts`). The generic text above reads as
+ * "add that account" to an agent; for an invented value the only fix is to
+ * stop inventing. Measured 2026-09-21 → 23: one agent re-sent
+ * `ufficio@example.com` and `direzione@example.com` 140 times in three days,
+ * the local parts of mailboxes it wanted with a made-up domain, and the
+ * generic text — which nowhere said the value was fictional — earned its
+ * owner two emails naming addresses nobody has. Still 🚫: the key's account
+ * list is policy, and the refusal is deterministic.
+ */
+function accountNotPermittedPlaceholder(targetEmail: string, usable: string, kind: PlaceholderKind): string {
+  const what = kind === 'malformed'
+    ? 'is not a mailbox address'
+    : 'is a placeholder — an example or template value, not a mailbox anyone has';
+  return `🚫 This connection cannot use the account '${targetEmail}': it ${what}. Do not guess or invent addresses. ` +
+    `The only accounts this connection can use: ${usable}. ` +
+    'Omit the "account" parameter to use the default account, or pass one of the listed addresses exactly as written; ' +
+    'if none of them is the mailbox the user means, ask the user which account they mean instead of trying another value. ' +
+    `Do not retry with '${targetEmail}' — it is refused every time, no approval link exists for it, and the user cannot add it either, because it is not a real account. ` +
+    'If this call comes from a scheduled or automated task, the task itself contains this placeholder — tell the user so they can replace it in the task with one of the listed addresses.';
 }
 
 /**

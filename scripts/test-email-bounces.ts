@@ -13,7 +13,7 @@
  *     remove the account; for a rejecting mailbox the link stays and the agent
  *     is told the owner was NOT reached
  * The sweep and the claims import the proxy route and the database and are
- * exercised by capability 18 A14 / A15, not here.
+ * exercised by capability 18 A15 / A16, not here.
  * Run: npx tsx scripts/test-email-bounces.ts (part of `npm run mcp:lint`).
  */
 import { classifyBounce, normalizeBounceAddress, parseDsn, SUPPRESSING_CLASSES } from '../src/lib/emailBounceParse';

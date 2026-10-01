@@ -48,6 +48,17 @@
  * value: an agent guessing three wrong addresses earned three emails in
  * 16.7 h (production, 09-20/21) and only the daily cap stopped a fourth.
  *
+ * Fourth trigger (2026-09-25) — the same `notifyOwnerOfDeadGrant`, called
+ * from the scope pre-flight refusals (`gmailScopeDenial` /
+ * `driveFileScopeDenial`): the grant is alive but lacks the scope the tool
+ * rides on, which refuses every such call until the owner reconnects and
+ * ticks the box. Measured 7 d to 2026-09-25: nine people refused for
+ * drive.file, two started a reconnect, one verified, zero later successes;
+ * eight of the nine had never been asked for drive.file (connected before
+ * it joined the sign-in scope set) and never opened the dashboard after the
+ * refusal. Same ledger, cap, breaker and one-per-episode rule; a class change
+ * (dead ↔ scope-missing) on one mailbox starts a new episode.
+ *
  * Third trigger (2026-09-20) — `notifyOwnerOfDeadGrant`: a Google grant that
  * a reconnect would repair (`no_token` / `refresh_failed` / `grant_revoked`)
  * refuses every call until the MAILBOX OWNER reconnects, and until now only
@@ -75,12 +86,13 @@ import {
   claimGrantFailureNotification, grantNoticeDue, recordGrantFailure, releaseGrantFailureNotification,
 } from './googleGrantFailures';
 import {
-  daysDead, deadGrantEmailBody, deadGrantEmailSubject, type DeadGrantReason,
+  daysDead, deadGrantEmailBody, deadGrantEmailSubject, isScopeMissingReason, missingScopeOf, type GrantNoticeReason,
 } from './googleGrantNotifyCopy';
 import type { UndeliverableMark } from './emailBounces';
 import {
   claimApprovalNotification, getApprovalNotificationState, releaseApprovalNotification,
 } from './approvalRequests';
+import { isPlaceholderEmail } from './placeholderEmail';
 import { captureServerEvent } from './posthogServer';
 import { withTimeout } from './upstreamTimeouts';
 
@@ -289,6 +301,15 @@ export interface NotifyAccountRefusalResult {
  * analytics never carried. Never throws.
  */
 export async function notifyOwnerOfAccountRefusal(opts: NotifyAccountRefusalOpts): Promise<NotifyAccountRefusalResult> {
+  // A value that cannot be anyone's mailbox (example.com, a template, not
+  // an address) is never ledgered and never emailed: the ledger exists to
+  // tell an owner which real account to add, and an email saying "your task
+  // passes ufficio@example.com" told one owner nothing twice (2026-09-21).
+  // The refusal text names the placeholder as such instead. Checked here as
+  // well as in the route so the guarantee travels with the function.
+  if (isPlaceholderEmail(opts.requestedAccount)) {
+    return { status: 'skipped_placeholder', notifiedAt: null, refusalCount: null };
+  }
   const row = await recordAccountRefusal({
     proxyKeyId: opts.proxyKeyId, userId: opts.owner.id, requestedEmail: opts.requestedAccount, tool: opts.tool,
   });
@@ -357,7 +378,8 @@ export interface NotifyDeadGrantOpts {
   owner: { id: string; email: string; clerkUserId: string };
   /** The mailbox whose grant failed (the owner's FGAC address). */
   accountEmail: string;
-  reason: DeadGrantReason;
+  /** A dead-grant class, or (since 2026-09-25) a scope-missing refusal. */
+  reason: GrantNoticeReason;
   /** The FGAC user whose agent was refused; equals the owner unless delegated. */
   keyOwnerEmail: string;
   agentLabel: string;
@@ -385,8 +407,9 @@ export interface NotifyDeadGrantResult {
 }
 
 /**
- * Record one reconnect-repairable token failure for (owner, mailbox) and, on
- * the first failure of an episode, email the owner ONCE from the support
+ * Record one reconnect-repairable failure for (owner, mailbox) — a dead grant
+ * or, since 2026-09-25, a grant missing the Gmail or drive.file scope — and,
+ * on the first failure of an episode, email the owner ONCE from the support
  * mailbox under the shared daily cap and the global hourly breaker. The ledger
  * row is written whether or not the sender is configured. Never throws.
  */
@@ -464,10 +487,16 @@ async function attemptDeadGrantNotice(
 
   // Captured for the OWNER (the recipient), so `uniq(person)` is the notified
   // population and the funnel joins to their own google_reconnect_* events.
+  // One event for the whole notice family: the volume watch (monitoring.md
+  // 7.30d, daily review 0.8) sums it, so a new trigger must not escape it.
+  // `trigger` and `reason` split the classes; `missing_scope` joins to the
+  // `google_scope_missing` event's `scope` value.
+  const reason = opts.reason;
   captureServerEvent(opts.owner.clerkUserId, 'google_grant_dead_notified', {
     channel: 'email',
-    trigger: 'first_failure',
-    reason: opts.reason,
+    trigger: isScopeMissingReason(reason) ? 'scope_missing' : 'first_failure',
+    reason,
+    ...(isScopeMissingReason(reason) ? { missing_scope: missingScopeOf(reason) } : {}),
     account_delegated: delegated,
     cc_delegate: delegated,
     failure_count: row.failureCount,

@@ -203,13 +203,13 @@ PR are matched by recipient instead (D2).
 - `docs/analytics.md`: the new `notice_bounce_recorded` event row;
   `skipped_undeliverable` added to both `notify_status` lists;
   `mailbox_undeliverable` on `$mcp_tool_call`.
-- `docs/monitoring.md` §7.30: `7.30e` bounces per week (event + ledger
+- `docs/monitoring.md` §7.30: `7.30g` bounces per week (event + ledger
   read), `7.30c` gains the new status, the "Healthy" paragraph names it, and
   the ledger query adds the two new columns.
 - `scripts/env-check.ts:125`: the sender line also says the bounce sweep is
   on/off (same two variables).
-- `docs/QA_Acceptance_Test/capabilities/18_google_reconnect.md`: A14 (sweep
-  ingests a real DSN, idempotent, only ours) and A15 (an undeliverable
+- `docs/QA_Acceptance_Test/capabilities/18_google_reconnect.md`: A15 (sweep
+  ingests a real DSN, idempotent, only ours) and A16 (an undeliverable
   mailbox suppresses the notice and the agent gets the stop).
 - Daily review task file
   (`~/.claude/scheduled-tasks/fgac-user-behavior-review/SKILL.md`, step 4b):
@@ -250,10 +250,10 @@ PR are matched by recipient instead (D2).
   ledger recipient is `unmatched`.
 - Suppression and the refusal wording cannot be produced end to end on the
   QA accounts (their mailboxes exist, and Rule 7 forbids writing the bounce
-  row by hand); capability 18 A15 records that leg as covered by unit test.
+  row by hand); capability 18 A16 records that leg as covered by unit test.
 - **The real end-to-end test is production**: after deploy the first hourly
-  sweep must record the 09-23 DSN (7.30e shows one row, `notice_kind:
+  sweep must record the 09-23 DSN (7.30g shows one row, `notice_kind:
   unknown`, `bounce_class: mailbox_gone`), and the next refusal from that
   account's connection — it was still calling on 09-24 — must carry
   `notify_status: 'skipped_undeliverable'`, `mailbox_undeliverable:
-  'mailbox_gone'` and the stop text (7.30c). Runbook 7.30e names both.
+  'mailbox_gone'` and the stop text (7.30c). Runbook 7.30g names both.

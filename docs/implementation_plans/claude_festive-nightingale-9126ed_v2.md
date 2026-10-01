@@ -25,7 +25,7 @@ revision records what validation found and what changed because of it.
    crons included) answers 401 to Vercel's scheduler without it
    (`docs/partner_onboarding_runbook.md` step 2 already says so). Until Ken
    sets it, the hourly sweep never runs in production and the 09-23 DSN is
-   never filed. Documented in runbook 7.30e as the first thing to check
+   never filed. Documented in runbook 7.30g as the first thing to check
    when the section stays empty. Setting an env var is a user action:
 
    ```bash
@@ -33,7 +33,7 @@ revision records what validation found and what changed because of it.
    ```
 
    (any long random string, pasted without quotes; then redeploy).
-4. A14 no longer asks the runner to assert the sweep's `User-Agent` from
+4. A15 no longer asks the runner to assert the sweep's `User-Agent` from
    telemetry: the request carries `fgac-bounce-sweep`, but the
    `proxy_request` event records no user-agent property.
 
@@ -45,17 +45,17 @@ revision records what validation found and what changed because of it.
 | `npx tsc --noEmit`, eslint on touched files | local | clean |
 | migration `0018_email_bounces.sql` | branch DB, `npm run db:migrate` | applied (7 statements) |
 | `scripts/test-notify-claim-race.ts` (DB-backed, main's race test) | branch DB | 12/12 |
-| capability 18 **A14** — sweep files a real DSN once, attributes it, ignores mail that is not ours | local, `fgac-dev-sender`, USER_A standing in as sender (profile recreated per capability 14 A16 — the stored key was a previous branch's) | **PASS**: two real Google DSNs (5.1.1) produced by sending through FGAC's proxy to two random nonexistent gmail.com addresses; sweep 1 `listed 12, fresh 2, mailbox_gone 1 (tagged probe, notice_kind dead_grant, address lower-cased, diagnostic on one line, no user), unmatched 1 (untagged, empty address)`; sweep 2 `fresh 0`, nothing recorded; server log lines as documented |
-| capability 18 **A15** — suppression and the truthful stop | unit test (`mailbox_gone` text: 🚫, no link, STOP, remove the account; `rejected` text: link kept, "owner has NOT been told") | covered by unit test; end-to-end is the production observation leg below |
+| capability 18 **A15** — sweep files a real DSN once, attributes it, ignores mail that is not ours | local, `fgac-dev-sender`, USER_A standing in as sender (profile recreated per capability 14 A16 — the stored key was a previous branch's) | **PASS**: two real Google DSNs (5.1.1) produced by sending through FGAC's proxy to two random nonexistent gmail.com addresses; sweep 1 `listed 12, fresh 2, mailbox_gone 1 (tagged probe, notice_kind dead_grant, address lower-cased, diagnostic on one line, no user), unmatched 1 (untagged, empty address)`; sweep 2 `fresh 0`, nothing recorded; server log lines as documented |
+| capability 18 **A16** — suppression and the truthful stop | unit test (`mailbox_gone` text: 🚫, no link, STOP, remove the account; `rejected` text: link kept, "owner has NOT been told") | covered by unit test; end-to-end is the production observation leg below |
 | preview build for every push | Vercel, confirmed by commit SHA | Ready; `GET /api/cron/sweep-bounces` on the preview answers `{ status: 'disabled' }` (sender variables are production-only, as designed); MCP endpoint 401 unauthenticated; home 200 |
 
 Preview (final commit): see PR #167 — the watcher's READY URL for
 `58e6220`.
 
-### What production must show after deploy (A15's observation leg)
+### What production must show after deploy (A16's observation leg)
 
 1. Within an hour of the deploy **and** `CRON_SECRET` being set: runbook
-   7.30e shows one `notice_bounce_recorded` row — `notice_kind: unknown`
+   7.30g shows one `notice_bounce_recorded` row — `notice_kind: unknown`
    (sent before the header existed, matched by recipient), `bounce_class:
    mailbox_gone`, `dsn_status: 5.1.3`, `grant_rows_marked: 1`. Ledger:
    one `email_bounces` row for that address; its `google_grant_failures`
