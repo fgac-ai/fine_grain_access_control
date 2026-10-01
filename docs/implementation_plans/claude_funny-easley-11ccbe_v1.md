@@ -141,15 +141,44 @@ Validation evidence is recorded below as rounds complete.
   baseline data copied from main) must be revoked first so A19 shows the
   offer state rather than "already attached".
 
-### Round 2 — preview, single-account variant (pending)
+### Round 2 — preview (PR #171 build of 235c5e1), single-account variant
 
 With USER_B unavailable, the preview's fresh database allows a one-account
 proof: USER_A's address has several historical rows there, and USER_A's
 development Clerk id has none. A link minted for an OLDER row's key, opened
 by USER_A on the preview, is "session, no row, not this row's owner" — the
 page must provision (adopt the newest row) and render the wrong-account
-card where it used to render "Invalid link". Results below when the round
-completes.
+card where it used to render "Invalid link".
+
+- A20 (single-account variant) **pass**: first signed-in approve-page visit on
+  the preview, with the older-row link → the wrong-account card
+  (`wrong-account-notice`, `delegate-panel[data-surface=approve_wall]`), not
+  "Invalid link". Preview function log: `[resolveApprovalLink] provisioned
+  the visitor's users row on the approve page (account age 11155193s)`.
+  PostHog (environment `preview`): `approval_link_opened {status:
+  wrong_account, visitor_row_provisioned: true, visitor_account_age_s:
+  11155193, delegate_offer: true, prior_session_matches: false}` and
+  `delegation_prompt_shown {surface: approve_wall, visitor_row_provisioned:
+  true}`. Control re-open → `wrong_account, visitor_row_provisioned: false`.
+  The panel was not confirmed (same address on both sides; it refuses by
+  design). No rule, no delegation written; the dashboard rendered USER_A's
+  profiles normally afterwards (the adopted row is the "All Access" one).
+- A5 control **pass**: the newest-row link → genuine approve page, `fresh`,
+  `visitor_row_provisioned: false`, never approved.
+- A7 **pass**: one-character change and the 31-char truncation → "Invalid
+  link", `status: invalid`, no rule written.
+- A19 / full two-account A20 **blocked — USER ACTION REQUIRED: re-auth
+  USER_B** (as round 1). Both fixtures remain unconsumed on both databases.
+- Attribution note: the same QA account produced `sheets_expose` approve-page
+  rows with null `visitor_row_provisioned` in the same window, on other
+  preview deployments and a local server from a *different* session's QA
+  (seven previews of other branches were created in that half hour). Every
+  row this round relies on is a `send_whitelist` row — the only action these
+  links were minted with — on this PR's own preview database.
+
+Browser path for both rounds: built-in browser throughout (trusted clicks
+through Clerk → Google chooser → consent for USER_A); Path B was attempted
+for USER_B in round 1 and found to hold no Google session.
 
 ## Follow-up (not in this PR)
 
