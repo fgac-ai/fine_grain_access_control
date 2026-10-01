@@ -187,6 +187,12 @@ export default async function ApprovePage({
     // agent-pasted); `unprovisioned` means a signed-in visitor could not get
     // a users row (a bug — monitoring §7.25 watches it).
     ...(resolved.status === "invalid" ? { invalid_reason: resolved.reason } : {}),
+    // Who opened it. `visitor_row_provisioned: true` = this open is what gave
+    // the account its FGAC row — a brand-new sign-up arriving THROUGH the
+    // link (the wall sign-up class), which until 2026-09-30 resolved as
+    // `invalid` and never saw the wrong-account card (monitoring §7.29d).
+    visitor_row_provisioned: resolved.visitor?.rowProvisioned ?? null,
+    visitor_account_age_s: resolved.visitor?.accountAgeS ?? null,
     // wrong_account carries the REAL request id (recomputed against the
     // resolved owner), so these opens join the funnel instead of vanishing
     // into request_id: undefined — recovery becomes measurable.
@@ -218,6 +224,8 @@ export default async function ApprovePage({
     if (!w.delegationActive) {
       captureServerEvent(clerkUserId ?? "anonymous-approve", "delegation_prompt_shown", {
         surface: "approve_wall", prior_session_matches: priorMatches, action: w.action, request_id: w.requestId,
+        visitor_row_provisioned: resolved.visitor?.rowProvisioned ?? null,
+        account_age_s: resolved.visitor?.accountAgeS ?? null,
       });
     }
     // The visitor's mailbox is already attached to the owner: the repair is

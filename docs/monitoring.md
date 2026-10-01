@@ -2661,6 +2661,41 @@ count should recover from the 1–5 of mid-September; `via != 'form'` is the
 share this change created.
 
 
+**7.29d — second accounts born ON the approve page (added 2026-10-01).** The
+wall's card had a blind spot: a person who signs in through their own
+approval link with a second Google account arrives with a Clerk session but
+no `users` row (rows are provisioned lazily by the first dashboard / MCP /
+OAuth-consent request; the Clerk webhook only records the sign-up), and the
+approve page read the row without creating it — so the open resolved as
+`invalid` and the card never rendered. Sized in §7.25 ("Wall sign-ups that
+saw 'Invalid link'"): 7 of 14 external `invalid` opens, 4 of 6 people, week
+to 2026-09-28, 0 recovered. Since 2026-10-01 the page provisions the row
+(`resolveSignedInVisitor`, actions.ts) and every `approval_link_opened` /
+wall `delegation_prompt_shown` row carries `visitor_row_provisioned` (this
+open created the row) and `visitor_account_age_s` (Clerk account age).
+
+```sql
+-- 7.29d: accounts whose FGAC row was created by an approval-link open, per week
+SELECT toStartOfWeek(timestamp) AS wk,
+       uniq(distinct_id) AS provisioned_on_approve,
+       uniqIf(distinct_id, toInt64OrNull(toString(properties.visitor_account_age_s)) < 300) AS under_5_min_old,
+       uniqIf(distinct_id, JSONExtractString(properties, 'status') = 'wrong_account') AS saw_the_card,
+       uniqIf(distinct_id, JSONExtractString(properties, 'status') = 'invalid') AS still_invalid
+FROM events
+WHERE event = 'approval_link_opened' AND properties.environment = 'production'
+  AND timestamp > now() - INTERVAL 6 WEEK
+  AND JSONExtractBool(properties, 'visitor_row_provisioned')
+GROUP BY wk ORDER BY wk
+```
+
+Healthy: `saw_the_card` equals `provisioned_on_approve` and `still_invalid`
+is 0 (an `invalid` open with a freshly provisioned row would mean the key no
+longer resolves — read its `invalid_reason`); §7.25's
+`wall_signup_invalid_opens` is the matching before-figure and must sit at
+zero. Then read these people through 7.29b: they are the `prior_matched`
+rows when the owner's session was in the same browser within 2 h, and
+`delegation_created {via: 'approve_wall'}` is the recovery.
+
 **7.30 — Dead-grant (and, since 2026-09-25, scope-missing) owner notice: is
 the owner told once, does the grant come back, and is it staying far from
 spam?** Added 2026-09-20 (PR #156,

@@ -406,9 +406,11 @@
   "Invalid link" card. Loading `/dashboard` as the visitor afterwards shows
   the normal profile page (the row the approve page created is the same one
   the dashboard would have made). `approval_link_opened` for that open
-  carries `status: 'wrong_account'`, a `request_id`, and
-  `delegate_offer: true`; `delegation_prompt_shown{surface:'approve_wall'}`
-  fires
+  carries `status: 'wrong_account'`, a `request_id`,
+  `delegate_offer: true` and `visitor_row_provisioned: true` (this open is
+  what created the row; a repeat open carries `false`);
+  `delegation_prompt_shown{surface:'approve_wall'}` fires with the same
+  `visitor_row_provisioned`
 - **Why**: the 2026-09-24 case — an emailed link, a lapsed session, the
   chooser creating a second FGAC account — saw "Invalid link" on both of its
   opens because `resolveApprovalLink` returned `invalid` for a signed-in

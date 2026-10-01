@@ -68,28 +68,45 @@ export type InvalidLinkReason =
  * people) were this class, and none delegated or approved.
  */
 async function resolveSignedInVisitor(): Promise<
-  | { user: Awaited<ReturnType<typeof getDbUser>>; reason?: undefined }
-  | { user: null; reason: Extract<InvalidLinkReason, "signed_out" | "unprovisioned"> }
+  | { user: Awaited<ReturnType<typeof getDbUser>>; visitor: ApprovalVisitor; reason?: undefined }
+  | { user: null; visitor: null; reason: Extract<InvalidLinkReason, "signed_out" | "unprovisioned"> }
 > {
   const clerkUser = await currentUser().catch(() => null);
-  if (!clerkUser) return { user: null, reason: "signed_out" };
+  if (!clerkUser) return { user: null, visitor: null, reason: "signed_out" };
+  const accountAgeS = typeof clerkUser.createdAt === "number"
+    ? Math.max(0, Math.round((Date.now() - clerkUser.createdAt) / 1000))
+    : null;
   try {
     const existing = await db.select().from(users)
       .where(eq(users.clerkUserId, clerkUser.id))
       .limit(1).then(res => res[0]);
-    if (existing) return { user: existing };
+    if (existing) return { user: existing, visitor: { rowProvisioned: false, accountAgeS } };
     const email = clerkPrimaryEmail(clerkUser);
     if (!email) {
       console.error("[resolveSignedInVisitor] Clerk user has no primary email; cannot provision users row");
-      return { user: null, reason: "unprovisioned" };
+      return { user: null, visitor: null, reason: "unprovisioned" };
     }
-    return { user: await resolveDbUser(clerkUser.id, email) };
+    const user = await resolveDbUser(clerkUser.id, email);
+    console.log(`[resolveSignedInVisitor] provisioned the visitor's users row on the approve page (account age ${accountAgeS ?? "unknown"}s)`);
+    return { user, visitor: { rowProvisioned: true, accountAgeS } };
   } catch (err) {
     // A public-facing page must not 500 on a DB hiccup (QA 2026-08-26) —
     // the generic card is the fallback, and the reason says it was this.
     console.error("[resolveSignedInVisitor] could not resolve or provision users row:", err);
-    return { user: null, reason: "unprovisioned" };
+    return { user: null, visitor: null, reason: "unprovisioned" };
   }
+}
+
+/** What the approve page learned about WHO opened the link — stamped on
+ *  `approval_link_opened` / the wall's `delegation_prompt_shown` so the
+ *  just-signed-up second account is a countable state (monitoring §7.29d). */
+export interface ApprovalVisitor {
+  /** This open is what attached the visitor's `users` row: a brand-new
+   *  sign-up arriving THROUGH the link, or a Clerk-reissued id adopted onto
+   *  its existing row by email. */
+  rowProvisioned: boolean;
+  /** Seconds since Clerk created the account, when Clerk reports it. */
+  accountAgeS: number | null;
 }
 
 // ─── Email Delegations ──────────────────────────────────────────────────────
@@ -1151,11 +1168,16 @@ async function resolveWrongAccountLink(
  * regression. No approval is possible from this state; it is purely the
  * diagnosis the user needs to switch accounts.
  */
-export async function resolveApprovalLink(params: ApprovalSearchParams): Promise<
+export type ResolvedApprovalLink = (
   | { status: "invalid"; reason: InvalidLinkReason }
   | { status: "wrong_account"; details: WrongAccountDetails }
   | { status: "fresh" | "already_granted"; payload: ApprovalPayload }
-> {
+) & {
+  /** Who opened it — null only when there was no usable visitor row. */
+  visitor: ApprovalVisitor | null;
+};
+
+export async function resolveApprovalLink(params: ApprovalSearchParams): Promise<ResolvedApprovalLink> {
   const { verifyApprovalParams } = await import("@/lib/approvalLinks");
   // A signed-in visitor with no users row yet gets one here (see
   // resolveSignedInVisitor): a brand-new account created by the wall's
@@ -1163,18 +1185,18 @@ export async function resolveApprovalLink(params: ApprovalSearchParams): Promise
   // delegation it offers — needs the visitor's own row. Only a visitor whose
   // row cannot exist (no session, no email, DB failure) is "invalid" before
   // the owner is resolved — never a 500.
-  const visitor = await resolveSignedInVisitor();
-  if (!visitor.user) return { status: "invalid", reason: visitor.reason };
-  const dbUser = visitor.user;
+  const resolvedVisitor = await resolveSignedInVisitor();
+  if (!resolvedVisitor.user) return { status: "invalid", reason: resolvedVisitor.reason, visitor: null };
+  const { user: dbUser, visitor } = resolvedVisitor;
   const verified = await verifyApprovalParams(dbUser.id, params);
   if (!verified.ok) {
     const wrong = await resolveWrongAccountLink(params, dbUser);
-    if (wrong) return { status: "wrong_account", details: { ...wrong, signedInEmail: dbUser.email } };
-    return { status: "invalid", reason: "signature" };
+    if (wrong) return { status: "wrong_account", details: { ...wrong, signedInEmail: dbUser.email }, visitor };
+    return { status: "invalid", reason: "signature", visitor };
   }
   const p = verified.payload;
   const active = await grantActiveForApproval(p, p.proxyKeyId);
-  return { status: active ? "already_granted" : "fresh", payload: p };
+  return { status: active ? "already_granted" : "fresh", payload: p, visitor };
 }
 
 /**
