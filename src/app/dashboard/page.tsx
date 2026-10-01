@@ -92,6 +92,7 @@ export default async function DashboardPage({
         accessibleEmails={data.accessibleEmails}
         mcpEndpoint={data.mcpEndpoint}
         hasCompleteGoogleAccess={data.hasCompleteGoogleAccess}
+        driveTree={data.driveTree}
         activeId={data.profiles.find(p => !p.revokedAt)?.id ?? null}
       />
     </>

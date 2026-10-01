@@ -14,9 +14,42 @@ type ToolCallProps = Record<string, unknown>;
 
 const storage = new AsyncLocalStorage<ToolCallProps>();
 
+/**
+ * The Drive tree engine's per-call context (feature-flagged folder-inherited
+ * access, src/lib/driveTreeAccess.ts): set once account resolution knows the
+ * token and its live scopes, read by the per-file choke points. A SEPARATE
+ * store from the analytics bag because it carries the Google token, which
+ * must never ride into a PostHog capture.
+ */
+export type DriveEngineContext = {
+  /** Flag on for the key owner AND the live token carries the full `drive` scope. */
+  active: boolean;
+  flagOn: boolean;
+  hasDriveFullScope: boolean;
+  token: string;
+  targetEmail: string;
+  /** Cache partition for lineage lookups — the token owner's Clerk id. */
+  clerkUserId: string;
+  userId: string;
+  proxyKeyId: string;
+};
+
+const engineStorage = new AsyncLocalStorage<{ drive?: DriveEngineContext }>();
+
 /** Run `fn` with a fresh property bag; the wrapper reads it after `fn` settles. */
 export function runWithToolCallProps<T>(fn: () => T): T {
-  return storage.run({}, fn);
+  return storage.run({}, () => engineStorage.run({}, fn));
+}
+
+/** Record the Drive engine context for the current call. No-op outside a wrapped call. */
+export function setDriveEngine(ctx: DriveEngineContext): void {
+  const store = engineStorage.getStore();
+  if (store) store.drive = ctx;
+}
+
+/** The current call's Drive engine context, if account resolution set one. */
+export function getDriveEngine(): DriveEngineContext | undefined {
+  return engineStorage.getStore()?.drive;
 }
 
 /** Merge properties into the current call's bag. No-op outside a wrapped call. */

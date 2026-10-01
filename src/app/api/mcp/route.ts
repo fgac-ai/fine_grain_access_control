@@ -31,7 +31,7 @@ import { resolveDbUser } from '@/db/userHelpers';
 import { loadApplicableRules, checkReadRestrictions, decodeB64Url, stripHtmlToText, type ApplicableRules } from '@/lib/gmailRules';
 import { compileRulePattern } from '@/lib/rulePatterns';
 import { captureServerEvent } from '@/lib/posthogServer';
-import { runWithToolCallProps, addToolCallProps, getToolCallProps, runWithRequestProps, getRequestProps } from '@/lib/toolCallContext';
+import { runWithToolCallProps, addToolCallProps, getToolCallProps, runWithRequestProps, getRequestProps, setDriveEngine, getDriveEngine, type DriveEngineContext } from '@/lib/toolCallContext';
 import { normalizeToolArguments, unknownArgumentKeys, describeArgumentFailure, rewriteValidationFailureBody, type AliasHit, type ZodIssueLike } from '@/lib/mcpArgumentGuidance';
 import { cleanResourceName } from '@/lib/pickerRecoveryCopy';
 import { GOOGLE_FETCH_TIMEOUT_MS, CLERK_TOKEN_TIMEOUT_MS, withTimeout, isUpstreamTimeout } from '@/lib/upstreamTimeouts';
@@ -61,7 +61,7 @@ import {
   fileApprovalAction, parseDriveFileId, driveFileKindForPath,
   templateGoogleApiPath, rawApiFamily, extractGoogleErrorReason,
   RAW_MODIFY_METHODS, isForwardableGoogleMethod, methodDenial,
-  type RawCallClass, type GoogleErrorReason,
+  type RawCallClass, type GoogleErrorReason, type FileDenialKind,
 } from './googleApiPolicy';
 import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, kindForMimeType, kindForService, kindForRequestType, type DriveFileKind } from '@/lib/driveFileKinds';
 import { clerkPrimaryEmail } from '@/lib/clerkPrimaryEmail';
@@ -73,6 +73,15 @@ import {
   type GoogleTokenFailureReason, undeliverableGuidance,
 } from '@/lib/googleTokenFailure';
 import { liveTokenScopes, reconcileScopes } from '@/lib/googleTokenScopes';
+import { driveTreeFlagOn } from '@/lib/featureFlags';
+import {
+  resolveDriveTreeAccess, effectiveDriveAccess, settingsFromRules, normalizeDriveDefault, driveDefaultLabel,
+  driveDenialText, widenListFields, DRIVE_SERVICE, type DriveDefault, type DriveSetting,
+} from '@/lib/driveTreeAccess';
+import {
+  resolveDriveLineage, resolveLineageFrom, parseDriveFileMeta, driveMetaUrl, LineageError, MAX_LINEAGE_HOPS,
+  type MetaFetcher, type Lineage,
+} from '@/lib/driveLineage';
 import {
   classifyGoogleBadRequest, extractFieldViolations, renderBadRequest, googleApiFamilyForUrl,
   type GoogleBadRequest, type GoogleApiFamily, type SheetTab,
@@ -437,6 +446,8 @@ type GoogleTokenResult = {
   hasGmailScope?: boolean;
   /** undefined = Clerk did not report scopes; never enforce on missing metadata. */
   hasDriveFileScope?: boolean;
+  /** The live token carries the full `drive` scope — the Drive tree engine's per-user gate. */
+  hasDriveFullScope?: boolean;
   /** The mailbox OWNER the token belongs to — the key owner for an own
    * mailbox, the grantor for a delegated one. The scope-missing owner
    * notice emails this person (they are the only one who can reconnect). */
@@ -641,7 +652,7 @@ async function getGoogleToken(
     if (verdict.recordStale) addToolCallProps({ clerk_scope_cache_stale: true });
     if (verdict.recordOverstates) addToolCallProps({ clerk_scope_record_overstates: true });
   }
-  return { token: grant.token, hasGmailScope: verdict.hasGmailScope, hasDriveFileScope: verdict.hasDriveFileScope, owner: tokenOwner };
+  return { token: grant.token, hasGmailScope: verdict.hasGmailScope, hasDriveFileScope: verdict.hasDriveFileScope, hasDriveFullScope: verdict.hasDriveFullScope, owner: tokenOwner };
 }
 
 // loadApplicableRules / checkReadRestrictions moved to src/lib/gmailRules.ts —
@@ -1433,6 +1444,10 @@ async function checkFilePermission(kind: DriveFileKind, userId: string, proxyKey
   // file id here makes per-file time-to-first-success queryable from
   // $mcp_tool_call alone.
   addToolCallProps({ file_id: fileId, file_service: DRIVE_FILE_KINDS[kind].service });
+  // Drive tree engine (feature-flagged): the file's folder lineage and the
+  // profile's default decide instead of the per-file rule table alone.
+  const engine = getDriveEngine();
+  if (engine?.active) return checkDriveTreeFile(engine, kind, fileId, isMutating);
   const d = DRIVE_FILE_KINDS[kind];
   const allRules = await db.select().from(accessRules).where(eq(accessRules.userId, userId));
   const keyAssignments = await db.select().from(keyRuleAssignments).where(eq(keyRuleAssignments.proxyKeyId, proxyKeyId));
@@ -1476,6 +1491,159 @@ async function checkFilePermission(kind: DriveFileKind, userId: string, proxyKey
   return { allowed: true as const, newestRuleAt };
 }
 
+// ─── Drive tree engine (feature-flagged folder-inherited access) ────────────
+
+type TreeFilePermission =
+  | { allowed: true; newestRuleAt: Date | null }
+  | { allowed: false; denial: FileDenialKind; reason: string }
+  /** Lineage could not be resolved (file invisible, Google failure, too deep): a denial that mints no approval action. */
+  | { allowed: false; denial: 'unavailable'; reason: string };
+
+/** files.get through the account's own token, shaped for the lineage walk. */
+function driveMetaFetcher(engine: DriveEngineContext): MetaFetcher {
+  return async (id) => {
+    const r = await googleFetch(driveMetaUrl(id), engine.token, 'GET', undefined, engine.targetEmail);
+    if (!r.ok) return { ok: false, status: r.status, error: r.error };
+    const meta = parseDriveFileMeta(r.data);
+    return meta ? { ok: true, meta } : { ok: false, error: 'Drive returned file metadata without an id.' };
+  };
+}
+
+/** The profile's Drive default and every setting that applies to this key (global + assigned). */
+async function loadDriveTreeSettings(userId: string, proxyKeyId: string): Promise<{ settings: Map<string, DriveSetting[]>; driveDefault: DriveDefault }> {
+  const [allRules, allAssignments, key] = await Promise.all([
+    db.select().from(accessRules).where(eq(accessRules.userId, userId)),
+    db.select().from(keyRuleAssignments),
+    db.select({ driveDefault: proxyKeys.driveDefault }).from(proxyKeys).where(eq(proxyKeys.id, proxyKeyId)).then(r => r[0]),
+  ]);
+  const rulesWithAssignments = new Set(allAssignments.map(a => a.accessRuleId));
+  const assignedToKey = new Set(allAssignments.filter(a => a.proxyKeyId === proxyKeyId).map(a => a.accessRuleId));
+  const applicable = allRules.filter(r => !rulesWithAssignments.has(r.id) || assignedToKey.has(r.id));
+  return { settings: settingsFromRules(applicable), driveDefault: normalizeDriveDefault(key?.driveDefault) };
+}
+
+function lineageErrorText(err: LineageError, fileId: string): string {
+  if (err.code === 'file_not_found') {
+    return `🚫 Not available: Google Drive reports no file '${fileId}' visible to this Google account — the id is wrong, the file was deleted, or it was never shared with this account. Do NOT retry the same id; ask the user to confirm the file.`;
+  }
+  if (err.code === 'lineage_too_deep') {
+    return `🚫 Access Denied: '${fileId}' sits more than ${MAX_LINEAGE_HOPS} folders deep, deeper than FGAC resolves. Ask the user to move it or to set its folder directly on the dashboard.`;
+  }
+  return `❌ Could not resolve where '${fileId}' lives in Google Drive (${err.message}); FGAC fails closed on that. Retry once; if it persists, tell the user.`;
+}
+
+function lineageErrorPermission(err: LineageError, fileId: string): TreeFilePermission {
+  addToolCallProps({ denial_code: err.code, drive_tree: true });
+  return { allowed: false, denial: 'unavailable', reason: lineageErrorText(err, fileId) };
+}
+
+/**
+ * The Drive tree decision for one file, in checkFilePermission's shape:
+ * resolve the file's lineage with the account's own token, then let the
+ * nearest setting (or the profile default) decide. `kind` only names the
+ * legacy denial-code family (`sheets_not_exposed` keeps its dashboards);
+ * null = a file kind FGAC has no typed tools for (PDF, image, …).
+ */
+async function checkDriveTreeFile(engine: DriveEngineContext, kind: DriveFileKind | null, fileId: string, isMutating: boolean): Promise<TreeFilePermission> {
+  let lineage: Lineage;
+  try {
+    lineage = await resolveDriveLineage(engine.clerkUserId, fileId, driveMetaFetcher(engine));
+  } catch (err) {
+    if (err instanceof LineageError) return lineageErrorPermission(err, fileId);
+    throw err;
+  }
+  const { settings, driveDefault } = await loadDriveTreeSettings(engine.userId, engine.proxyKeyId);
+  const decision = resolveDriveTreeAccess(lineage.nodes, settings, driveDefault, isMutating);
+  addToolCallProps({
+    drive_tree: true,
+    rule_match_level: decision.level,
+    lineage_hops: lineage.hops,
+    lineage_cache_hit: lineage.cacheHits > 0,
+    drive_default: driveDefault,
+    file_mime_type: lineage.file.mimeType,
+  });
+  if (decision.allowed) return { allowed: true, newestRuleAt: decision.newestRuleAt };
+  const service = kind ? DRIVE_FILE_KINDS[kind].service : DRIVE_SERVICE;
+  const code = decision.denial === 'blocked' ? 'drive_blocked' : decision.denial === 'read_only' ? 'drive_read_only' : `${service}_not_exposed`;
+  addToolCallProps({ denial_code: code });
+  const denial = decision.denial ?? 'not_exposed';
+  return { allowed: false, denial, reason: driveDenialText(decision, lineage.file.name || fileId, driveDefault, `${DASHBOARD_URL}/dashboard`) };
+}
+
+/** Drive file kind of a file from its own metadata (for approval actions); null for kinds FGAC has no tools for. */
+async function driveTreeFileKind(engine: DriveEngineContext, fileId: string): Promise<{ kind: DriveFileKind | null } | { error: LineageError }> {
+  try {
+    const lineage = await resolveDriveLineage(engine.clerkUserId, fileId, driveMetaFetcher(engine));
+    return { kind: kindForMimeType(lineage.file.mimeType) };
+  } catch (err) {
+    if (err instanceof LineageError) return { error: err };
+    throw err;
+  }
+}
+
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i]);
+    }
+  }));
+  return out;
+}
+
+/**
+ * Drive tree engine: `files.list` is forwarded with a `fields` mask wide
+ * enough to resolve each file's lineage, then Blocked files are withheld and
+ * the response says how many (`withheld`). A file whose lineage cannot be
+ * resolved is withheld too (fail closed).
+ */
+async function filteredDriveListing(engine: DriveEngineContext, cleanPath: string, rawUrl: (p: string) => string, resolved: ResolvedAccount) {
+  const [pathPart, query = ''] = cleanPath.split('?', 2);
+  const params = new URLSearchParams(query);
+  const widened = widenListFields(params.get('fields'));
+  if (widened !== undefined) params.set('fields', widened);
+  const result = await googleFetch(rawUrl(`${pathPart}?${params.toString()}`), engine.token, 'GET', undefined, engine.targetEmail);
+  if (!result.ok) return passthroughErrorResult(result, cleanPath, resolved);
+  const data = result.data as { files?: unknown[] } | null;
+  if (!data || !Array.isArray(data.files)) return jsonResult(result.data);
+  const { settings, driveDefault } = await loadDriveTreeSettings(engine.userId, engine.proxyKeyId);
+  const fetchMeta = driveMetaFetcher(engine);
+  const accesses = await mapLimit(data.files, 8, async f => {
+    const meta = parseDriveFileMeta(f);
+    if (!meta) return 'block' as const;
+    try {
+      const lineage = await resolveLineageFrom(engine.clerkUserId, meta, fetchMeta);
+      return effectiveDriveAccess(lineage.nodes, settings, driveDefault).access;
+    } catch {
+      return 'block' as const;
+    }
+  });
+  const kept: unknown[] = [];
+  let withheld = 0;
+  data.files.forEach((f, i) => { if (accesses[i] === 'block') withheld++; else kept.push(f); });
+  addToolCallProps({ drive_tree: true, drive_list_total: data.files.length, drive_list_withheld: withheld, drive_default: driveDefault });
+  return jsonResult({ ...data, files: kept, withheld });
+}
+
+/** `defaults` entries for Drive in get_my_permissions: the tree posture when the engine applies to this owner, else the legacy per-kind lines. */
+async function driveDefaultsForPermissions(conn: ConnectionApproved): Promise<Record<string, string>> {
+  const legacy = Object.fromEntries(ACTIVE_DRIVE_FILE_KINDS.map(k => {
+    const d = DRIVE_FILE_KINDS[k];
+    return [d.service, `DENIED unless a per-${d.noun} rule below exposes the ${d.shortNoun}`];
+  }));
+  if (!conn.proxyKeyId || !driveTreeFlagOn({ clerkUserId: conn.user.clerkUserId, email: conn.user.email })) return legacy;
+  const token = await getGoogleToken(conn.user.email, conn.user, { quiet: true });
+  if ('failure' in token || token.hasDriveFullScope !== true) return legacy;
+  const { driveDefault, settings } = await loadDriveTreeSettings(conn.user.id, conn.proxyKeyId);
+  const overrides = [...settings.values()].flat().filter(st => st.source === 'drive').length;
+  return {
+    drive: `${driveDefaultLabel(driveDefault).toUpperCase()} — this profile's default for every file in the user's Google Drive (My Drive, Shared with me, Shared drives), covering Sheets, Docs, Slides and every other file kind. Folder and file settings in the rules below override it for everything inside them; the nearest setting wins. Blocked files are invisible (reads denied too). ${overrides} folder/file setting(s) apply to this key. Files this agent creates are Read & write for it.`,
+  };
+}
+
 type FilePermission = Awaited<ReturnType<typeof checkFilePermission>>;
 type SheetsPermission = FilePermission;
 
@@ -1516,6 +1684,7 @@ function resolveDriveFileId(kind: DriveFileKind | null, raw: string): { id: stri
  * for any kind — the action's id key follows the kind's descriptor. */
 function fileDenialAction(kind: DriveFileKind, perm: FilePermission, fileId: string, isMutating: boolean): ApprovalAction | null {
   if (perm.allowed) return null;
+  if (perm.denial === 'unavailable') return null;
   return fileApprovalAction(kind, perm.denial, fileId, isMutating);
 }
 const sheetsDenialAction = (perm: SheetsPermission, spreadsheetId: string, isMutating: boolean) =>
@@ -1548,7 +1717,7 @@ async function checkResolvedDriveFile(
 ): Promise<{ denial: Awaited<ReturnType<typeof policyDenialWithLink>> } | { kind: DriveFileKind; perm: FilePermission }> {
   const perm = await checkFilePermission(kind, conn.user.id, proxyKeyId, fileId, isMutating);
   if (!perm.allowed) {
-    const action = fileApprovalAction(kind, perm.denial, fileId, isMutating);
+    const action = perm.denial === 'unavailable' ? null : fileApprovalAction(kind, perm.denial, fileId, isMutating);
     return { denial: await policyDenialWithLink(conn, proxyKeyId, perm.reason, action) };
   }
   return { kind, perm };
@@ -1559,9 +1728,21 @@ async function checkDriveFilePermission(
   proxyKeyId: string,
   fileId: string,
   isMutating: boolean,
-): Promise<{ denial: Awaited<ReturnType<typeof policyDenialWithLink>> } | { kind: DriveFileKind; perm: FilePermission }> {
+): Promise<{ denial: Awaited<ReturnType<typeof policyDenialWithLink>> } | { kind: DriveFileKind | null; perm: FilePermission }> {
   const kind = await driveFileKindFromRules(conn.user.id, fileId);
   if (!kind) {
+    const engine = getDriveEngine();
+    if (engine?.active) {
+      // Drive tree engine: the file's own metadata says what it is, and every
+      // kind — typed or not — is gated by the lineage walk. A kind with
+      // typed tools gets the ordinary approval actions on denial.
+      const resolvedKind = await driveTreeFileKind(engine, fileId);
+      if ('error' in resolvedKind) { addToolCallProps({ denial_code: resolvedKind.error.code, drive_tree: true }); return { denial: textResult(lineageErrorText(resolvedKind.error, fileId)) }; }
+      if (resolvedKind.kind) return checkResolvedDriveFile(conn, proxyKeyId, resolvedKind.kind, fileId, isMutating);
+      const perm = await checkDriveTreeFile(engine, null, fileId, isMutating);
+      if (!perm.allowed) return { denial: await policyDenialWithLink(conn, proxyKeyId, perm.reason, null) };
+      return { kind: null, perm };
+    }
     addToolCallProps({ denial_code: 'file_not_exposed' });
     return { denial: textResult(`🚫 Access Denied: File '${fileId}' is not exposed in your FGAC rules. Ask the user to expose the file (spreadsheet, document, or presentation) via the dashboard picker, or call request_access with the file id.`) };
   }
@@ -1607,6 +1788,22 @@ async function checkDriveFileAccess(
     addToolCallProps({ drive_file_gate: 'rule' });
     const check = await checkResolvedDriveFile(conn, resolved.proxyKeyId, ruleKind, fileId, isMutating);
     return 'denial' in check ? check : { gate: 'rule', kind: check.kind, perm: check.perm };
+  }
+  const engine = getDriveEngine();
+  if (engine?.active) {
+    // Drive tree engine: no rule names the file, so its lineage decides for
+    // every kind (a PDF or image included — under the full `drive` scope
+    // Google no longer gates them, FGAC must).
+    addToolCallProps({ drive_file_gate: 'tree' });
+    const resolvedKind = await driveTreeFileKind(engine, fileId);
+    if ('error' in resolvedKind) { addToolCallProps({ denial_code: resolvedKind.error.code, drive_tree: true }); return { denial: textResult(lineageErrorText(resolvedKind.error, fileId)) }; }
+    if (resolvedKind.kind) {
+      const check = await checkResolvedDriveFile(conn, resolved.proxyKeyId, resolvedKind.kind, fileId, isMutating);
+      return 'denial' in check ? check : { gate: 'rule', kind: check.kind, perm: check.perm };
+    }
+    const perm = await checkDriveTreeFile(engine, null, fileId, isMutating);
+    if (!perm.allowed) return { denial: await policyDenialWithLink(conn, resolved.proxyKeyId, perm.reason, null) };
+    return { gate: 'mime_other' };
   }
   const meta = await googleFetch(
     `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=mimeType&supportsAllDrives=true`,
@@ -1910,6 +2107,7 @@ type ResolvedAccount = {
   proxyKeyId: string;
   hasGmailScope?: boolean;
   hasDriveFileScope?: boolean;
+  hasDriveFullScope?: boolean;
   /** Mailbox owner (see GoogleTokenResult.owner) — recipient of the scope-missing notice. */
   owner: { id: string; email: string; clerkUserId: string };
   /** Every other mailbox this key reaches — empty for single-mailbox keys. Drives the cross-mailbox 404 hint (withMailboxContext). */
@@ -2076,12 +2274,27 @@ async function resolveAccountAndToken(
     );
   }
 
+  // Drive tree engine context (feature-flagged folder-inherited access,
+  // src/lib/driveTreeAccess.ts): active only for the key owner's OWN mailbox,
+  // with the flag on for the owner and the live token carrying the full
+  // `drive` scope. Delegated mailboxes stay on the per-file path — the tree
+  // the owner configured is their own Drive. Stored on its own ALS store so
+  // the token never rides into the analytics bag.
+  const driveTreeFlag = driveTreeFlagOn({ clerkUserId: conn.user.clerkUserId, email: conn.user.email });
+  const driveTreeActive = driveTreeFlag && targetEmail.toLowerCase() === conn.user.email.toLowerCase() && googleToken.hasDriveFullScope === true;
+  setDriveEngine({
+    active: driveTreeActive, flagOn: driveTreeFlag, hasDriveFullScope: googleToken.hasDriveFullScope === true,
+    token: googleToken.token, targetEmail, clerkUserId: googleToken.owner.clerkUserId, userId: conn.user.id, proxyKeyId: conn.proxyKeyId,
+  });
+  if (driveTreeActive) addToolCallProps({ drive_tree: true });
+
   return {
     targetEmail,
     token: googleToken.token,
     proxyKeyId: conn.proxyKeyId,
     hasGmailScope: googleToken.hasGmailScope,
     hasDriveFileScope: googleToken.hasDriveFileScope,
+    hasDriveFullScope: googleToken.hasDriveFullScope,
     owner: googleToken.owner,
     otherAccounts: emails
       .map(e => e.targetEmail)
@@ -2437,8 +2650,9 @@ async function executeRawGoogleCall(
     if ('denial' in fid) return fid.denial;
     const check = await checkDriveFilePermission(conn, resolved.proxyKeyId, fid.id, false);
     if ('denial' in check) return check.denial;
-    const result = await withGrantGrace(check.kind, check.perm, () => googleFetch(rawUrl(cleanPath), resolved.token, method, serializeBody(body), resolved.targetEmail));
-    if (!result.ok) return fileGrantErrorResult(check.kind, result, fid.id);
+    const doCopy = () => googleFetch(rawUrl(cleanPath), resolved.token, method, serializeBody(body), resolved.targetEmail);
+    const result = check.kind ? await withGrantGrace(check.kind, check.perm, doCopy) : await doCopy();
+    if (!result.ok) return check.kind ? fileGrantErrorResult(check.kind, result, fid.id) : passthroughErrorResult(result, cleanPath, resolved);
     await grantDriveCreatedFile(conn, resolved, result.data, 'copy');
     return jsonResult(result.data);
   }
@@ -2462,8 +2676,10 @@ async function executeRawGoogleCall(
     if ('denial' in fid) return fid.denial;
     const check = await checkDriveFilePermission(conn, resolved.proxyKeyId, cls.fileId, cls.isMutating);
     if ('denial' in check) return check.denial;
-    const result = await withGrantGrace(check.kind, check.perm, () => googleFetch(rawUrl(cleanPath), resolved.token, method, serializeBody(body), resolved.targetEmail));
+    const doComments = () => googleFetch(rawUrl(cleanPath), resolved.token, method, serializeBody(body), resolved.targetEmail);
+    const result = check.kind ? await withGrantGrace(check.kind, check.perm, doComments) : await doComments();
     if (!result.ok) {
+      if (!check.kind) return passthroughErrorResult(result, cleanPath, resolved);
       // A raw reply path addresses a specific comment; its 404 needs the
       // stale-commentId branch, same as comments_add with commentId.
       const commentId = cleanPath.match(/\/comments\/([^/?#]+)/)?.[1];
@@ -2493,6 +2709,12 @@ async function executeRawGoogleCall(
   }
 
   if (cls.kind === 'passthrough') {
+    // Drive tree engine: a Drive listing is the one passthrough that can
+    // reveal files the profile blocks, so it is forwarded and filtered.
+    const engine = getDriveEngine();
+    if (engine?.active && method === 'GET' && /^drive\/v3\/files(\?|$)/.test(cleanPath)) {
+      return filteredDriveListing(engine, cleanPath, rawUrl, resolved);
+    }
     // Classify-don't-block: unknown Google API families are forwarded with
     // the account's token (Google's scopes are the enforcement backstop) and
     // flagged so demand is visible in analytics before we build rules for it
@@ -3426,8 +3648,9 @@ function registerFgacTools(server: FgacMcpServer) {
         if ('denial' in check) return check.denial;
 
         const url = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}/comments?fields=${encodeURIComponent(COMMENT_LIST_FIELDS)}&pageSize=50${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`;
-        const result = await withGrantGrace(check.kind, check.perm, () => googleFetch(url, resolved.token, 'GET', undefined, resolved.targetEmail));
-        if (!result.ok) return fileGrantErrorResult(check.kind, result, fileId);
+        const doRead = () => googleFetch(url, resolved.token, 'GET', undefined, resolved.targetEmail);
+        const result = check.kind ? await withGrantGrace(check.kind, check.perm, doRead) : await doRead();
+        if (!result.ok) return check.kind ? fileGrantErrorResult(check.kind, result, fileId) : errorResult(result.error);
         return jsonResult(result.data);
       }
     );
@@ -3465,8 +3688,9 @@ function registerFgacTools(server: FgacMcpServer) {
           ? `${base}/comments/${encodeURIComponent(commentId)}/replies?fields=${encodeURIComponent('id,content,action,createdTime')}`
           : `${base}/comments?fields=${encodeURIComponent('id,content,createdTime')}`;
         const payload = JSON.stringify(commentId && resolve ? { content, action: 'resolve' } : { content });
-        const result = await withGrantGrace(check.kind, check.perm, () => googleFetch(url, resolved.token, 'POST', payload, resolved.targetEmail));
-        if (!result.ok) return commentsErrorResult(check.kind, result, fileId, commentId);
+        const doAdd = () => googleFetch(url, resolved.token, 'POST', payload, resolved.targetEmail);
+        const result = check.kind ? await withGrantGrace(check.kind, check.perm, doAdd) : await doAdd();
+        if (!result.ok) return check.kind ? commentsErrorResult(check.kind, result, fileId, commentId) : errorResult(result.error);
         return jsonResult(result.data);
       }
     );
@@ -3665,10 +3889,7 @@ function registerFgacTools(server: FgacMcpServer) {
             gmailRead: 'ALLOWED by default for every accessible email; read-block rules (label/content) below restrict it',
             gmailSend: 'DENIED unless a send_whitelist rule matches the recipient (applies to messages/send AND drafts/send — draft recipients are resolved server-side)',
             gmailWrite: 'ALLOWED by default via google_api_modify: labels, drafts, messages modify/trash/untrash/batchModify, insert/import — everything the gmail.modify grant covers except sending (whitelisted above), settings writes (Google scopes FGAC does not hold), and permanent deletion (below)',
-            ...Object.fromEntries(ACTIVE_DRIVE_FILE_KINDS.map(k => {
-              const d = DRIVE_FILE_KINDS[k];
-              return [d.service, `DENIED unless a per-${d.noun} rule below exposes the ${d.shortNoun}`];
-            })),
+            ...(await driveDefaultsForPermissions(conn)),
             deletion: 'NEVER available through any tool — DELETE is rejected by the tool schema and again server-side, and Gmail messages/batchDelete is refused; trash (reversible) is allowed where the file or message rule permits writes',
             rawApi: 'google_api_get / google_api_modify expose the Google API surface the grant covers under these same rules; Drive calls addressed to a file by id (drive/v3/files/{id} metadata, rename/trash, permissions, revisions, export) follow that file\'s rule — a Sheet, Doc, or Slides presentation needs a rule (Read & Write for changes), other file kinds ride the per-file drive.file scope the user granted; Drive listing is never gated; POST v4/spreadsheets, POST v1/documents, POST v1/presentations, POST drive/v3/files and POST drive/v3/files/{id}/copy create new files auto-granted Read & Write to this key (a copy requires the source file to be exposed); APIs outside the grant (People/Contacts, Calendar, Tasks, …) are refused with a clear denial',
           },
@@ -3685,7 +3906,11 @@ function registerFgacTools(server: FgacMcpServer) {
             // (spreadsheetId / documentId / presentationId).
             ...(fileKind
               ? { [DRIVE_FILE_KINDS[fileKind].idKey]: r.targetResourceId, resourceName: r.resourceName }
-              : {}),
+              : r.service === DRIVE_SERVICE
+                // Drive tree settings: the node's id and what it is; a folder
+                // or root setting covers everything inside it (nearest wins).
+                ? { nodeId: r.targetResourceId, nodeKind: r.targetKind ?? 'file', resourceName: r.resourceName, covers: 'everything inside this node unless a nearer setting overrides it' }
+                : {}),
           }; }),
         });
       }

@@ -19,11 +19,16 @@
 
 export const GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.modify', 'https://mail.google.com/'];
 export const DRIVE_FILE_SCOPES = ['https://www.googleapis.com/auth/drive.file', 'https://www.googleapis.com/auth/drive'];
+/** The full Drive scope — the gate for the folder-inherited access model
+ * (src/lib/driveTreeAccess.ts). Requested only for feature-flagged users. */
+export const DRIVE_FULL_SCOPE = 'https://www.googleapis.com/auth/drive';
 
 export type ScopeVerdict = {
   /** undefined = no scope information at all; never enforce on it. */
   hasGmailScope?: boolean;
   hasDriveFileScope?: boolean;
+  /** The token carries the full `drive` scope (implies hasDriveFileScope). */
+  hasDriveFullScope?: boolean;
   /** Clerk's record said a scope was missing that the token actually carries. */
   recordStale: boolean;
   /**
@@ -49,9 +54,10 @@ export function reconcileScopes(recorded: string[] | undefined, live: string[] |
   const has = (scopes: string[], wanted: string[]) => scopes.some(s => wanted.includes(s));
   const recGmail = recorded ? has(recorded, GMAIL_SCOPES) : undefined;
   const recDrive = recorded ? has(recorded, DRIVE_FILE_SCOPES) : undefined;
+  const recDriveFull = recorded ? recorded.includes(DRIVE_FULL_SCOPE) : undefined;
   if (!live) {
     return {
-      hasGmailScope: recGmail, hasDriveFileScope: recDrive,
+      hasGmailScope: recGmail, hasDriveFileScope: recDrive, hasDriveFullScope: recDriveFull,
       recordStale: false, recordOverstates: false, source: recorded ? 'record' : 'none',
     };
   }
@@ -60,6 +66,7 @@ export function reconcileScopes(recorded: string[] | undefined, live: string[] |
   return {
     hasGmailScope: liveGmail,
     hasDriveFileScope: liveDrive,
+    hasDriveFullScope: live.includes(DRIVE_FULL_SCOPE),
     recordStale: (liveGmail && recGmail === false) || (liveDrive && recDrive === false),
     recordOverstates: (!liveGmail && recGmail === true) || (!liveDrive && recDrive === true),
     source: 'token',

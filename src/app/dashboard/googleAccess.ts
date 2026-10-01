@@ -14,6 +14,8 @@ export type GoogleAccess = {
   gmail: boolean;
   /** Token is live and carries drive.file (or full drive). */
   driveFile: boolean;
+  /** Token is live and carries the full `drive` scope (the Drive tree gate). */
+  driveFull: boolean;
   /** A verified Google account IS linked, but no usable token came back —
    * Clerk could not refresh it (Google revoked / expired the grant) or Google
    * rejected it. The card then says "reconnect", not "connect": this is the
@@ -23,8 +25,8 @@ export type GoogleAccess = {
   disconnected?: boolean;
 };
 
-const NO_ACCESS: GoogleAccess = { gmail: false, driveFile: false };
-const DISCONNECTED: GoogleAccess = { gmail: false, driveFile: false, disconnected: true };
+const NO_ACCESS: GoogleAccess = { gmail: false, driveFile: false, driveFull: false };
+const DISCONNECTED: GoogleAccess = { gmail: false, driveFile: false, driveFull: false, disconnected: true };
 
 /**
  * Which of the Google scopes FGAC needs are actually usable right now.
@@ -69,6 +71,7 @@ export async function checkGoogleAccess(user: ClerkUser): Promise<GoogleAccess> 
     return {
       gmail: scopes.includes(GMAIL_MODIFY_SCOPE) || scopes.includes(GMAIL_FULL_SCOPE),
       driveFile: scopes.includes(DRIVE_FILE_SCOPE) || scopes.includes(DRIVE_FULL_SCOPE),
+      driveFull: scopes.includes(DRIVE_FULL_SCOPE),
     };
   } catch (error) {
     // Clerk threw: a 400 oauth_token_retrieval_error (Google: invalid_grant) or

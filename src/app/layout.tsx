@@ -1,8 +1,8 @@
 import {
   ClerkProvider,
   Show,
-  UserButton
 } from '@clerk/nextjs';
+import { NavUserButton } from './NavUserButton';
 import type { Metadata } from 'next';
 import { Geist, JetBrains_Mono } from 'next/font/google';
 import './globals.css';
@@ -83,13 +83,7 @@ export default function RootLayout({
                       <SignUpCta location="nav" className="rounded-sm bg-primary px-3 py-1.5 text-sm font-semibold text-primary-foreground hover:opacity-90">Sign Up</SignUpCta>
                     </Show>
                     <Show when="signed-in">
-                      <UserButton
-                        userProfileProps={{
-                          additionalOAuthScopes: {
-                            google: ['https://www.googleapis.com/auth/gmail.modify']
-                          }
-                        }}
-                      />
+                      <NavUserButton />
                     </Show>
                   </div>
                 </div>
