@@ -203,10 +203,19 @@
   exactly ONE message to USER_A's address, From `FGAC <support address>`,
   Reply-To the support address, subject `Your agent has asked 3 times to
   send email to … — approve it?`, plain text, body opening "FGAC has detected
-  <agent> asking 3 times, without approval, to:", naming the first request
-  time in UTC, carrying BOTH approval URLs from the denial each with
-  `&src=email` appended and the signed `a`/`k`/`r`/`s` params byte-identical,
-  and offering "do nothing" and "reply to this email" as the decline paths.
+  <agent> asking 3 times, without approval, to:" where `<agent>` is the
+  connection's nickname or "your <client> agent" plus the profile ("your
+  Claude agent on the Default Profile") and NEVER an id-shaped string,
+  naming the first request time in UTC, carrying BOTH approval URLs from
+  the denial each with `&src=email` appended and the signed `a`/`k`/`r`/`s`
+  params byte-identical, offering "do nothing" and "reply to this email" as
+  the decline paths, and signing `— FGAC support (support@fgac.ai)` — the
+  fixed support contact, NOT the QA sender address standing in for the
+  mailbox (that address appears only in From / Reply-To). A second request
+  re-minted to a due repeat within 5 minutes of that email sends NOTHING:
+  its mint carries `notify_status: 'skipped_burst'`, no 📧 line, and its
+  ledger row keeps `notified_at` NULL (one email per agent turn; the link
+  is still emailed on a later turn's repeat).
   A FOURTH denial says the link was emailed "at <date HH:MM UTC>" and no
   further email is sent; the mailbox still holds one message. Opening the
   emailed link resolves and approves exactly like the chat link (A2), and
@@ -245,12 +254,19 @@
   `Your agent keeps asking for '<value>', an account it cannot use — a
   change is needed`, plain text, body opening "FGAC has refused <agent> 3
   times since <date HH:MM UTC> (its sheets_read_range calls) because it asks
-  for the Google account:", the value on its own line, "The account(s) it
+  for the Google account:" where `<agent>` reads like "your Claude agent on
+  the Default Profile" (nickname or client plus profile — NEVER an id-shaped
+  string such as the connection's client id; Ken's 2026-09-23 QA copy read
+  "refused JkGUAFOdt9Ib0Q7J"), the value on its own line, "The account(s) it
   can use: <every mailbox on the profile>.", "No approval link exists for
-  this", the two
-  numbered fixes (change the task / sign in as that account and delegate to
-  USER_A's address, with the `/dashboard/accounts` URL), and "will not email
-  you about this account again". The FOURTH says FGAC emailed the user about
+  this", the two numbered fixes (change the task / sign in as that account
+  and delegate to USER_A's address, with the `/dashboard/accounts` URL),
+  under fix 2 the line "How delegation works, in two minutes (video):
+  <base>/use-cases/multiple-gmail-accounts", "will not email you about this
+  account again", and the signature `— FGAC support (support@fgac.ai)` (never
+  the QA sender's address, never `localhost` on a preview or production
+  build — on a local build the links are the dev server's origin, which is
+  correct there). The FOURTH says FGAC emailed the user about
   this account "at <date HH:MM UTC>" and no further email is sent; the
   mailbox still holds one message. The DIFFERENT value starts its own count
   (no 📧 line on its first refusal) — and even on its THIRD refusal within
@@ -259,6 +275,18 @@
   `notify_status: 'skipped_episode'`, its ledger row keeps `notified_at`
   NULL, and the mailbox still holds exactly one message (one refusal email
   per owner per episode, PR #156)
+- **Placeholder value** (since 2026-09-24): call THREE more times with
+  `account: 'ufficio@example.com'` (an RFC 2606 example address — never a
+  real one). **Expected**: every call is the 🚫 placeholder form of the
+  refusal — "it is a placeholder — an example or template value, not a
+  mailbox anyone has", "Do not guess or invent addresses", "The only accounts
+  this connection can use: …", "ask the user which account they mean" — and
+  none carries a 📧 line, even on the third refusal and even with no earlier
+  email in the episode; each refusal stamps `notify_status:
+  'skipped_placeholder'` and `account_requested_placeholder:
+  'reserved_domain'`, no `account_refusal_count` (nothing was ledgered), the
+  mailbox holds no new message, and `account_refusals` has NO row for the
+  value
 - **Ledger** (read-only query on the branch DB): one `account_refusals`
   row per (profile key, value), `requested_email` lower-cased,
   `refusal_count` 4 and `window_count` 4 for the first value, `last_tool`
@@ -270,9 +298,9 @@
   keeps `notified_at` NULL
 - **Never**: a refusal never mints a link, never emails on the first or
   second refusal, never emails twice for the same (key, value), never emails
-  the same owner about a second value within 14 days of the first email, and
-  never sends through a user's Google grant. Never assert on a production
-  account's inbox
+  the same owner about a second value within 14 days of the first email,
+  never emails or ledgers a placeholder value, and never sends through a
+  user's Google grant. Never assert on a production account's inbox
 
 ### A18: Open requests appear on the dashboard until approved or dismissed
 - Signed in as USER_A with the MCP connection from capability 15, call

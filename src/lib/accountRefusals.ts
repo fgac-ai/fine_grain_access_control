@@ -18,6 +18,7 @@ import { accountRefusals } from '@/db/schema';
 import { and, eq, isNull, sql } from 'drizzle-orm';
 import { recentNotificationCountSql } from './approvalRequests';
 import { ACCOUNT_REFUSAL_EPISODE_GAP_MS } from './approvalNotifyCopy';
+import { claimSerialized } from './notifyClaimLock';
 
 /** The window that decides "the same wrong value keeps coming": refusals
  * older than this restart the count. Rolling, not calendar. */
@@ -97,14 +98,17 @@ function ownerEpisodeNotifiedSql(userId: string) {
  * — a crawler guessing N addresses used to earn N emails), and (c) the owner
  * is under `maxPerDay` reminder emails in the last 24 h across all three
  * ledgers. Once claimed, the row is never emailed again (released only on a
- * definite non-send).
+ * definite non-send). (b) and (c) look at OTHER rows of the owner, so the
+ * statement runs under the owner's advisory lock (notifyClaimLock.ts): two
+ * values refused in one turn used to both pass "no episode" and both send
+ * (production, 2026-09-21, 271 ms apart).
  */
 export async function claimAccountRefusalNotification(id: string, userId: string, maxPerDay: number): Promise<
   { claimed: true; notifiedAt: Date | null }
   | { claimed: false; notifiedAt: Date | null; reason: 'already' | 'episode' | 'capped' | 'missing' | 'error' }
 > {
   try {
-    const [row] = await db.update(accountRefusals)
+    const [row] = await claimSerialized(userId, db.update(accountRefusals)
       .set({ notifiedAt: sql`now()` })
       .where(and(
         eq(accountRefusals.id, id),
@@ -112,7 +116,7 @@ export async function claimAccountRefusalNotification(id: string, userId: string
         sql`NOT ${ownerEpisodeNotifiedSql(userId)}`,
         sql`${recentNotificationCountSql(userId)} < ${maxPerDay}`,
       ))
-      .returning({ notifiedAt: accountRefusals.notifiedAt });
+      .returning({ notifiedAt: accountRefusals.notifiedAt }));
     if (row) return { claimed: true, notifiedAt: row.notifiedAt };
     const [existing] = await db.select({
       notifiedAt: accountRefusals.notifiedAt,

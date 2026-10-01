@@ -36,12 +36,15 @@ import { normalizeToolArguments, describeArgumentFailure, rewriteValidationFailu
 import { cleanResourceName } from '@/lib/pickerRecoveryCopy';
 import { GOOGLE_FETCH_TIMEOUT_MS, CLERK_TOKEN_TIMEOUT_MS, withTimeout, isUpstreamTimeout } from '@/lib/upstreamTimeouts';
 import { classifyMcpClient, classifyTransportRejection, installFingerprint, parseInitializeClientInfo, parseRpcEnvelope, parseValidationFailure, normalizeValidationIssue, resourceIdHash, validationFailureProps, type McpClientInfo } from '@/lib/mcpClientSignals';
+import { classifyClientNameTransition, nextConnectionClientName, toolCallClientName } from '@/lib/mcpClientName';
 import { recordEagerResolve, shouldSkipEagerResolve } from '@/lib/connectionTouchMemo';
 import { after } from 'next/server';
 import { notifyOwnerOfAccountRefusal, notifyOwnerOfApprovalLinks, notifyOwnerOfDeadGrant, type NotifyLink } from '@/lib/approvalNotify';
-import { deadGrantDenialLine, type DeadGrantReason } from '@/lib/googleGrantNotifyCopy';
+import { deadGrantDenialLine, type DeadGrantReason, type ScopeMissingReason } from '@/lib/googleGrantNotifyCopy';
 import { accountRefusalDenialLine, notifyDenialLine } from '@/lib/approvalNotifyCopy';
+import { agentLabel as buildAgentLabel } from '@/lib/agentLabel';
 import { normalizeRequestedEmail } from '@/lib/accountRefusals';
+import { classifyPlaceholderEmail } from '@/lib/placeholderEmail';
 import { inSuccessSample, AUTH_SUCCESS_SAMPLE } from '@/lib/authSampling';
 import { ensureDefaultProfile } from '@/db/defaultProfile';
 import { mintApprovalLink, describeApproval, actionTarget, fileApprovalActionFor, fileIdFields, type ApprovalAction, type ApprovalPayload } from '@/lib/approvalLinks';
@@ -120,6 +123,11 @@ interface ConnectionApproved {
   proxyKeyId: string | null;
   nickname: string | null;
   clientName: string | null;
+  /** The OAuth client_id — what `clientName` falls back to before the client's
+   * first `initialize`, so owner-facing copy can tell a name from an id. */
+  clientId: string;
+  /** The bound profile's label, for owner-facing copy ("… on the Default Profile"). */
+  profileLabel: string | null;
   user: { id: string; email: string; clerkUserId: string };
 }
 
@@ -246,29 +254,40 @@ async function resolveConnection(
     }
   }
 
-  // Backfill-on-touch: rows created before initialize-time capture (or by a
-  // tool-handler resolve losing the race) hold the opaque client_id as their
-  // name; the next initialize replaces it. Never overwrites a real name.
-  const backfillName =
-    clientHint?.name && connection.clientName === connection.clientId
-      ? { clientName: clientHint.name }
-      : {};
+  // Name-on-touch: the row is almost never created by the initialize POST
+  // itself — the client's concurrent SSE GET (no body, no clientInfo) usually
+  // wins the insert race — so it starts with the opaque client_id and the
+  // handshakes that follow name it. Which handshake gets to is the rule in
+  // src/lib/mcpClientName.ts: an unnamed row takes any name, the directory's
+  // connect-time inspector (`Anthropic/Toolbox`) yields to the first product
+  // name, and after that the most recent product handshake wins — claude.ai
+  // and Claude Code share one registration, so the row tracks whichever is
+  // in use. Until 2026-09-24 the first name stuck, which left 61% of a
+  // week's tool calls labelled with the inspector (docs/monitoring.md 7.32).
+  const nextName = nextConnectionClientName({
+    current: connection.clientName,
+    clientId,
+    incoming: clientHint?.name,
+  });
   await db.update(agentConnections)
-    .set({ lastUsedAt: new Date(), ...backfillName })
+    .set({ lastUsedAt: new Date(), ...(nextName ? { clientName: nextName } : {}) })
     .where(eq(agentConnections.id, connection.id));
-  if (backfillName.clientName) {
-    connection.clientName = backfillName.clientName;
-    // The row is almost never created by the initialize POST itself — the
-    // client's concurrent SSE GET (no body, no clientInfo) usually wins the
-    // insert race — so mcp_connection_created fires nameless (measured
-    // 2026-08-29: 0 of 10 events since 08-27 carried client_name). This
-    // one-time event, on the opaque-id → product-name transition, is the
-    // reliable connection→client mapping; join on connection_id.
+  if (nextName) {
+    const previousName = connection.clientName;
+    connection.clientName = nextName;
+    // One event per name change — the connection→product mapping to join on
+    // connection_id. `transition` = 'first' (placeholder → a name; the
+    // directory's inspector here means "arrived via the directory"),
+    // 'inspector_to_product' (the real client's first handshake after the
+    // inspection), or 'product_switch' (a shared registration changing
+    // hands). The LATEST event per connection is the product in use.
     captureServerEvent(user.clerkUserId, 'mcp_connection_client_identified', {
       connection_id: connection.id,
       client_id: clientId,
-      client_name: clientHint?.name,
+      client_name: nextName,
       client_version: clientHint?.version,
+      previous_client_name: previousName && previousName !== clientId ? previousName : undefined,
+      transition: classifyClientNameTransition(previousName, clientId),
     });
   }
 
@@ -288,6 +307,7 @@ async function resolveConnection(
   // A connection is only as alive as the key behind it. The proxy path checks
   // revokedAt/expiresAt on every request; without this, a revoked key kept
   // working through hosted MCP for connections bound before the revocation.
+  let profileLabel: string | null = null;
   if (connection.proxyKeyId) {
     const boundKey = await db.query.proxyKeys.findFirst({
       where: eq(proxyKeys.id, connection.proxyKeyId),
@@ -295,6 +315,7 @@ async function resolveConnection(
     if (!boundKey || boundKey.revokedAt) {
       return { authorized: false, reason: 'blocked', connectionId: connection.id };
     }
+    profileLabel = boundKey.label;
     if (boundKey.expiresAt && boundKey.expiresAt < new Date()) {
       return { authorized: false, reason: 'blocked', connectionId: connection.id };
     }
@@ -307,6 +328,8 @@ async function resolveConnection(
     proxyKeyId: connection.proxyKeyId,
     nickname: connection.nickname,
     clientName: connection.clientName,
+    clientId: connection.clientId,
+    profileLabel,
     user: { id: user.id, email: user.email, clerkUserId: user.clerkUserId },
   };
 }
@@ -413,6 +436,10 @@ type GoogleTokenResult = {
   hasGmailScope?: boolean;
   /** undefined = Clerk did not report scopes; never enforce on missing metadata. */
   hasDriveFileScope?: boolean;
+  /** The mailbox OWNER the token belongs to — the key owner for an own
+   * mailbox, the grantor for a delegated one. The scope-missing owner
+   * notice emails this person (they are the only one who can reconnect). */
+  owner: { id: string; email: string; clerkUserId: string };
 };
 
 /** Why no token came back — the caller turns this into class-specific
@@ -613,7 +640,7 @@ async function getGoogleToken(
     if (verdict.recordStale) addToolCallProps({ clerk_scope_cache_stale: true });
     if (verdict.recordOverstates) addToolCallProps({ clerk_scope_record_overstates: true });
   }
-  return { token: grant.token, hasGmailScope: verdict.hasGmailScope, hasDriveFileScope: verdict.hasDriveFileScope };
+  return { token: grant.token, hasGmailScope: verdict.hasGmailScope, hasDriveFileScope: verdict.hasDriveFileScope, owner: tokenOwner };
 }
 
 // loadApplicableRules / checkReadRestrictions moved to src/lib/gmailRules.ts —
@@ -728,16 +755,17 @@ async function policyDenialWithLink(
 // AGENT_APPROVAL_PROTOCOL lives in src/lib/denialCopy.ts (tested by scripts/test-denial-copy.ts).
 
 /**
- * What the reminder email calls the agent: the connection's nickname, else
- * the MCP client's registered name. A connection created without a name
- * carries its client_id as `clientName` (resolveConnection's fallback), and
- * "72T5NfMm… asking 3 times" is not a sentence for a person — an id-shaped
- * name falls back to the generic label (observed in QA, 2026-09-14).
+ * What an owner notice calls the agent: the connection's nickname, else
+ * "your <client> agent", else "your AI agent" — plus the profile it runs on.
+ * A connection created before its client's first `initialize` carries its
+ * client_id as `clientName` (resolveConnection's fallback), and "FGAC has
+ * refused JkGUAFOdt9Ib0Q7J 3 times" is what one owner read on 2026-09-23;
+ * the id is compared, not guessed at. Pure logic in src/lib/agentLabel.ts.
  */
 function agentLabel(conn: ConnectionApproved): string {
-  const name = conn.nickname || conn.clientName || '';
-  const idShaped = /^[A-Za-z0-9_-]{12,}$/.test(name) && !/[aeiou]{2}|\s/i.test(name);
-  return name && !idShaped ? name : 'Your AI agent';
+  return buildAgentLabel({
+    nickname: conn.nickname, clientName: conn.clientName, clientId: conn.clientId, profileLabel: conn.profileLabel,
+  });
 }
 
 /** Payload shape `describeApproval` reads, without going through the URL. */
@@ -1774,10 +1802,15 @@ async function requireApproval(authInfo: AuthInfo | undefined): Promise<Connecti
   if (!result.authorized) {
     return textResult(pendingMessage(result));
   }
-  // Client-product attribution: today clientName is usually the opaque DCR
-  // client_id (only cli-token registrations send a real name), but stamping
-  // it means events light up as soon as DCR name capture improves.
-  if (result.clientName) addToolCallProps({ client_name: result.clientName });
+  // Client-product attribution: the connection's current name (the most
+  // recent product handshake — see src/lib/mcpClientName.ts), except that the
+  // Claude Code CLI's own user agent is the one per-request product signal a
+  // stateless tool call carries, so it overrides the row.
+  const clientName = toolCallClientName({
+    connectionName: result.clientName,
+    userAgent: authInfo?.extra?.userAgent as string | undefined,
+  });
+  if (clientName) addToolCallProps({ client_name: clientName });
   return result;
 }
 
@@ -1876,6 +1909,8 @@ type ResolvedAccount = {
   proxyKeyId: string;
   hasGmailScope?: boolean;
   hasDriveFileScope?: boolean;
+  /** Mailbox owner (see GoogleTokenResult.owner) — recipient of the scope-missing notice. */
+  owner: { id: string; email: string; clerkUserId: string };
   /** Every other mailbox this key reaches — empty for single-mailbox keys. Drives the cross-mailbox 404 hint (withMailboxContext). */
   otherAccounts: string[];
 };
@@ -1944,6 +1979,13 @@ async function resolveAccountAndToken(
       // never reach this owner (plan v4): record the refused value and, on
       // the third refusal of it in 24 h, email the owner once from the
       // support mailbox naming what the task passes and what would work.
+      // A value that cannot be anyone's mailbox — `ufficio@example.com`, a
+      // template, not an address — gets its own text ("do not guess; ask the
+      // user"), is never ledgered, and never emails the owner: one agent
+      // re-sent two invented example.com addresses 140 times in three days
+      // (2026-09-21 → 23) and the generic text earned its owner two emails
+      // naming accounts nobody has. Stamped so 7.22 / 7.26d can split it out.
+      const placeholder = classifyPlaceholderEmail(targetEmail);
       const toolName = getToolCallProps().$mcp_tool_name;
       const notify = await notifyOwnerOfAccountRefusal({
         owner: conn.user, proxyKeyId: conn.proxyKeyId, agentLabel: agentLabel(conn),
@@ -1953,11 +1995,12 @@ async function resolveAccountAndToken(
       });
       addToolCallProps({
         account_requested: normalizeRequestedEmail(targetEmail),
+        account_requested_placeholder: placeholder ?? undefined,
         account_refusal_count: notify.refusalCount ?? undefined,
         notify_status: notify.status,
       });
       const emailed = accountRefusalDenialLine(notify.status, notify);
-      return { error: accountNotPermittedByCaller(targetEmail, usable) + (emailed ? `\n${emailed}` : '') };
+      return { error: accountNotPermittedByCaller(targetEmail, usable, placeholder) + (emailed ? `\n${emailed}` : '') };
     }
     return resolveFailure('account_not_permitted', accountNotPermittedByDefault(targetEmail, usable));
   }
@@ -2026,6 +2069,7 @@ async function resolveAccountAndToken(
     proxyKeyId: conn.proxyKeyId,
     hasGmailScope: googleToken.hasGmailScope,
     hasDriveFileScope: googleToken.hasDriveFileScope,
+    owner: googleToken.owner,
     otherAccounts: emails
       .map(e => e.targetEmail)
       .filter(e => e.toLowerCase() !== targetEmail.toLowerCase()),
@@ -2051,7 +2095,7 @@ async function resolveAccountAndToken(
  * unsampled and independent of $mcp_tool_call, so `uniq(person)` over it is
  * exactly the locked-out population (docs/monitoring.md 7.6).
  */
-function gmailScopeDenial(conn: ConnectionApproved, resolved: ResolvedAccount) {
+async function gmailScopeDenial(conn: ConnectionApproved, resolved: ResolvedAccount) {
   if (resolved.hasGmailScope !== false) return null;
   addToolCallProps({ failure_reason: 'gmail_scope_missing', denial_code: 'gmail_scope_missing', google_scope_missing: true });
   captureServerEvent(conn.user.clerkUserId, 'google_scope_missing', {
@@ -2059,14 +2103,45 @@ function gmailScopeDenial(conn: ConnectionApproved, resolved: ResolvedAccount) {
     scope: 'gmail',
     account_delegated: resolved.targetEmail.toLowerCase() !== conn.user.email.toLowerCase(),
   });
+  const emailed = await notifyOwnerOfMissingScope(conn, resolved, 'gmail_scope_missing');
   return textResult(
     `🚫 Not available yet: the Google account '${resolved.targetEmail}' is connected WITHOUT Gmail permission — ` +
     `most likely the Gmail checkbox was left unchecked on Google's consent screen when connecting. ` +
     `STOP — every Gmail call on this account will fail until it is reconnected; retrying will NOT help. ` +
-    `👉 Send the account owner this one-click link — it opens Google's consent screen directly; they must approve Gmail access there: ` +
+    `👉 Send the account owner this one-click link — it opens Google's consent screen directly; they must tick the Gmail box there (Google leaves a permission that was declined before unchecked): ` +
     `${reconnectLink(resolved.targetEmail)} — then retry once after they confirm. ` +
-    `Non-Gmail tools (sheets, docs) are unaffected.`,
+    `Non-Gmail tools (sheets, docs) are unaffected.` +
+    (emailed ? `\n${emailed}` : ''),
   );
+}
+
+/**
+ * The owner notice for a scope-missing refusal (fourth trigger, 2026-09-25):
+ * the same ledger, sender, caps, breaker and one-per-episode rule as the
+ * dead-grant notice, keyed on the mailbox OWNER (for a delegated mailbox
+ * that is the grantor, CC the key owner). Returns the 📧 line to append to
+ * the refusal, or '' when nothing a human can act on happened. Best-effort:
+ * every failure degrades to the refusal exactly as it was. Never reached by
+ * the quiet list_accounts probes — they do not call the denial helpers.
+ */
+async function notifyOwnerOfMissingScope(
+  conn: ConnectionApproved, resolved: ResolvedAccount, reason: ScopeMissingReason,
+): Promise<string> {
+  const notify = await notifyOwnerOfDeadGrant({
+    owner: resolved.owner, accountEmail: resolved.targetEmail, reason,
+    keyOwnerEmail: conn.user.email, agentLabel: agentLabel(conn),
+    reconnectUrl: reconnectLink(resolved.targetEmail), dashboardUrl: DASHBOARD_URL,
+  });
+  addToolCallProps({
+    notify_status: notify.status,
+    ...(notify.failureCount !== null ? { grant_failure_count: notify.failureCount } : {}),
+    ...(notify.daysDead !== null ? { grant_days_dead: notify.daysDead } : {}),
+  });
+  return deadGrantDenialLine(notify.status, {
+    notifiedAt: notify.notifiedAt,
+    delegated: resolved.targetEmail.toLowerCase() !== conn.user.email.toLowerCase(),
+    ccDelegate: notify.ccDelegate,
+  });
 }
 
 /**
@@ -2081,7 +2156,7 @@ function gmailScopeDenial(conn: ConnectionApproved, resolved: ResolvedAccount) {
  * gmailScopeDenial above. Applied by every typed per-file tool (sheets_*,
  * docs_*, comments_*) and by non-Gmail raw google_api_get/modify calls.
  */
-function driveFileScopeDenial(conn: ConnectionApproved, resolved: ResolvedAccount) {
+async function driveFileScopeDenial(conn: ConnectionApproved, resolved: ResolvedAccount) {
   if (resolved.hasDriveFileScope !== false) return null;
   addToolCallProps({ failure_reason: 'drive_file_scope_missing', denial_code: 'drive_file_scope_missing', google_scope_missing: true });
   captureServerEvent(conn.user.clerkUserId, 'google_scope_missing', {
@@ -2089,14 +2164,19 @@ function driveFileScopeDenial(conn: ConnectionApproved, resolved: ResolvedAccoun
     scope: 'drive_file',
     account_delegated: resolved.targetEmail.toLowerCase() !== conn.user.email.toLowerCase(),
   });
+  const emailed = await notifyOwnerOfMissingScope(conn, resolved, 'drive_file_scope_missing');
+  // Causes in measured order (9 of 9 in the week to 2026-09-25 had ONE
+  // sign-in ever, so "signed in again" — the old first cause — was wrong for
+  // all of them). STOP leads, as in gmailScopeDenial: one agent sent six
+  // identical calls in eight minutes against the old text.
   return textResult(
     `🚫 Not available yet: the Google account '${resolved.targetEmail}' is connected WITHOUT the Google Drive file permission (drive.file) — ` +
-    `most likely the owner signed in to FGAC with Google again since connecting (a plain sign-in resets the Drive permission), ` +
-    `the account was connected before FGAC requested it, or the Drive checkbox was left unchecked on Google's consent screen. ` +
-    `Every Sheets, Docs, Slides, and Drive call on this account will fail until it is reconnected; retrying will NOT help. ` +
-    `👉 Send the account owner this one-click link — it opens Google's consent screen directly; they must approve Drive file access there: ` +
+    `most likely the account was connected before FGAC asked for it, or the Google Drive checkbox was left unchecked on Google's consent screen. ` +
+    `STOP — every Sheets, Docs, Slides, and Drive call on this account will fail until it is reconnected; retrying will NOT help. ` +
+    `👉 Send the account owner this one-click link — it opens Google's consent screen directly; they must tick the Google Drive box there (Google leaves a permission that was declined before unchecked): ` +
     `${reconnectLink(resolved.targetEmail)} — then retry once after they confirm. ` +
-    `Gmail tools are unaffected.`,
+    `Gmail tools are unaffected.` +
+    (emailed ? `\n${emailed}` : ''),
   );
 }
 
@@ -2289,10 +2369,10 @@ async function executeRawGoogleCall(
   // the scope fails deterministically at Google, so calling it is pointless —
   // and its 403 body often gives the agent nothing to act on.
   if (family === 'gmail') {
-    const scopeDenial = gmailScopeDenial(conn, resolved);
+    const scopeDenial = await gmailScopeDenial(conn, resolved);
     if (scopeDenial) return scopeDenial;
   } else {
-    const scopeDenial = driveFileScopeDenial(conn, resolved);
+    const scopeDenial = await driveFileScopeDenial(conn, resolved);
     if (scopeDenial) return scopeDenial;
   }
 
@@ -2648,7 +2728,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = gmailScopeDenial(conn, resolved);
+        const scopeDenial = await gmailScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const params = new URLSearchParams();
@@ -2686,7 +2766,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = gmailScopeDenial(conn, resolved);
+        const scopeDenial = await gmailScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         // Read-time enforcement: label blacklist/whitelist + content blacklist
@@ -2745,7 +2825,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = gmailScopeDenial(conn, resolved);
+        const scopeDenial = await gmailScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         // Read-time enforcement on the parent message (labels + content rules):
@@ -2922,7 +3002,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = gmailScopeDenial(conn, resolved);
+        const scopeDenial = await gmailScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         // Enforce send whitelist
@@ -2953,7 +3033,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = gmailScopeDenial(conn, resolved);
+        const scopeDenial = await gmailScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const result = await gmailFetch(resolved.token, resolved.targetEmail, 'labels');
@@ -2977,7 +3057,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        const scopeDenial = await driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const sid = resolveDriveFileId('sheet', spreadsheetId);
@@ -3013,7 +3093,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        const scopeDenial = await driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const sid = resolveDriveFileId('sheet', spreadsheetId);
@@ -3047,7 +3127,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        const scopeDenial = await driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const sid = resolveDriveFileId('sheet', spreadsheetId);
@@ -3082,7 +3162,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        const scopeDenial = await driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const sid = resolveDriveFileId('sheet', spreadsheetId);
@@ -3116,7 +3196,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        const scopeDenial = await driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const sid = resolveDriveFileId('sheet', spreadsheetId);
@@ -3148,7 +3228,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        const scopeDenial = await driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const did = resolveDriveFileId('doc', documentId);
@@ -3184,7 +3264,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        const scopeDenial = await driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const did = resolveDriveFileId('doc', documentId);
@@ -3233,7 +3313,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        const scopeDenial = await driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const pid = resolveDriveFileId('slide', presentationId);
@@ -3269,7 +3349,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        const scopeDenial = await driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const pid = resolveDriveFileId('slide', presentationId);
@@ -3299,7 +3379,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        const scopeDenial = await driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const fid = resolveDriveFileId(null, fileId);
@@ -3334,7 +3414,7 @@ function registerFgacTools(server: FgacMcpServer) {
 
         const resolved = await resolveAccountAndToken(conn, account);
         if ('error' in resolved) return textResult(resolved.error);
-        const scopeDenial = driveFileScopeDenial(conn, resolved);
+        const scopeDenial = await driveFileScopeDenial(conn, resolved);
         if (scopeDenial) return scopeDenial;
 
         const fid = resolveDriveFileId(null, fileId);
@@ -3960,9 +4040,10 @@ const verifyMcpAuth = async (req: Request, bearerToken?: string) => {
       // The touch is four sequential Neon round trips whose result nothing
       // here consumes (tool handlers re-resolve in requireApproval). Skip it
       // while the same client was touched within the memo window — an
-      // initialize still runs until the row's product name is backfilled.
+      // initialize still runs whenever the name it reports would change the
+      // row (first name, inspector → product, product switch).
       const memoOn = connectionTouchMemoEnabled();
-      if (memoOn && shouldSkipEagerResolve(userId, clientId, !!clientInfo)) {
+      if (memoOn && shouldSkipEagerResolve(userId, clientId, clientInfo?.name)) {
         connectionResolve = 'skipped';
       } else {
         const t0 = performance.now();
@@ -3970,7 +4051,7 @@ const verifyMcpAuth = async (req: Request, bearerToken?: string) => {
           const result = await resolveConnection(userId, clientId, clientInfo, profileSlug);
           connectionResolve = 'ran';
           if (memoOn && result.authorized) {
-            recordEagerResolve(userId, clientId, result.clientName !== clientId);
+            recordEagerResolve(userId, clientId, result.clientName);
           }
         } catch (err) {
           connectionResolve = 'error';

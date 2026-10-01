@@ -204,7 +204,11 @@ export async function parseInitializeClientInfo(req: Request): Promise<McpClient
  * traffic out without a hand-maintained filter in every query.
  *
  *   - `claude`   — the products the acquisition funnel counts: claude.ai,
- *                  Claude Code, Cowork/Toolbox, the Sheets add-in.
+ *                  Claude Code, the Sheets add-in, and the directory's
+ *                  connect-time inspector (`Anthropic/Toolbox` — it
+ *                  handshakes once per connection and never calls a tool;
+ *                  see src/lib/mcpClientName.ts for why it must not name
+ *                  the connection).
  *   - `internal` — FGAC's own synthetic traffic (auth probe, smoke tests).
  *   - `scanner`  — MCP registry crawlers, directory health probes, "MCP
  *                  security" scanners, SEO bots. A 401 is the correct answer
