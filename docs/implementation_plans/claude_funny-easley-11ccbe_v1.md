@@ -125,6 +125,32 @@ After-measurement (monitoring §7.29d): the before-figure query goes to zero;
 
 Validation evidence is recorded below as rounds complete.
 
+### Round 1 — local (2026-09-30, dev server on this branch's Neon copy)
+
+- A5 **pass**: deterministic link for USER_A's Default Profile key; opened as
+  the owner → genuine approve page, never approved, no rule written.
+- A7 **pass**: a one-character change in the 32-char signature → "Invalid
+  link"; the 31-char truncated form (the 09-26 production shape) → "Invalid
+  link"; both `status: invalid`, no rule written.
+- A19 / A20 **blocked — USER ACTION REQUIRED: re-auth USER_B.** Picking
+  USER_B in Google's chooser landed on the U-M Okta sign-in form in the
+  built-in browser (a lapsed session, never typed), and the Path B Chrome
+  profile holds no Google session at all. The A20 fixture on this branch is
+  still unconsumed (no row for USER_B's dev Clerk id). Fixture note for the
+  re-run: a pre-existing USER_B → USER_A delegation row (2026-06-18, real
+  baseline data copied from main) must be revoked first so A19 shows the
+  offer state rather than "already attached".
+
+### Round 2 — preview, single-account variant (pending)
+
+With USER_B unavailable, the preview's fresh database allows a one-account
+proof: USER_A's address has several historical rows there, and USER_A's
+development Clerk id has none. A link minted for an OLDER row's key, opened
+by USER_A on the preview, is "session, no row, not this row's owner" — the
+page must provision (adopt the newest row) and render the wrong-account
+card where it used to render "Invalid link". Results below when the round
+completes.
+
 ## Follow-up (not in this PR)
 
 - **Truncated signatures.** The 09-26 case (31-char `s`) is an agent rendering
