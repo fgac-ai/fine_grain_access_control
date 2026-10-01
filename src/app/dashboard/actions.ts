@@ -34,12 +34,15 @@ function revalidateDashboard() {
 /**
  * getDbUser() throws for two reasons a PUBLIC-facing page must not 500 on:
  * signed out ("Unauthorized"), and Clerk-authenticated but with no users row
- * yet ("User not found in DB" — a bystander who has a Clerk session but has
- * never visited the dashboard, which is what auto-provisions the row).
+ * yet ("User not found in DB" — a Clerk session that has never reached a page
+ * which auto-provisions the row; see resolveApprovalVisitor for which pages
+ * do).
  *
  * Approval links are shareable by nature, so both cases are reachable by
  * anyone who receives a leaked link. QA 2026-08-26 caught the second one as an
- * unhandled 500 on /dashboard/approve.
+ * unhandled 500 on /dashboard/approve. The approve page's RENDER no longer
+ * uses this (it provisions the row, 2026-09-30); the approval POST still
+ * does, because by then the render has made the row exist.
  */
 async function tryGetDbUser() {
   try {
@@ -1118,28 +1121,97 @@ async function resolveWrongAccountLink(
  * regression. No approval is possible from this state; it is purely the
  * diagnosis the user needs to switch accounts.
  */
-export async function resolveApprovalLink(params: ApprovalSearchParams): Promise<
+export type ResolvedApprovalLink = (
   | { status: "invalid" }
   | { status: "wrong_account"; details: WrongAccountDetails }
   | { status: "fresh" | "already_granted"; payload: ApprovalPayload }
-> {
+) & {
+  /** Who opened it — null only when there was no usable Clerk session. */
+  visitor: ApprovalVisitor | null;
+};
+
+export async function resolveApprovalLink(params: ApprovalSearchParams): Promise<ResolvedApprovalLink> {
   const { verifyApprovalParams } = await import("@/lib/approvalLinks");
-  // A visitor with no FGAC account (or none yet) is not the owner of any link,
-  // so this is exactly the "invalid" case — never a 500. Kept distinct from
-  // wrong_account: with no users row there is no signed-in FGAC identity to
-  // contrast the owner against, and the generic card already says to sign in
-  // as the account the agent is connected to.
-  const dbUser = await tryGetDbUser();
-  if (!dbUser) return { status: "invalid" };
+  // No Clerk session (unreachable behind auth.protect(), kept as the never-500
+  // guard) or no usable address: nobody to verify against, generic card.
+  const resolvedVisitor = await resolveApprovalVisitor();
+  if (!resolvedVisitor) return { status: "invalid", visitor: null };
+  const { dbUser, visitor } = resolvedVisitor;
   const verified = await verifyApprovalParams(dbUser.id, params);
   if (!verified.ok) {
     const wrong = await resolveWrongAccountLink(params, dbUser);
-    if (wrong) return { status: "wrong_account", details: { ...wrong, signedInEmail: dbUser.email } };
-    return { status: "invalid" };
+    if (wrong) return { status: "wrong_account", details: { ...wrong, signedInEmail: dbUser.email }, visitor };
+    return { status: "invalid", visitor };
   }
   const p = verified.payload;
   const active = await grantActiveForApproval(p, p.proxyKeyId);
-  return { status: active ? "already_granted" : "fresh", payload: p };
+  return { status: active ? "already_granted" : "fresh", payload: p, visitor };
+}
+
+/** What the approve page learned about WHO opened the link — stamped on
+ *  `approval_link_opened` / `delegation_prompt_shown` so the just-signed-up
+ *  second account is a countable state (docs/monitoring.md §7.29d). */
+export interface ApprovalVisitor {
+  /** This open is what attached the visitor's `users` row: the account held a
+   *  Clerk session but had never reached a page that provisions one — a brand
+   *  new sign-up arriving THROUGH the link (every 2026-09 case), or a
+   *  Clerk-reissued id adopted onto its existing row by email. */
+  rowProvisioned: boolean;
+  /** Seconds since Clerk created the account, when Clerk reports it. */
+  accountAgeS: number | null;
+}
+
+/**
+ * The signed-in visitor's FGAC row, PROVISIONING it when the account has none
+ * yet — exactly what the dashboard's first render does (loadDashboard.ts →
+ * resolveDbUser: adopt an existing row for the same email, else create).
+ *
+ * `users` rows are created lazily by the first dashboard / Accounts / MCP /
+ * OAuth-consent request; the Clerk `user.created` webhook only records the
+ * sign-up in PostHog. The approve page was the one Clerk-protected entry point
+ * that READ the row without creating it — and it is the first page a person
+ * reaches when they sign up by clicking their own approval link with a second
+ * Google account. Production, week to 2026-09-29: 7 of the 15 `invalid` opens
+ * came from 4 accounts created in the same second as the open (3 recognisably
+ * the second identity of an owner whose agent had just minted the link), and
+ * every one dead-ended on the generic "Invalid link" card instead of the
+ * wrong-account card with its one-click delegation repair (PR #158) — the
+ * repair was built for exactly these people and never rendered for them,
+ * because with no row the page could not tell "not the owner" from "nobody".
+ * None of the four did anything afterwards. With the row provisioned the
+ * HMAC fails against the visitor's own id, the owner resolves from the key id
+ * (resolveApprovalOwner needs no visitor row), and the existing card renders
+ * unchanged. Side effects are the dashboard's own first-visit side effects
+ * (default profile, own-mailbox access), which the "Back to dashboard" link
+ * would have produced one click later anyway.
+ */
+async function resolveApprovalVisitor(): Promise<{ dbUser: typeof users.$inferSelect; visitor: ApprovalVisitor } | null> {
+  let clerkUser: Awaited<ReturnType<typeof currentUser>>;
+  try {
+    clerkUser = await currentUser();
+  } catch {
+    return null;
+  }
+  if (!clerkUser) return null;
+  const accountAgeS = typeof clerkUser.createdAt === "number"
+    ? Math.max(0, Math.round((Date.now() - clerkUser.createdAt) / 1000))
+    : null;
+  const existing = await db.select().from(users)
+    .where(eq(users.clerkUserId, clerkUser.id))
+    .limit(1).then(r => r[0]);
+  if (existing) return { dbUser: existing, visitor: { rowProvisioned: false, accountAgeS } };
+  const email = clerkPrimaryEmail(clerkUser);
+  if (!email) return null;
+  try {
+    const dbUser = await resolveDbUser(clerkUser.id, email);
+    console.log(`[resolveApprovalLink] provisioned the visitor's users row on the approve page (account age ${accountAgeS ?? "unknown"}s)`);
+    return { dbUser, visitor: { rowProvisioned: true, accountAgeS } };
+  } catch (err) {
+    // Never a 500 on a shareable page: the generic card, and the dashboard's
+    // own render retries the provisioning on the next click.
+    console.error("[resolveApprovalLink] could not provision the visitor's users row:", err);
+    return null;
+  }
 }
 
 /**

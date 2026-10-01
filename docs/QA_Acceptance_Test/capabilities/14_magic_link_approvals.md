@@ -382,3 +382,52 @@
   the signature is re-verified against them before anything is written);
   the confirm step is never skipped; the panel never approves the request
 
+### A20: A brand-new account created by opening the link sees the pairing card, not "Invalid link"
+- **Fixture — USER_B holds a Clerk session but NO `users` row for its Clerk
+  id.** On a fresh `npm run db:branch` (or a first preview deploy) this is
+  the natural state: the branch is a copy of main, whose USER_B row carries
+  the *production* Clerk id, while local and preview builds sign in through
+  the *development* Clerk instance, whose id for USER_B differs. Until USER_B
+  first reaches a page that provisions the row (dashboard, Accounts, OAuth
+  consent, MCP), the approve page sees exactly what a just-signed-up second
+  account looks like in production. So **run this before setup
+  `02_multi_account_linking.md` signs USER_B in on this branch**, or on a
+  recreated branch; a USER_B that has already visited the dashboard here
+  gives the control result below (`visitor_row_provisioned: false`), which
+  does NOT satisfy this assertion — report it `blocked` with "recreate the
+  Neon branch" rather than `pass`. Pre-check, read-only:
+  `SELECT clerk_user_id FROM users WHERE email = <USER_B_EMAIL> AND deleted_at IS NULL`
+  — the id must not be the one the dev server logs for USER_B after sign-in
+  (or simply: USER_B has had no dashboard pageview on this branch yet)
+- Take a USER_A approval link (A5 harness). Sign out, open the link signed
+  out (A6's wall), and in Clerk's Google chooser pick USER_B — its first
+  sign-in on this branch
+- **Expected**: the **wrong-account card** (A5 + A19) renders — the masked
+  owner, USER_B named in full, `[data-testid=delegate-panel]
+  [data-surface=approve_wall]` — and NOT the generic "Invalid link" card.
+  The dev server log carries one `[resolveApprovalLink] provisioned the
+  visitor's users row on the approve page` line; the `approval_link_opened`
+  row is `status: wrong_account` with `visitor_row_provisioned: true` and a
+  numeric `visitor_account_age_s`; `delegation_prompt_shown {surface:
+  approve_wall}` fired with `visitor_row_provisioned: true`. USER_B's row now
+  exists for the dev Clerk id (the read-only pre-check query shows it) and
+  **Back to dashboard** lands on a working dashboard with a Default Profile.
+  Confirming the panel's offer creates the USER_B → USER_A delegation exactly
+  as in A19 (revoke it afterwards). **Control**: reopen the same link as
+  USER_B — `wrong_account` again, now `visitor_row_provisioned: false`
+- **Why**: production, week to 2026-09-29 — 7 of the 15 `invalid` opens came
+  from 4 accounts created in the *same second* as the open, 3 of them
+  recognisably the second Google identity of an owner whose agent had just
+  minted the link (4 of ~30 external sign-ups that week). `users` rows are
+  created lazily by the first dashboard/MCP request, the approve page only
+  *read* the row, and with no row it could not tell "not the owner" from
+  "nobody" — so the PR #158 card, built for exactly these people, never
+  rendered for them. None of the four did anything afterwards; one kept
+  revisiting the dashboard for four days. Fix: `resolveApprovalLink`
+  provisions the row the way the dashboard's first render does
+  (`resolveDbUser`), then falls through to the unchanged wrong-account path
+- **Never**: a tampered link (A7) opened by this fresh account still renders
+  "Invalid link" — provisioning the row loosens nothing about verification;
+  no rule is created on either account; the owner's email stays masked; the
+  provisioned row is the dashboard's own first-visit shape (Default Profile
+  + own-mailbox access), nothing more

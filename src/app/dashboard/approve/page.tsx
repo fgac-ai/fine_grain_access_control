@@ -200,6 +200,12 @@ export default async function ApprovePage({
     // about verification); anything else came through the agent's reply.
     link_source: params.src === EMAIL_LINK_SOURCE_VALUE ? "email"
       : params.src === BANNER_LINK_SOURCE_VALUE ? "banner" : "agent",
+    // Who opened it. `visitor_row_provisioned: true` = this open is what gave
+    // the account its FGAC row — a brand-new sign-up arriving THROUGH the
+    // link (an owner's second Google identity, every 2026-09 case) — which
+    // until 2026-09-30 resolved as `invalid` and never saw the card below.
+    visitor_row_provisioned: resolved.visitor?.rowProvisioned ?? null,
+    visitor_account_age_s: resolved.visitor?.accountAgeS ?? null,
     ...client,
   });
   if (resolved.status === "fresh" || resolved.status === "already_granted") {
@@ -214,6 +220,8 @@ export default async function ApprovePage({
     if (!w.delegationActive) {
       captureServerEvent(clerkUserId ?? "anonymous-approve", "delegation_prompt_shown", {
         surface: "approve_wall", prior_session_matches: priorMatches, action: w.action, request_id: w.requestId,
+        visitor_row_provisioned: resolved.visitor?.rowProvisioned ?? null,
+        account_age_s: resolved.visitor?.accountAgeS ?? null,
       });
     }
     // The visitor's mailbox is already attached to the owner: the repair is
@@ -272,6 +280,11 @@ export default async function ApprovePage({
   }
 
   if (resolved.status === "invalid") {
+    // Reached only by a link that verifies against NOBODY: tampered, or
+    // truncated in transit (2026-09-26: one owner opened an agent-pasted
+    // docs_write link six times whose signature had lost its last
+    // character). A signed-in visitor with no FGAC row no longer lands here —
+    // resolveApprovalLink provisions the row and renders the card above.
     return (
       <Card>
         <h1 className="mb-2 text-xl font-bold text-foreground">Invalid link</h1>
