@@ -183,6 +183,10 @@ export default async function ApprovePage({
       prior_session_matches: priorMatches,
     } : {}),
     status: resolved.status,
+    // Why an invalid open was invalid: `signature` is a bad link (expected,
+    // agent-pasted); `unprovisioned` means a signed-in visitor could not get
+    // a users row (a bug — monitoring §7.25 watches it).
+    ...(resolved.status === "invalid" ? { invalid_reason: resolved.reason } : {}),
     // wrong_account carries the REAL request id (recomputed against the
     // resolved owner), so these opens join the funnel instead of vanishing
     // into request_id: undefined — recovery becomes measurable.

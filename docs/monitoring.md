@@ -2251,6 +2251,67 @@ the entries read as noise — check `oldest_pending_s` on the shown rows
 before shortening the 7-day window. Rows minted before 2026-09-20 have no
 stored link and never appear; the banner's population starts at the deploy.
 
+**Wall sign-ups that saw "Invalid link" (added 2026-09-30).** The wall's
+Google chooser can create a NEW FGAC account for the owner's other identity,
+and until 2026-09-30 the approve page answered that account's very first
+open with the generic "Invalid link" card instead of the wrong-account card
+(the `users` row is provisioned by dashboard pages, and `resolveApprovalLink`
+returned `invalid` for a signed-in Clerk user with no row before resolving
+the owner). Week to 2026-09-28: 7 of 14 external 'invalid' opens, 4 of 6
+people, were this class (the 2026-09-24 case among them — 0 approvals on 13
+mints). The approve page now provisions the row and takes the wrong-account
+path, and `approval_link_opened{status:'invalid'}` carries `invalid_reason`
+(`signed_out` / `unprovisioned` / `signature`). Two reads, both expected to
+sit at zero after the deploy:
+
+```sql
+-- 'invalid' opens by an account that signed up in the prior 10 minutes
+-- (the wall sign-up class) — must trend to zero; any row is a regression
+WITH inv AS (
+  SELECT timestamp AS opened_at, distinct_id AS did,
+         toString(properties.action) AS action,
+         toString(properties.invalid_reason) AS invalid_reason
+  FROM events
+  WHERE event = 'approval_link_opened' AND properties.environment = 'production'
+    AND toString(properties.status) = 'invalid' AND distinct_id != 'anonymous-approve'
+    AND timestamp >= now() - INTERVAL 30 DAY
+),
+su AS (
+  SELECT distinct_id AS did, min(timestamp) AS signed_up_at
+  FROM events WHERE event = 'sign_up_completed' AND timestamp >= now() - INTERVAL 31 DAY
+  GROUP BY did
+)
+SELECT countIf(su.signed_up_at > inv.opened_at - INTERVAL 10 MINUTE AND su.signed_up_at <= inv.opened_at) AS wall_signup_invalid_opens,
+       uniqIf(inv.did, su.signed_up_at > inv.opened_at - INTERVAL 10 MINUTE AND su.signed_up_at <= inv.opened_at) AS wall_signup_people,
+       count() AS invalid_opens_signed_in,
+       uniq(inv.did) AS invalid_people_signed_in
+FROM inv LEFT JOIN su ON su.did = inv.did
+```
+
+```sql
+-- what the remaining 'invalid' opens are (30 d): `signature` is a forged,
+-- truncated, or revoked-key link (expected, agent-pasted); `unprovisioned`
+-- means the row could not be created for a signed-in user (a bug — look at
+-- the server log for resolveDbUser); `signed_out` is unreachable behind the
+-- wall and should be 0. Rows before the deploy have no reason.
+SELECT toString(properties.invalid_reason) AS invalid_reason,
+       toString(properties.link_source) AS link_source,
+       count() AS opens, uniq(distinct_id) AS people
+FROM events
+WHERE event = 'approval_link_opened' AND properties.environment = 'production'
+  AND toString(properties.status) = 'invalid'
+  AND timestamp >= now() - INTERVAL 30 DAY
+GROUP BY invalid_reason, link_source
+ORDER BY opens DESC
+```
+
+Before-figures (2026-08-30 → 09-28, internal excluded): invalid 21 opens /
+11 people against wrong_account 38 / 12. After the deploy the wall sign-up
+rows move from `invalid` to `wrong_account` with `delegate_offer: true`, so
+PR #158's funnel (`delegation_prompt_shown{surface:'approve_wall'}` →
+`delegation_created{via:'approve_wall'}`, §7.29 below) is where the
+recovery shows; `wall_signup_invalid_opens` above is the regression check.
+
 **7.26 — Approval-link reminder email: does the emailed link get more
 interaction than the one the agent was handed?** Added 2026-09-15 with the
 repeat-request reminder (`src/lib/approvalNotify.ts`; sender = FGAC's
