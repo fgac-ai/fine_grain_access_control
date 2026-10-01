@@ -2660,7 +2660,6 @@ computers — tighten it in `secondAccount.ts`). The weekly `delegation_created`
 count should recover from the 1–5 of mid-September; `via != 'form'` is the
 share this change created.
 
-
 **7.29d — second accounts born ON the approve page (added 2026-10-01).** The
 wall's card had a blind spot: a person who signs in through their own
 approval link with a second Google account arrives with a Clerk session but

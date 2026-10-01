@@ -284,6 +284,11 @@ export default async function ApprovePage({
   }
 
   if (resolved.status === "invalid") {
+    // Reached only by a link that verifies against NOBODY: tampered, or
+    // truncated in transit (2026-09-26: one owner opened an agent-pasted
+    // docs_write link six times whose signature had lost its last
+    // character). A signed-in visitor with no FGAC row no longer lands here —
+    // resolveApprovalLink provisions the row and renders the card above.
     return (
       <Card>
         <h1 className="mb-2 text-xl font-bold text-foreground">Invalid link</h1>
