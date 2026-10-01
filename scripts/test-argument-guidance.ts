@@ -22,7 +22,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
-  normalizeToolArguments, describeArgumentFailure, rewriteValidationFailureBody, isSdkInvalidArgumentsText,
+  normalizeToolArguments, unknownArgumentKeys, describeArgumentFailure, rewriteValidationFailureBody, isSdkInvalidArgumentsText,
 } from '../src/lib/mcpArgumentGuidance';
 import { parseValidationFailure } from '../src/lib/mcpClientSignals';
 
@@ -47,6 +47,11 @@ const SHAPES: Record<string, z.ZodRawShape> = {
     format: z.enum(['full', 'metadata', 'minimal']).optional(),
     offset: z.number().int().min(0).optional(),
     limit: z.number().int().min(1).optional(),
+  },
+  gmail_list: {
+    account: z.string().optional().describe('Email account to use. Defaults to primary.'),
+    query: z.string().optional().describe('Gmail search query (e.g., "is:unread")'),
+    max: z.number().optional().describe('Max messages to return (Gmail maxResults; default: 10). The parameter is named max.'),
   },
   google_api_get: {
     path: z.string().describe('API path (e.g. "gmail/v1/users/me/messages" or "v4/spreadsheets/1BxiM.../values/Sheet1")'),
@@ -128,6 +133,47 @@ function sseBody(result: unknown, id = 1): string {
   {
     const r = normalizeToolArguments(Object.keys(SHAPES.sheets_update_range), { spreadsheet_id: 's', range: 'A1', rows: [[1]] });
     check('rows → values alongside spreadsheet_id', r.args.values !== undefined && r.args.spreadsheetId === 's' && r.aliased.length === 2, r);
+  }
+
+  console.log('gmail_list result count: maxResults / max_results / limit → max (QA run 2026-09-30)');
+  for (const key of ['maxResults', 'max_results', 'limit']) {
+    const r = normalizeToolArguments(Object.keys(SHAPES.gmail_list), { query: 'is:unread', [key]: 2 });
+    check(`${key} → max`, r.args.max === 2 && !(key in r.args) && r.args.query === 'is:unread'
+      && JSON.stringify(r.aliased) === JSON.stringify([{ from: key, to: 'max' }]), r);
+    check(`${key}: nothing left for the schema to drop`, unknownArgumentKeys(Object.keys(SHAPES.gmail_list), r.args).length === 0, r.args);
+  }
+  {
+    const r = normalizeToolArguments(Object.keys(SHAPES.gmail_list), { max: 5, maxResults: 2 });
+    check('a canonical max the agent DID send wins over maxResults', r.args.max === 5 && r.aliased.length === 0, r);
+    check('…and the losing maxResults is reported as an unknown key', JSON.stringify(unknownArgumentKeys(Object.keys(SHAPES.gmail_list), r.args)) === '["maxResults"]');
+    const q = normalizeToolArguments(Object.keys(SHAPES.gmail_list), { q: 'from:x', maxResults: 3 });
+    check('q and maxResults together both alias (the Gmail API spellings)', q.args.query === 'from:x' && q.args.max === 3 && q.aliased.length === 2, q);
+  }
+  {
+    const r = normalizeToolArguments(Object.keys(SHAPES.gmail_read), { messageId: 'm1', limit: 500 });
+    check('the max alias never touches a tool whose own `limit` is canonical (gmail_read)', r.args.limit === 500 && r.aliased.length === 0 && !('max' in r.args), r);
+    const s = normalizeToolArguments(Object.keys(SHAPES.sheets_read_range), { spreadsheetId: 's', range: 'A1', maxResults: 2 });
+    check('maxResults on a tool without `max` is left alone (no invented key)', !('max' in s.args) && s.aliased.length === 0, s);
+  }
+
+  console.log('unknownArgumentKeys: what Zod would drop without a word');
+  {
+    const shape = Object.keys(SHAPES.sheets_read_range);
+    check('a correct call has none', unknownArgumentKeys(shape, { spreadsheetId: 's', range: 'A1' }).length === 0);
+    check('extra keys are listed in order', JSON.stringify(unknownArgumentKeys(shape, { spreadsheetId: 's', range: 'A1', valueRenderOption: 'x', majorDimension: 'y' })) === '["valueRenderOption","majorDimension"]');
+    const many = Object.fromEntries(Array.from({ length: 25 }, (_, i) => [`k${i}`, i]));
+    check('capped at 10 keys', unknownArgumentKeys(shape, many).length === 10);
+    check('long keys are truncated, values never appear', unknownArgumentKeys(shape, { ['x'.repeat(500)]: 'secret' })[0].length === 64);
+  }
+
+  console.log('real SDK: the silent drop the alias fixes');
+  {
+    const stripped = await callWithRealSdk('gmail_list', { maxResults: 2 });
+    const text = stripped.content[0]?.text ?? '';
+    check('un-aliased maxResults is ACCEPTED by the SDK (no -32602, no failure row)…', stripped.isError !== true && text.startsWith('ok '), text);
+    check('…and the handler never sees it (the default-10 bug)', !text.includes('maxResults') && !text.includes('"max"'), text);
+    const fixed = await callWithRealSdk('gmail_list', normalizeToolArguments(Object.keys(SHAPES.gmail_list), { maxResults: 2 }).args);
+    check('aliased: the handler receives max: 2', (fixed.content[0]?.text ?? '').includes('"max":2'), fixed.content[0]);
   }
 
   console.log('real SDK: aliased arguments pass, un-aliased ones produce the text we replace');

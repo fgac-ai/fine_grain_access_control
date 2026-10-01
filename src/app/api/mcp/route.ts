@@ -32,7 +32,7 @@ import { loadApplicableRules, checkReadRestrictions, decodeB64Url, stripHtmlToTe
 import { compileRulePattern } from '@/lib/rulePatterns';
 import { captureServerEvent } from '@/lib/posthogServer';
 import { runWithToolCallProps, addToolCallProps, getToolCallProps, runWithRequestProps, getRequestProps } from '@/lib/toolCallContext';
-import { normalizeToolArguments, describeArgumentFailure, rewriteValidationFailureBody, type AliasHit, type ZodIssueLike } from '@/lib/mcpArgumentGuidance';
+import { normalizeToolArguments, unknownArgumentKeys, describeArgumentFailure, rewriteValidationFailureBody, type AliasHit, type ZodIssueLike } from '@/lib/mcpArgumentGuidance';
 import { cleanResourceName } from '@/lib/pickerRecoveryCopy';
 import { GOOGLE_FETCH_TIMEOUT_MS, CLERK_TOKEN_TIMEOUT_MS, withTimeout, isUpstreamTimeout } from '@/lib/upstreamTimeouts';
 import { classifyMcpClient, classifyTransportRejection, installFingerprint, parseInitializeClientInfo, parseRpcEnvelope, parseValidationFailure, normalizeValidationIssue, resourceIdHash, validationFailureProps, type McpClientInfo } from '@/lib/mcpClientSignals';
@@ -2720,7 +2720,7 @@ function registerFgacTools(server: FgacMcpServer) {
       toolConfig(TOOL_DEFS.gmail_list, {
         account: z.string().optional().describe('Email account to use. Defaults to primary.'),
         query: z.string().optional().describe('Gmail search query (e.g., "is:unread")'),
-        max: z.number().optional().describe('Max results (default: 10)'),
+        max: z.number().optional().describe('Max messages to return (Gmail maxResults; default: 10). The parameter is named max.'),
       }),
       async ({ account, query, max }, { authInfo }) => {
         const conn = await requireApproval(authInfo);
@@ -4100,6 +4100,8 @@ interface PreparedToolCall {
   tool: string;
   /** Aliases moved onto canonical keys (from → to), in order. */
   aliased: AliasHit[];
+  /** Keys left after aliasing that the schema does not have (Zod drops them). */
+  unknownKeys: string[];
   /** The request body with aliased keys renamed; undefined when nothing changed. */
   rewrittenText?: string;
   /** Set when the (normalised) arguments still fail the tool's schema. */
@@ -4135,7 +4137,7 @@ async function prepareToolCall(text: string): Promise<PreparedToolCall | undefin
       failure = { text: describeArgumentFailure({ tool, shape, issues, args: normalized, aliased }), issues, args: normalized };
     }
   } catch { /* schema threw — let the SDK answer as before */ }
-  return { tool, aliased, rewrittenText, failure };
+  return { tool, aliased, unknownKeys: unknownArgumentKeys(Object.keys(shape), normalized), rewrittenText, failure };
 }
 
 /** The same request with a new body; `auth` (set by experimental_withMcpAuth) is carried over. */
@@ -4188,11 +4190,21 @@ const withTransportObservability =
       if (prepared?.rewrittenText) req = withRequestBody(req, prepared.rewrittenText);
     }
 
-    const aliasProps = prepared?.aliased.length
+    // `arg_unknown_keys`: keys the tool does not have and that no alias
+    // claimed. Zod drops them silently, so on a call that still validates
+    // this is the only record that the agent asked for something FGAC
+    // ignored (runbook 7.10a).
+    const aliasProps = prepared?.aliased.length || prepared?.unknownKeys.length
       ? {
-          arg_aliases: prepared.aliased.map(a => a.from),
-          arg_alias_targets: prepared.aliased.map(a => a.to),
-          arg_alias_count: prepared.aliased.length,
+          ...(prepared.aliased.length ? {
+            arg_aliases: prepared.aliased.map(a => a.from),
+            arg_alias_targets: prepared.aliased.map(a => a.to),
+            arg_alias_count: prepared.aliased.length,
+          } : {}),
+          ...(prepared.unknownKeys.length ? {
+            arg_unknown_keys: prepared.unknownKeys,
+            arg_unknown_key_count: prepared.unknownKeys.length,
+          } : {}),
         }
       : undefined;
     const res = aliasProps ? await runWithRequestProps(aliasProps, () => h(req)) : await h(req);
