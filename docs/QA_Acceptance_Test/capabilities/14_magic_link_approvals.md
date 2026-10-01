@@ -370,3 +370,44 @@
   the signature is re-verified against them before anything is written);
   the confirm step is never skipped; the panel never approves the request
 
+### A20: A wall sign-in as a brand-new account gets the wrong-account card, not "Invalid link"
+- Fixture: a `users` row must NOT exist for the VISITOR's Clerk id. On a
+  fresh `npm run db:branch` (or a fresh preview branch) that is the natural
+  state — the branch is a copy of main, whose rows carry production Clerk
+  ids, so a QA account on the dev Clerk instance has no row for its own id
+  until it loads a dashboard page (which adopts the email's row). So: the
+  visitor must NOT open `/dashboard`, `/dashboard/accounts` or
+  `/dashboard/agents/*` before this assertion (any of them voids the
+  fixture; a re-run then needs a fresh branch). Either account can be the
+  visitor; pick the one whose Google sign-in works in the harness browser
+  (USER_B's lands on institutional SSO in the built-in pane — then USER_B
+  owns the link and USER_A visits). Mint the owner's link offline
+  (`npm run qa:mint-link -- --email <owner>`; the owner never has to sign
+  in). Make sure NO session exists (on a dev Clerk instance sign out on
+  accounts.dev as well as localhost — the hosted client otherwise re-adopts
+  the session), navigate to the link signed out (the approval sign-in wall
+  → Clerk sign-in), and sign in through Google's chooser as the visitor
+- **Expected**: the approve page renders the wrong-account card
+  (`[data-testid=wrong-account-notice]`, naming the owner **masked** and
+  the visitor in full) together with `[data-testid=delegate-panel]
+  [data-surface=approve_wall]` — exactly A5 + A19 — and never the generic
+  "Invalid link" card. Loading `/dashboard` as the visitor afterwards shows
+  the normal profile page (the row the approve page created is the same one
+  the dashboard would have made). `approval_link_opened` for that open
+  carries `status: 'wrong_account'`, a `request_id`, and
+  `delegate_offer: true`; `delegation_prompt_shown{surface:'approve_wall'}`
+  fires
+- **Why**: the 2026-09-24 case — an emailed link, a lapsed session, the
+  chooser creating a second FGAC account — saw "Invalid link" on both of its
+  opens because `resolveApprovalLink` returned `invalid` for a signed-in
+  Clerk user with no `users` row before resolving the owner. Week to
+  2026-09-28: 7 of the 14 external 'invalid' opens (4 of 6 people) were this
+  class; none delegated or approved. The approve page now provisions the row
+  with the same call the dashboard uses (`resolveDbUser`) and takes the
+  wrong-account path
+- **Never**: the generic card never renders for a signed-in account when the
+  link's key resolves to an owner and the signature verifies against that
+  owner; a forged/tampered link (A7) still gets the generic card, now with
+  `invalid_reason: 'signature'` on the open event; nothing is approved or
+  delegated by the render itself
+
