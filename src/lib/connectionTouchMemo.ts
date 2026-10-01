@@ -19,13 +19,18 @@
  *     was never used for authorization; a wrong entry can delay a dashboard
  *     "last used" timestamp or a client-name backfill by at most TTL_MS, never
  *     grant or deny access.
- *   - An `initialize` (clientInfo present) is never skipped until the
- *     connection's product name has been backfilled (`named`), so the
- *     one-shot `mcp_connection_client_identified` still fires on the first
- *     initialize after creation.
+ *   - An `initialize` (clientInfo present) is skipped only when the name it
+ *     reports would leave the connection row unchanged (the selection rule
+ *     in src/lib/mcpClientName.ts): an unnamed row, an inspector-named row
+ *     seeing its first product, or a product switch on a shared registration
+ *     always reaches the DB, so `mcp_connection_client_identified` fires on
+ *     every real transition. Handshake storms repeat one name, so they still
+ *     skip.
  *   - Bounded LRU keyed by user+client so bogus ids cannot grow it.
  *   - Per function instance; cold starts always run the full path.
  */
+
+import { nextConnectionClientName } from './mcpClientName';
 
 export const TOUCH_MEMO_TTL_MS = 5 * 60 * 1000;
 export const TOUCH_MEMO_MAX = 500;
@@ -33,8 +38,9 @@ export const TOUCH_MEMO_MAX = 500;
 interface TouchEntry {
   /** Last time the eager resolve actually ran (ms epoch). */
   touchedAt: number;
-  /** Connection row carries a real product name (backfill done). */
-  named: boolean;
+  /** The connection row's `client_name` as of that resolve — may still be the
+   * opaque client_id placeholder or an inspector name; null when unknown. */
+  clientName: string | null;
 }
 
 const memo = new Map<string, TouchEntry>();
@@ -62,41 +68,48 @@ function lruSet(k: string, v: TouchEntry): void {
 
 /**
  * Whether the auth layer may skip its eager resolveConnection for this
- * request. `isInitialize` = the request carries clientInfo (an `initialize`),
- * which must reach the DB until the name backfill has happened.
+ * request. `incomingClientName` is the clientInfo.name when the request is an
+ * `initialize` (undefined otherwise); an initialize whose name would change
+ * the row must reach the DB.
  */
 export function shouldSkipEagerResolve(
   userId: string,
   clientId: string,
-  isInitialize: boolean,
+  incomingClientName: string | undefined,
   now: number = Date.now(),
 ): boolean {
   const e = lruGet(key(userId, clientId));
   if (!e) return false;
   if (now - e.touchedAt >= TOUCH_MEMO_TTL_MS) return false;
-  if (isInitialize && !e.named) return false;
+  if (incomingClientName !== undefined) {
+    // Unknown row name: never skip a handshake on a guess.
+    if (e.clientName === null) return false;
+    const change = nextConnectionClientName({ current: e.clientName, clientId, incoming: incomingClientName });
+    if (change !== undefined) return false;
+  }
   return true;
 }
 
 /**
- * Record that the eager resolve ran and what it found. `named` is whether the
- * connection row now carries a real product name (clientName !== clientId).
- * Call only after a resolve that did not throw.
+ * Record that the eager resolve ran and the `client_name` the connection row
+ * carries after it (the placeholder, an inspector name, or a product name;
+ * null if the resolve did not return it). Call only after a resolve that did
+ * not throw.
  */
 export function recordEagerResolve(
   userId: string,
   clientId: string,
-  named: boolean,
+  clientName: string | null,
   now: number = Date.now(),
 ): void {
   const k = key(userId, clientId);
   const e = lruGet(k);
   if (e) {
     e.touchedAt = now;
-    e.named = named;
+    e.clientName = clientName;
     lruSet(k, e);
   } else {
-    lruSet(k, { touchedAt: now, named });
+    lruSet(k, { touchedAt: now, clientName });
   }
 }
 

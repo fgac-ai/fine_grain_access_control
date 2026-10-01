@@ -35,11 +35,15 @@ export function describeMissingGoogleAccess(
   if (access.gmail && !access.driveFile) {
     return {
       title: 'Action Required: Grant Google Drive file access',
+      // Since drive.file joined the sign-in scope set (2026-09-04) a plain
+      // sign-in no longer strips it; the accounts still missing it were
+      // connected before FGAC asked, or declined the box. Measured 7 d to
+      // 2026-09-25: 9 of 9 refused accounts had exactly one sign-in ever.
       body: needsDriveFile
         ? 'Gmail is connected, but the Google Drive file permission (drive.file) that your Sheets and Docs rules depend on is missing — every Sheets and Docs call fails until it is restored. ' +
-          'This usually happens after signing in with Google again: a sign-in resets the Drive permission. Reconnect to restore it.'
+          'Either this account was connected before FGAC asked for it, or the Drive box was left unchecked on Google\'s consent screen (an older sign-in could also reset it). Reconnect and tick the Google Drive box to restore it.'
         : 'Gmail is connected, but the Google Drive file permission (drive.file) is missing, so Sheets and Docs tools will fail. ' +
-          'Reconnect Google and leave the Drive checkbox checked.',
+          'Reconnect Google and tick the Google Drive box on Google\'s consent screen — a permission that was declined before comes back unchecked.',
       button: 'Reconnect Google',
       missing: ['drive_file'],
     };

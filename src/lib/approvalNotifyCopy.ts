@@ -36,6 +36,10 @@ export type NotifyStatus =
    * the same-turn window (NOTIFY_MIN_GAP_MS) — one email per turn; this link
    * stays eligible for a later turn. */
   | 'skipped_burst'
+  /** Account-refusal notice only: the refused value is a placeholder (an
+   * RFC 2606 example domain, a template value, not an address) — nothing is
+   * recorded and nobody is emailed about an account that cannot exist. */
+  | 'skipped_placeholder'
   | 'skipped_no_links'
   | 'failed'
   | 'disabled';

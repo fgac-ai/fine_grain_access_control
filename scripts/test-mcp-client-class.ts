@@ -81,6 +81,21 @@ check('otter on node stays plain direct (named but unidentified)', (() => {
   return r.client_class === 'direct' && r.client_class_signal === undefined;
 })());
 
+console.log('third-party products (direct + product:<name>, 2026-09-24 — the first Grok install and a Cursor attempt):');
+check('connectors-manager on grok-connectors-manager/0.1.0 → direct / product:grok', is('grok-connectors-manager/0.1.0', 'connectors-manager', 'direct', 'product:grok'));
+check('grok-connectors-manager/ UA with no name (tool call) → direct / product:grok', is('grok-connectors-manager/0.1.0', undefined, 'direct', 'product:grok'));
+check('grok-validator (the add-time validation) is NOT a scanner: keyword:validator must lose to the product', is('grok-connectors-manager/0.1.0', 'grok-validator', 'direct', 'product:grok'));
+check('grok-validator with no UA → direct / product:grok', is(undefined, 'grok-validator', 'direct', 'product:grok'));
+check('bare UA `Grok` (exact) → direct / product:grok', is('Grok', undefined, 'direct', 'product:grok'));
+check('`GrokBot/1.0` is not the bare `Grok` UA — falls through to the vocabulary (bot)', is('GrokBot/1.0', undefined, 'scanner', 'keyword:bot'));
+check('Cursor on Cursor/1.0.0 → direct / product:cursor', is('Cursor/1.0.0', 'Cursor', 'direct', 'product:cursor'));
+check('Cursor MCP Availability on Cursor/1.0.0 → direct / product:cursor', is('Cursor/1.0.0', 'Cursor MCP Availability', 'direct', 'product:cursor'));
+check('CursorServer/1.0.0 with no name → direct / product:cursor', is('CursorServer/1.0.0', undefined, 'direct', 'product:cursor'));
+check('product names are case-insensitive like every name rule', is('node', 'Connectors-Manager', 'direct', 'product:grok'));
+check('a product name never outranks a Claude UA (Claude-User + connectors-manager → claude)', is('Claude-User', 'connectors-manager', 'claude', 'ua:Claude-User'));
+check('a product name never outranks an internal UA', is('fgac-auth-probe/1.0', 'connectors-manager', 'internal', 'ua:fgac-'));
+check('the product is never `claude` (7.5 counts Anthropic products only)', cls('grok-connectors-manager/0.1.0', 'connectors-manager').client_class !== 'claude');
+
 console.log('direct + ua:stock-runtime-no-name (unnamed automation on a bare runtime):');
 for (const ua of ['Python/3.11 aiohttp/3.14.3', 'Bun/1.1.45', 'python-httpx/0.28.1', 'Go-http-client/2.0', 'node', 'undici', 'python-requests/2.32.3', 'axios/1.7.2', 'Deno/2.1.4']) {
   check(`${ua}, no clientInfo → direct / ua:stock-runtime-no-name`, is(ua, undefined, 'direct', 'ua:stock-runtime-no-name'));
