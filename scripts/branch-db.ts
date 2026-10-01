@@ -3,13 +3,14 @@ import { config } from 'dotenv'
 import { execSync } from 'child_process'
 import fs from 'fs'
 import path from 'path'
+import { neonctl } from './lib/neonctl'
 
 // Load environment variables from .env.local
 config({ path: '.env.local' })
 
 function runNeonCmd(cmd: string) {
   try {
-    return JSON.parse(execSync(`npx --yes neonctl ${cmd} -o json`, { encoding: 'utf-8' }));
+    return JSON.parse(execSync(neonctl(`${cmd} -o json`), { encoding: 'utf-8' }));
   } catch (error: any) {
     console.error(`❌ Neon CLI error. Are you authenticated?`);
     process.exit(1);
@@ -20,7 +21,7 @@ function runNeonCmd(cmd: string) {
  * that can recover (e.g. branch-limit → cleanup → retry). */
 function tryNeonCmd(cmd: string): { result?: any; error?: string } {
   try {
-    return { result: JSON.parse(execSync(`npx --yes neonctl ${cmd} -o json`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] })) };
+    return { result: JSON.parse(execSync(neonctl(`${cmd} -o json`), { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] })) };
   } catch (error: any) {
     const stderr = error?.stderr?.toString?.() ?? '';
     return { error: (stderr || error?.message || 'unknown neonctl error').trim() };
@@ -30,7 +31,7 @@ function tryNeonCmd(cmd: string): { result?: any; error?: string } {
 /** Plain-text neonctl output (commands whose `-o json` is not JSON, e.g. `connection-string`). */
 function tryNeonText(cmd: string): { result?: string; error?: string } {
   try {
-    return { result: execSync(`npx --yes neonctl ${cmd}`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim() };
+    return { result: execSync(neonctl(cmd), { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim() };
   } catch (error: any) {
     const stderr = error?.stderr?.toString?.() ?? '';
     return { error: (stderr || error?.message || 'unknown neonctl error').trim() };
