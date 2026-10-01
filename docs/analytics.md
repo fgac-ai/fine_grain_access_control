@@ -637,7 +637,14 @@ and Claude Code share one registration). Each rename fires
 a call on the Claude Code CLI's own `claude-code/<version>` user agent is
 stamped `claude-code` whatever the row says — and `mcp_client_initialize`
 records the raw name once per handshake. This is what makes the per-product
-split (Claude.ai / Claude Code / Sheets add-in) reproducible. **Before PR
+split (Claude.ai / Claude Code / Sheets add-in) reproducible — with one
+limit, measured 2026-10-01: on the `Claude-User` agent, claude.ai and the
+Claude Code harness (CLI, desktop, web, Cowork, all using the claude.ai-managed
+connector) share one registration for 163 of 219 people, and on a shared
+registration the row's name is the LATEST handshake, a proxy. The split is
+exact only on single-product registrations (9% of proxied calls) and on the
+CLI's own agent; read it with the exact-vs-proxy buckets in `monitoring.md`
+7.32 (revision 2026-10-01), never as two separable products. **Before PR
 #162 the first name stuck**, so from 2026-08-29 the inspector labelled
 61% of a week's tool calls; read that window with the fold in
 `monitoring.md` 7.32. Coverage starts at the deploy; rows for clients that

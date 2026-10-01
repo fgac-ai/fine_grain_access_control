@@ -31,6 +31,28 @@
  * one). The one per-request signal a tool call does carry — the CLI's own
  * `claude-code/<version>` user agent, never sent by claude.ai — overrides the
  * row at stamp time.
+ *
+ * What the rule's output means (measured 2026-10-01, the first half-day
+ * after it deployed; docs/monitoring.md 7.32, revision of that date):
+ *
+ *   - `claude-code` on the `Claude-User` user agent is the Claude Code
+ *     harness — CLI, desktop Code tab, web, Cowork — using the claude.ai-
+ *     managed connector. Its client_version is the harness version, rolling
+ *     forward daily in lockstep across ~100 people; the CLI itself handshakes
+ *     through Anthropic's proxy whenever its connector is managed, and its own
+ *     `claude-code/<ver>` agent appears only on a direct registration (one
+ *     person in three weeks). The surfaces are not separable from each other.
+ *   - 163 of 219 proxied registrations reported both product names in a week
+ *     and carried 91% of proxied calls. On those the row's name is a
+ *     latest-handshake PROXY, exact only on the single-product 9%. Attributing
+ *     each call to its nearest preceding handshake gives the harness 67–97% of
+ *     proxied calls on every day on both sides of the deploy — the deploy
+ *     exposed that mix, it did not create it. 3% of calls follow handshakes
+ *     from both products within ten minutes and cannot be placed by any rule.
+ *   - No per-request signal separates the two products (same user agent, same
+ *     MCP-Protocol-Version header), so the rule stands and the runbook carries
+ *     the reading rule: report the proxied split as exact-vs-proxy buckets,
+ *     never as two separable products.
  */
 
 /** Connect-time inspectors: they handshake once and never call a tool, so
