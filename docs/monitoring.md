@@ -708,6 +708,40 @@ explain well enough (or a wrong-tool case with no hint yet): read
 `scripts/test-argument-guidance.ts` and the registry stub in `route.ts`
 are the places to look.
 
+**Silently dropped keys (since 2026-09-30, branch
+`claude/gmail-list-maxresults-alias`).** The two queries above only see a
+misspelling when it *breaks* validation. A wrong name for an OPTIONAL
+argument never does: Zod strips the key, the call succeeds, and the agent
+gets a default it did not ask for. A QA run on 2026-09-30 sent
+`gmail_list {maxResults: 2}` and got 10 messages back. In the 30 days to
+that date `gmail_list` had ~9,900 production calls from 91 people, zero
+validation failures, and 30 `q` → `query` aliases, so the size of the
+`maxResults` gap could not be measured at all. `max` now aliases
+`maxResults` / `max_results` / `limit`. Every `$mcp_tool_call` also carries
+`arg_unknown_keys` / `arg_unknown_key_count`: the keys the agent sent that
+the tool does not have and no alias claimed (keys only, ≤10, ≤64 chars each).
+
+```sql
+-- Arguments agents send that FGAC ignores, on calls that otherwise ran
+SELECT properties.$mcp_tool_name AS tool, arrayJoin(properties.arg_unknown_keys) AS ignored_key,
+       count() AS n, uniq(person_id) AS people,
+       countIf(properties.$mcp_is_error = false) AS succeeded_anyway
+FROM events
+WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
+  AND properties.arg_unknown_key_count > 0 AND timestamp > now() - INTERVAL 7 DAY
+GROUP BY tool, ignored_key ORDER BY people DESC, n DESC
+```
+
+Reading it: a key here with several people behind it, whose meaning matches an
+existing argument (`maxResults` → `max`), belongs in `ARGUMENT_ALIASES`. A
+key that names a capability the tool lacks (`pageToken` on `gmail_list`,
+`valueRenderOption` on `sheets_read_range`) is a feature request: the agent
+got a full answer to a narrower question than it asked. Decide those per
+tool, not with an alias. Refusing unknown keys outright (strict schemas) was
+considered and rejected. It would turn calls that work today into
+-32602s, including clients that add harmless extra keys. Revisit only if
+this table shows a dropped key changing results for many people.
+
 Healthy: near zero. A single user repeating the same `invalid_arguments` on
 one tool is an agent stuck on a schema misunderstanding — the tool's
 description is the fix, not the user. Read it with the next-outcome
