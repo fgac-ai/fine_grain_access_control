@@ -708,6 +708,40 @@ explain well enough (or a wrong-tool case with no hint yet): read
 `scripts/test-argument-guidance.ts` and the registry stub in `route.ts`
 are the places to look.
 
+**Silently dropped keys (since 2026-09-30, branch
+`claude/gmail-list-maxresults-alias`).** The two queries above only see a
+misspelling when it *breaks* validation. A wrong name for an OPTIONAL
+argument never does: Zod strips the key, the call succeeds, and the agent
+gets a default it did not ask for. A QA run on 2026-09-30 sent
+`gmail_list {maxResults: 2}` and got 10 messages back. In the 30 days to
+that date `gmail_list` had ~9,900 production calls from 91 people, zero
+validation failures, and 30 `q` → `query` aliases, so the size of the
+`maxResults` gap could not be measured at all. `max` now aliases
+`maxResults` / `max_results` / `limit`. Every `$mcp_tool_call` also carries
+`arg_unknown_keys` / `arg_unknown_key_count`: the keys the agent sent that
+the tool does not have and no alias claimed (keys only, ≤10, ≤64 chars each).
+
+```sql
+-- Arguments agents send that FGAC ignores, on calls that otherwise ran
+SELECT properties.$mcp_tool_name AS tool, arrayJoin(properties.arg_unknown_keys) AS ignored_key,
+       count() AS n, uniq(person_id) AS people,
+       countIf(properties.$mcp_is_error = false) AS succeeded_anyway
+FROM events
+WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
+  AND properties.arg_unknown_key_count > 0 AND timestamp > now() - INTERVAL 7 DAY
+GROUP BY tool, ignored_key ORDER BY people DESC, n DESC
+```
+
+Reading it: a key here with several people behind it, whose meaning matches an
+existing argument (`maxResults` → `max`), belongs in `ARGUMENT_ALIASES`. A
+key that names a capability the tool lacks (`pageToken` on `gmail_list`,
+`valueRenderOption` on `sheets_read_range`) is a feature request: the agent
+got a full answer to a narrower question than it asked. Decide those per
+tool, not with an alias. Refusing unknown keys outright (strict schemas) was
+considered and rejected. It would turn calls that work today into
+-32602s, including clients that add harmless extra keys. Revisit only if
+this table shows a dropped key changing results for many people.
+
 Healthy: near zero. A single user repeating the same `invalid_arguments` on
 one tool is an agent stuck on a schema misunderstanding — the tool's
 description is the fix, not the user. Read it with the next-outcome
@@ -2251,6 +2285,67 @@ the entries read as noise — check `oldest_pending_s` on the shown rows
 before shortening the 7-day window. Rows minted before 2026-09-20 have no
 stored link and never appear; the banner's population starts at the deploy.
 
+**Wall sign-ups that saw "Invalid link" (added 2026-09-30).** The wall's
+Google chooser can create a NEW FGAC account for the owner's other identity,
+and until 2026-09-30 the approve page answered that account's very first
+open with the generic "Invalid link" card instead of the wrong-account card
+(the `users` row is provisioned by dashboard pages, and `resolveApprovalLink`
+returned `invalid` for a signed-in Clerk user with no row before resolving
+the owner). Week to 2026-09-28: 7 of 14 external 'invalid' opens, 4 of 6
+people, were this class (the 2026-09-24 case among them — 0 approvals on 13
+mints). The approve page now provisions the row and takes the wrong-account
+path, and `approval_link_opened{status:'invalid'}` carries `invalid_reason`
+(`signed_out` / `unprovisioned` / `signature`). Two reads, both expected to
+sit at zero after the deploy:
+
+```sql
+-- 'invalid' opens by an account that signed up in the prior 10 minutes
+-- (the wall sign-up class) — must trend to zero; any row is a regression
+WITH inv AS (
+  SELECT timestamp AS opened_at, distinct_id AS did,
+         toString(properties.action) AS action,
+         toString(properties.invalid_reason) AS invalid_reason
+  FROM events
+  WHERE event = 'approval_link_opened' AND properties.environment = 'production'
+    AND toString(properties.status) = 'invalid' AND distinct_id != 'anonymous-approve'
+    AND timestamp >= now() - INTERVAL 30 DAY
+),
+su AS (
+  SELECT distinct_id AS did, min(timestamp) AS signed_up_at
+  FROM events WHERE event = 'sign_up_completed' AND timestamp >= now() - INTERVAL 31 DAY
+  GROUP BY did
+)
+SELECT countIf(su.signed_up_at > inv.opened_at - INTERVAL 10 MINUTE AND su.signed_up_at <= inv.opened_at) AS wall_signup_invalid_opens,
+       uniqIf(inv.did, su.signed_up_at > inv.opened_at - INTERVAL 10 MINUTE AND su.signed_up_at <= inv.opened_at) AS wall_signup_people,
+       count() AS invalid_opens_signed_in,
+       uniq(inv.did) AS invalid_people_signed_in
+FROM inv LEFT JOIN su ON su.did = inv.did
+```
+
+```sql
+-- what the remaining 'invalid' opens are (30 d): `signature` is a forged,
+-- truncated, or revoked-key link (expected, agent-pasted); `unprovisioned`
+-- means the row could not be created for a signed-in user (a bug — look at
+-- the server log for resolveDbUser); `signed_out` is unreachable behind the
+-- wall and should be 0. Rows before the deploy have no reason.
+SELECT toString(properties.invalid_reason) AS invalid_reason,
+       toString(properties.link_source) AS link_source,
+       count() AS opens, uniq(distinct_id) AS people
+FROM events
+WHERE event = 'approval_link_opened' AND properties.environment = 'production'
+  AND toString(properties.status) = 'invalid'
+  AND timestamp >= now() - INTERVAL 30 DAY
+GROUP BY invalid_reason, link_source
+ORDER BY opens DESC
+```
+
+Before-figures (2026-08-30 → 09-28, internal excluded): invalid 21 opens /
+11 people against wrong_account 38 / 12. After the deploy the wall sign-up
+rows move from `invalid` to `wrong_account` with `delegate_offer: true`, so
+PR #158's funnel (`delegation_prompt_shown{surface:'approve_wall'}` →
+`delegation_created{via:'approve_wall'}`, §7.29 below) is where the
+recovery shows; `wall_signup_invalid_opens` above is the regression check.
+
 **7.26 — Approval-link reminder email: does the emailed link get more
 interaction than the one the agent was handed?** Added 2026-09-15 with the
 repeat-request reminder (`src/lib/approvalNotify.ts`; sender = FGAC's
@@ -2599,6 +2694,40 @@ computers — tighten it in `secondAccount.ts`). The weekly `delegation_created`
 count should recover from the 1–5 of mid-September; `via != 'form'` is the
 share this change created.
 
+**7.29d — second accounts born ON the approve page (added 2026-10-01).** The
+wall's card had a blind spot: a person who signs in through their own
+approval link with a second Google account arrives with a Clerk session but
+no `users` row (rows are provisioned lazily by the first dashboard / MCP /
+OAuth-consent request; the Clerk webhook only records the sign-up), and the
+approve page read the row without creating it — so the open resolved as
+`invalid` and the card never rendered. Sized in §7.25 ("Wall sign-ups that
+saw 'Invalid link'"): 7 of 14 external `invalid` opens, 4 of 6 people, week
+to 2026-09-28, 0 recovered. Since 2026-10-01 the page provisions the row
+(`resolveSignedInVisitor`, actions.ts) and every `approval_link_opened` /
+wall `delegation_prompt_shown` row carries `visitor_row_provisioned` (this
+open created the row) and `visitor_account_age_s` (Clerk account age).
+
+```sql
+-- 7.29d: accounts whose FGAC row was created by an approval-link open, per week
+SELECT toStartOfWeek(timestamp) AS wk,
+       uniq(distinct_id) AS provisioned_on_approve,
+       uniqIf(distinct_id, toInt64OrNull(toString(properties.visitor_account_age_s)) < 300) AS under_5_min_old,
+       uniqIf(distinct_id, JSONExtractString(properties, 'status') = 'wrong_account') AS saw_the_card,
+       uniqIf(distinct_id, JSONExtractString(properties, 'status') = 'invalid') AS still_invalid
+FROM events
+WHERE event = 'approval_link_opened' AND properties.environment = 'production'
+  AND timestamp > now() - INTERVAL 6 WEEK
+  AND JSONExtractBool(properties, 'visitor_row_provisioned')
+GROUP BY wk ORDER BY wk
+```
+
+Healthy: `saw_the_card` equals `provisioned_on_approve` and `still_invalid`
+is 0 (an `invalid` open with a freshly provisioned row would mean the key no
+longer resolves — read its `invalid_reason`); §7.25's
+`wall_signup_invalid_opens` is the matching before-figure and must sit at
+zero. Then read these people through 7.29b: they are the `prior_matched`
+rows when the owner's session was in the same browser within 2 h, and
+`delegation_created {via: 'approve_wall'}` is the recovery.
 
 **7.30 — Dead-grant (and, since 2026-09-25, scope-missing) owner notice: is
 the owner told once, does the grant come back, and is it staying far from
@@ -3119,3 +3248,96 @@ GROUP BY week, product ORDER BY week, calls DESC
 
 Healthy: 7.32a's `toolbox` column at zero a week after the deploy; 7.32b shows
 no transition whose `to_name` is `Anthropic/Toolbox` other than `first`.
+
+**7.33 — Directory connections stop while everything else is green (the
+2026-09-27..30 gap).** Added 2026-10-01
+(`docs/implementation_plans/claude_suspicious-lederberg-bef39d_v1.md`). From
+2026-09-26 23:51Z to 2026-09-30 22:59Z no `mcp_connection_created` row was
+written (prior ten days: 4.7/day, so three empty days is not noise), while
+tool calls, auth-health, the synthetic probe, discovery and every Vercel log
+stayed normal, and then connections resumed with no change on our side. The
+connect flow has a blind segment: after Claude's unauthenticated `initialize`
+(our 401) and its discovery fetches, everything up to the Clerk `user.created`
+webhook runs on Clerk's hosts (`clerk.fgac.ai/oauth/authorize` →
+`accounts.fgac.ai/sign-in` → Google → `accounts.fgac.ai/oauth-consent` →
+Claude's callback → Clerk token endpoint). FGAC sees nothing of it, and the
+website's own sign-up does not exercise it either (the site uses Clerk's modal
+on fgac.ai; the hosted portal is used **only** by the connector flow). Run the
+checks in this order; each one localises the break further.
+
+1. **Is it real, and where in the funnel?** Compare, per day, the 7.5
+   `claudeai_unauth_initializes` (upper bound on Connect clicks — they stayed
+   at 16–24/day through the gap, spread over 13–16 hours, so they do not
+   prove clicks either way), connector sign-ups, and connections:
+
+   ```sql
+   SELECT toDate(timestamp) AS day,
+          countIf(event = 'sign_up_completed')                                   AS signups,
+          countIf(event = 'mcp_connection_created')                              AS connections,
+          countIf(event = 'mcp_connection_created'
+                  AND properties.account_age_seconds < 600)                      AS connector_signups,
+          countIf(event = 'mcp_client_initialize'
+                  AND properties.client_name = 'Anthropic/Toolbox')              AS inspector_handshakes
+   FROM events
+   WHERE properties.environment = 'production'
+     AND event IN ('sign_up_completed', 'mcp_connection_created', 'mcp_client_initialize')
+     AND timestamp > now() - INTERVAL 14 DAY
+   GROUP BY day ORDER BY day
+   ```
+
+   `sign_up_completed` is the Clerk `user.created` webhook (fires for every
+   flow). Sign-ups continuing while `connector_signups` is 0 means the
+   website flow works and whoever tried the connector never reached Clerk
+   account creation — the break is at or before the hosted sign-in page, or
+   nobody arrived. Sign-ups from the connector with no connection row means
+   the break is after consent (token exchange, Claude's callback, or our
+   first-request auto-attach — check `mcp_auth_attempt` outcomes and Vercel
+   errors on `/api/mcp`).
+
+2. **Outside-in, read-only, from this machine:** the 401 challenge
+   (`www-authenticate … resource_metadata=`), both well-known documents on
+   fgac.ai and clerk.fgac.ai, Claude's client-metadata document
+   (`https://claude.ai/oauth/mcp-oauth-client-metadata`, 200 for any user
+   agent), the authorize redirect chain with that client id (302 → `/continue`
+   → `accounts.fgac.ai/sign-in?redirect_url=…oauth-consent…`; a bogus client
+   id gets 401 `invalid_client`, so Clerk is resolving the document), and
+   `scripts/mcp-auth-probe.ts`. **Expect `curl` to get HTTP 403 "Just a
+   moment" (`cf-mitigated: challenge`) on every `accounts.fgac.ai` path** —
+   that is Clerk's zone-wide Cloudflare managed challenge for non-browser
+   clients (identical on accounts.clerk.com and other Clerk portals), not an
+   outage; real browsers pass it without an interstitial.
+
+3. **A real browser through the real URL** (a `qa-setup-driver` run with
+   USER_A — never the main session): open the exact authorize URL Claude
+   opens, with fresh PKCE, and walk sign-in → Google chooser → consent →
+   Allow. The browser lands on `claude.ai/api/mcp/auth_callback`, which
+   Claude rejects (it did not start the flow) **and answers with
+   `/logout?involuntary=1`** — so do this in a pane that holds no claude.ai
+   session you care about. Every hop reaching the callback clears the Clerk
+   side; the code itself is consumed server-side by Claude and cannot be
+   exchanged from the pane (a Path B run listening for the consent 303 could).
+
+4. **Clerk's view (Ken, Dashboard):** Logs for the window — request volume
+   and errors on `/oauth/authorize`, `/oauth-consent`, `/oauth/token`, and
+   sign-in/sign-up attempts that never completed. This is the only record
+   that separates "nobody arrived" (Anthropic side: directory listing,
+   popup) from "arrived and stalled on the portal". Also OAuth
+   applications: Claude registers via its client-metadata URL since
+   2026-09-10 (no DCR rows since), so new `Claude` DCR registrations would
+   mean Claude changed behaviour; `GET /v1/oauth_applications` with the
+   production secret from `.secrets/prod.env` lists them.
+
+5. **Vercel runtime logs** (`vercel logs <prod deployment url> --since 24h
+   --level error --json`; the project-wide form 504s past ~48h): the
+   `/api/mcp` 401 "Invalid OAuth access token" rows are the 15-minute
+   synthetic probe (`error_class = internal`), not users.
+
+What this gap did **not** show: no `invalid_token` from the `claude` client
+class, no `audience_mismatch`, no 5xx, no eager-resolve errors, no Clerk or
+Anthropic status incident covering the days, no deploy (last one 09-25
+13:00Z, with a successful connection after it). Treat a recurrence as external
+until step 4 says otherwise; the structural fix, if Ken wants one, is to host
+sign-in and the OAuth consent page on fgac.ai (Clerk's `<OAuthConsent />`,
+Configure → Paths, and a `/sign-in` page), which moves the blind segment onto
+our Vercel logs and PostHog.
+

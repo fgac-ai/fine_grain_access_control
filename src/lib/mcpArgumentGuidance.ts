@@ -54,6 +54,13 @@ export const ARGUMENT_ALIASES: Readonly<Record<string, readonly string[]>> = {
   to: ['recipient', 'recipients', 'to_email', 'toEmail'],
   offset: ['start', 'start_offset', 'startOffset'],
   limit: ['max_chars', 'maxChars', 'chars'],
+  // gmail_list's result count. `maxResults` is the Gmail API's own name, so
+  // agents that know the API send it; `max` is optional, so the dropped key
+  // never failed validation — the call silently returned the default 10
+  // (QA run 2026-09-30). `limit` is safe here: a tool whose shape has a
+  // canonical `limit` never has it moved (normalizeToolArguments skips
+  // canonical candidates), and gmail_list has no `limit` of its own.
+  max: ['maxResults', 'max_results', 'limit'],
 };
 
 /**
@@ -108,6 +115,24 @@ export function normalizeToolArguments(
     if (aliased.length >= MAX_ALIASES_PER_CALL) break;
   }
   return { args: out, aliased };
+}
+
+const MAX_UNKNOWN_KEYS = 10;
+const MAX_UNKNOWN_KEY_CHARS = 64;
+
+/**
+ * Keys still present after normalisation that the tool's schema does not
+ * have — Zod strips them without a word. On a call that otherwise validates
+ * this is the only trace of an argument the agent meant and FGAC ignored
+ * (`maxResults` on gmail_list before it was aliased: optional target, so no
+ * failure row, no alias row, nothing). Keys only, never values; capped.
+ */
+export function unknownArgumentKeys(shapeKeys: readonly string[], args: Record<string, unknown>): string[] {
+  const canonical = new Set(shapeKeys);
+  return Object.keys(args)
+    .filter(k => !canonical.has(k))
+    .slice(0, MAX_UNKNOWN_KEYS)
+    .map(k => k.slice(0, MAX_UNKNOWN_KEY_CHARS));
 }
 
 // ─── Guided refusal text ────────────────────────────────────────────────────

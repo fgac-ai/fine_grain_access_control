@@ -183,6 +183,16 @@ export default async function ApprovePage({
       prior_session_matches: priorMatches,
     } : {}),
     status: resolved.status,
+    // Why an invalid open was invalid: `signature` is a bad link (expected,
+    // agent-pasted); `unprovisioned` means a signed-in visitor could not get
+    // a users row (a bug — monitoring §7.25 watches it).
+    ...(resolved.status === "invalid" ? { invalid_reason: resolved.reason } : {}),
+    // Who opened it. `visitor_row_provisioned: true` = this open is what gave
+    // the account its FGAC row — a brand-new sign-up arriving THROUGH the
+    // link (the wall sign-up class), which until 2026-09-30 resolved as
+    // `invalid` and never saw the wrong-account card (monitoring §7.29d).
+    visitor_row_provisioned: resolved.visitor?.rowProvisioned ?? null,
+    visitor_account_age_s: resolved.visitor?.accountAgeS ?? null,
     // wrong_account carries the REAL request id (recomputed against the
     // resolved owner), so these opens join the funnel instead of vanishing
     // into request_id: undefined — recovery becomes measurable.
@@ -214,6 +224,8 @@ export default async function ApprovePage({
     if (!w.delegationActive) {
       captureServerEvent(clerkUserId ?? "anonymous-approve", "delegation_prompt_shown", {
         surface: "approve_wall", prior_session_matches: priorMatches, action: w.action, request_id: w.requestId,
+        visitor_row_provisioned: resolved.visitor?.rowProvisioned ?? null,
+        account_age_s: resolved.visitor?.accountAgeS ?? null,
       });
     }
     // The visitor's mailbox is already attached to the owner: the repair is
@@ -272,6 +284,11 @@ export default async function ApprovePage({
   }
 
   if (resolved.status === "invalid") {
+    // Reached only by a link that verifies against NOBODY: tampered, or
+    // truncated in transit (2026-09-26: one owner opened an agent-pasted
+    // docs_write link six times whose signature had lost its last
+    // character). A signed-in visitor with no FGAC row no longer lands here —
+    // resolveApprovalLink provisions the row and renders the card above.
     return (
       <Card>
         <h1 className="mb-2 text-xl font-bold text-foreground">Invalid link</h1>

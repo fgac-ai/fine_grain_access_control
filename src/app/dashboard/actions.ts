@@ -31,24 +31,6 @@ function revalidateDashboard() {
   revalidatePath("/dashboard", "layout");
 }
 
-/**
- * getDbUser() throws for two reasons a PUBLIC-facing page must not 500 on:
- * signed out ("Unauthorized"), and Clerk-authenticated but with no users row
- * yet ("User not found in DB" — a bystander who has a Clerk session but has
- * never visited the dashboard, which is what auto-provisions the row).
- *
- * Approval links are shareable by nature, so both cases are reachable by
- * anyone who receives a leaked link. QA 2026-08-26 caught the second one as an
- * unhandled 500 on /dashboard/approve.
- */
-async function tryGetDbUser() {
-  try {
-    return await getDbUser();
-  } catch {
-    return null;
-  }
-}
-
 async function getDbUser() {
   const user = await currentUser();
   if (!user) throw new Error("Unauthorized");
@@ -57,6 +39,74 @@ async function getDbUser() {
   if (!dbUser) throw new Error("User not found in DB");
 
   return dbUser;
+}
+
+/** Why an approval link resolved to `invalid` — stamped on the open event. */
+export type InvalidLinkReason =
+  /** No Clerk session. Unreachable on the page (the route is Clerk-protected). */
+  | "signed_out"
+  /** Signed in, but the users row could not be created (Clerk returned no
+   *  primary email, or the insert failed — see the server log). */
+  | "unprovisioned"
+  /** The signature verified against neither the visitor nor the key's owner:
+   *  forged, truncated, or the key no longer resolves. */
+  | "signature";
+
+/**
+ * The signed-in visitor's users row, PROVISIONING it when Clerk has a session
+ * but no row exists yet — the same `resolveDbUser` call every dashboard page
+ * makes (adopt the email's live row if Clerk reissued the id, else create).
+ *
+ * The approve page used to be the one dashboard page that only looked the row
+ * up, and answered "no row" with the generic invalid card. That predates the
+ * sign-in wall (2026-09-16) and the wrong-account card's one-click delegation
+ * (PR #158): a person whose session lapsed clicks the emailed link, hits the
+ * wall, and Google's chooser creates a NEW FGAC account for their other
+ * identity — so "signed in, no row yet" is the normal state of exactly the
+ * person that card exists for. The 2026-09-24 case saw "Invalid link" on both
+ * of its opens; week to 2026-09-28, 7 of 14 external invalid opens (4 of 6
+ * people) were this class, and none delegated or approved.
+ */
+async function resolveSignedInVisitor(): Promise<
+  | { user: Awaited<ReturnType<typeof getDbUser>>; visitor: ApprovalVisitor; reason?: undefined }
+  | { user: null; visitor: null; reason: Extract<InvalidLinkReason, "signed_out" | "unprovisioned"> }
+> {
+  const clerkUser = await currentUser().catch(() => null);
+  if (!clerkUser) return { user: null, visitor: null, reason: "signed_out" };
+  const accountAgeS = typeof clerkUser.createdAt === "number"
+    ? Math.max(0, Math.round((Date.now() - clerkUser.createdAt) / 1000))
+    : null;
+  try {
+    const existing = await db.select().from(users)
+      .where(eq(users.clerkUserId, clerkUser.id))
+      .limit(1).then(res => res[0]);
+    if (existing) return { user: existing, visitor: { rowProvisioned: false, accountAgeS } };
+    const email = clerkPrimaryEmail(clerkUser);
+    if (!email) {
+      console.error("[resolveSignedInVisitor] Clerk user has no primary email; cannot provision users row");
+      return { user: null, visitor: null, reason: "unprovisioned" };
+    }
+    const user = await resolveDbUser(clerkUser.id, email);
+    console.log(`[resolveSignedInVisitor] provisioned the visitor's users row on the approve page (account age ${accountAgeS ?? "unknown"}s)`);
+    return { user, visitor: { rowProvisioned: true, accountAgeS } };
+  } catch (err) {
+    // A public-facing page must not 500 on a DB hiccup (QA 2026-08-26) —
+    // the generic card is the fallback, and the reason says it was this.
+    console.error("[resolveSignedInVisitor] could not resolve or provision users row:", err);
+    return { user: null, visitor: null, reason: "unprovisioned" };
+  }
+}
+
+/** What the approve page learned about WHO opened the link — stamped on
+ *  `approval_link_opened` / the wall's `delegation_prompt_shown` so the
+ *  just-signed-up second account is a countable state (monitoring §7.29d). */
+export interface ApprovalVisitor {
+  /** This open is what attached the visitor's `users` row: a brand-new
+   *  sign-up arriving THROUGH the link, or a Clerk-reissued id adopted onto
+   *  its existing row by email. */
+  rowProvisioned: boolean;
+  /** Seconds since Clerk created the account, when Clerk reports it. */
+  accountAgeS: number | null;
 }
 
 // ─── Email Delegations ──────────────────────────────────────────────────────
@@ -1118,28 +1168,35 @@ async function resolveWrongAccountLink(
  * regression. No approval is possible from this state; it is purely the
  * diagnosis the user needs to switch accounts.
  */
-export async function resolveApprovalLink(params: ApprovalSearchParams): Promise<
-  | { status: "invalid" }
+export type ResolvedApprovalLink = (
+  | { status: "invalid"; reason: InvalidLinkReason }
   | { status: "wrong_account"; details: WrongAccountDetails }
   | { status: "fresh" | "already_granted"; payload: ApprovalPayload }
-> {
+) & {
+  /** Who opened it — null only when there was no usable visitor row. */
+  visitor: ApprovalVisitor | null;
+};
+
+export async function resolveApprovalLink(params: ApprovalSearchParams): Promise<ResolvedApprovalLink> {
   const { verifyApprovalParams } = await import("@/lib/approvalLinks");
-  // A visitor with no FGAC account (or none yet) is not the owner of any link,
-  // so this is exactly the "invalid" case — never a 500. Kept distinct from
-  // wrong_account: with no users row there is no signed-in FGAC identity to
-  // contrast the owner against, and the generic card already says to sign in
-  // as the account the agent is connected to.
-  const dbUser = await tryGetDbUser();
-  if (!dbUser) return { status: "invalid" };
+  // A signed-in visitor with no users row yet gets one here (see
+  // resolveSignedInVisitor): a brand-new account created by the wall's
+  // sign-in is the wrong-account card's audience, and that card — and the
+  // delegation it offers — needs the visitor's own row. Only a visitor whose
+  // row cannot exist (no session, no email, DB failure) is "invalid" before
+  // the owner is resolved — never a 500.
+  const resolvedVisitor = await resolveSignedInVisitor();
+  if (!resolvedVisitor.user) return { status: "invalid", reason: resolvedVisitor.reason, visitor: null };
+  const { user: dbUser, visitor } = resolvedVisitor;
   const verified = await verifyApprovalParams(dbUser.id, params);
   if (!verified.ok) {
     const wrong = await resolveWrongAccountLink(params, dbUser);
-    if (wrong) return { status: "wrong_account", details: { ...wrong, signedInEmail: dbUser.email } };
-    return { status: "invalid" };
+    if (wrong) return { status: "wrong_account", details: { ...wrong, signedInEmail: dbUser.email }, visitor };
+    return { status: "invalid", reason: "signature", visitor };
   }
   const p = verified.payload;
   const active = await grantActiveForApproval(p, p.proxyKeyId);
-  return { status: active ? "already_granted" : "fresh", payload: p };
+  return { status: active ? "already_granted" : "fresh", payload: p, visitor };
 }
 
 /**
@@ -1350,8 +1407,10 @@ export async function approveMagicLink(
 
   // Must RESOLVE, not throw: a rejected server action leaves the submit button
   // stuck on "Approving…" with no error (QA 2026-08-26, session expired
-  // while the page was open).
-  const dbUser = await tryGetDbUser();
+  // while the page was open). Same provisioning as the page render, so a
+  // stale form POST from a brand-new session gets the wrong-account
+  // diagnosis below rather than "no FGAC profile".
+  const dbUser = (await resolveSignedInVisitor()).user;
   if (!dbUser) {
     return {
       ok: false,
