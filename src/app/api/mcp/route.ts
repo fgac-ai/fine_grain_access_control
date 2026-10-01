@@ -63,7 +63,7 @@ import {
   RAW_MODIFY_METHODS, isForwardableGoogleMethod, methodDenial,
   type RawCallClass, type GoogleErrorReason, type FileDenialKind,
 } from './googleApiPolicy';
-import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, kindForMimeType, kindForService, kindForRequestType, type DriveFileKind } from '@/lib/driveFileKinds';
+import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, kindForMimeType, kindForService, kindForRequestType, kindForApprovalAction, type DriveFileKind } from '@/lib/driveFileKinds';
 import { clerkPrimaryEmail } from '@/lib/clerkPrimaryEmail';
 import { ownClerkEmailMatch } from '@/lib/identityDrift';
 import { slugifyProfileLabel } from '@/lib/profileSlugs';
@@ -726,6 +726,7 @@ async function policyDenialWithLink(
     const { url, query, requestId, targetHash } = await mintApprovalLink(DASHBOARD_URL, conn.user.id, proxyKeyId, action);
     const mintCount = await recordApprovalMint({
       requestId, userId: conn.user.id, proxyKeyId, action: action.action, targetHash, linkQuery: query,
+      resourceName: 'resourceName' in action ? action.resourceName : undefined,
     });
     // Out-of-band delivery (2026-09-15): when the agent asks for the SAME
     // link again and the person has still not opened it, FGAC emails the
@@ -754,7 +755,11 @@ async function policyDenialWithLink(
     return textResult(
       `${message}\n👉 Share this link with the user to approve it in one click: ${url}\n` +
       `(The link must be opened signed in to FGAC as ${conn.user.email} — the account this agent is connected to. Opened under any other Google account it is refused; it does not need a second FGAC account.)\n` +
-      `Suggested wording to relay: "FGAC is blocking this until you approve it here: ${url} — one click, and you can revoke it any time from your dashboard."\n` +
+      // Names WHAT is being approved (file title when known — the Drive tree
+      // engine always knows it; legacy denials know it when the agent passed
+      // resourceName): the user reads this line among other output, often
+      // later, and must recognise the file without going back to the agent.
+      `Suggested wording to relay: "FGAC needs your approval for ${approvalTargetLabel(action)} before I can continue: ${url} — one click, and you can revoke it any time from your dashboard."\n` +
       (emailed ? `${emailed}\n` : '') +
       AGENT_APPROVAL_PROTOCOL,
     );
@@ -1495,7 +1500,8 @@ async function checkFilePermission(kind: DriveFileKind, userId: string, proxyKey
 
 type TreeFilePermission =
   | { allowed: true; newestRuleAt: Date | null }
-  | { allowed: false; denial: FileDenialKind; reason: string }
+  /** `fileName`: the Drive title the engine resolved — minted into the approval link so the page names the file, not its id. */
+  | { allowed: false; denial: FileDenialKind; reason: string; fileName?: string }
   /** Lineage could not be resolved (file invisible, Google failure, too deep): a denial that mints no approval action. */
   | { allowed: false; denial: 'unavailable'; reason: string };
 
@@ -1567,7 +1573,7 @@ async function checkDriveTreeFile(engine: DriveEngineContext, kind: DriveFileKin
   const code = decision.denial === 'blocked' ? 'drive_blocked' : decision.denial === 'read_only' ? 'drive_read_only' : `${service}_not_exposed`;
   addToolCallProps({ denial_code: code });
   const denial = decision.denial ?? 'not_exposed';
-  return { allowed: false, denial, reason: driveDenialText(decision, lineage.file.name || fileId, driveDefault, `${DASHBOARD_URL}/dashboard`) };
+  return { allowed: false, denial, fileName: lineage.file.name || undefined, reason: driveDenialText(decision, lineage.file.name || fileId, driveDefault, `${DASHBOARD_URL}/dashboard`) };
 }
 
 /** Drive file kind of a file from its own metadata (for approval actions); null for kinds FGAC has no tools for. */
@@ -1685,7 +1691,32 @@ function resolveDriveFileId(kind: DriveFileKind | null, raw: string): { id: stri
 function fileDenialAction(kind: DriveFileKind, perm: FilePermission, fileId: string, isMutating: boolean): ApprovalAction | null {
   if (perm.allowed) return null;
   if (perm.denial === 'unavailable') return null;
-  return fileApprovalAction(kind, perm.denial, fileId, isMutating);
+  return nameApprovalAction(fileApprovalAction(kind, perm.denial, fileId, isMutating), 'fileName' in perm ? perm.fileName : undefined);
+}
+
+/**
+ * Put the file's title on a per-file approval action when the denial knew
+ * it (the Drive tree engine resolves titles; legacy per-file denials only
+ * know the id). The approval page, the owner email and the relay sentence
+ * then name the file — the customer evidence of 2026-09-30: "by the time I
+ * see it again, I forgot what file it needs (and it doesn't tell me)".
+ */
+function nameApprovalAction(action: ApprovalAction | null, fileName: string | undefined): ApprovalAction | null {
+  if (!action || !fileName || !kindForApprovalAction(action.action)) return action;
+  if ('resourceName' in action && action.resourceName) return action;
+  return { ...action, resourceName: fileName } as ApprovalAction;
+}
+
+/** Human label of what an approval action unlocks, for the quotable relay line. */
+function approvalTargetLabel(action: ApprovalAction): string {
+  const kind = kindForApprovalAction(action.action);
+  if (kind) {
+    const d = DRIVE_FILE_KINDS[kind];
+    const name = 'resourceName' in action ? action.resourceName : undefined;
+    return name ? `the ${d.noun} “${cleanResourceName(name) ?? name}”` : `${d.noun} ${actionTarget(action)}`;
+  }
+  if (action.action === 'send_whitelist') return `sending email to ${action.recipient}`;
+  return 'sending email to anyone';
 }
 const sheetsDenialAction = (perm: SheetsPermission, spreadsheetId: string, isMutating: boolean) =>
   fileDenialAction('sheet', perm, spreadsheetId, isMutating);
@@ -1717,7 +1748,7 @@ async function checkResolvedDriveFile(
 ): Promise<{ denial: Awaited<ReturnType<typeof policyDenialWithLink>> } | { kind: DriveFileKind; perm: FilePermission }> {
   const perm = await checkFilePermission(kind, conn.user.id, proxyKeyId, fileId, isMutating);
   if (!perm.allowed) {
-    const action = perm.denial === 'unavailable' ? null : fileApprovalAction(kind, perm.denial, fileId, isMutating);
+    const action = perm.denial === 'unavailable' ? null : nameApprovalAction(fileApprovalAction(kind, perm.denial, fileId, isMutating), perm.fileName);
     return { denial: await policyDenialWithLink(conn, proxyKeyId, perm.reason, action) };
   }
   return { kind, perm };
