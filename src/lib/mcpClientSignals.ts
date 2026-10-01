@@ -308,7 +308,11 @@ const CLAUDE_UA_PREFIXES = ['Claude-User', 'claude-code/'];
  *   - cursor — 2026-09-24T18:09Z, five minutes later, tokenless discovery
  *     only (no authenticated row, no initialize): `Cursor` and
  *     `Cursor MCP Availability` on `Cursor/1.0.0`, plus the bare UA
- *     `CursorServer/1.0.0`.
+ *     `CursorServer/1.0.0`. The availability check is NOT a crawler: it
+ *     fired once, 56 s after the `Cursor` handshake and in the same second
+ *     as the `CursorServer/` hit, and never again through 2026-09-30 — a
+ *     standing probe would recur. It is part of a person's add, so it
+ *     carries the product signal, not `scanner`.
  */
 const PRODUCT_CLIENTS: ReadonlyArray<{ product: string; names: string[]; userAgents: string[] }> = [
   {
