@@ -370,6 +370,11 @@ deploy of that git branch. Facts that are easy to get wrong:
     relevant `docs/QA_Acceptance_Test/setup/` steps before trusting a stale worktree.
   - **A branch with compute running right now is never deleted**, so a live dev server
     or an in-flight preview request cannot lose its database mid-run.
+  - **The Neon CLI is pinned** in `scripts/lib/neonctl.ts` (every script shells out
+    through it). Unpinned `npx neonctl` tracked a registry that shipped three major
+    versions in one week and the 2026-09-26 prune died mid-drift; bump the pin on
+    purpose, re-verifying the subcommands listed in that file. A failed delete is
+    reported and skipped, never an abort — the kept table and 💰 line always print.
   - Leftover worktree directories no longer pin database branches. `npm run
     worktrees:report` lists finished ones; it only reports — removing a worktree stays
     a manual decision, because a clean merged directory can still be a live session's cwd.

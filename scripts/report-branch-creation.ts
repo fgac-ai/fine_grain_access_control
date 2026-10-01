@@ -2,6 +2,7 @@
 import { config } from 'dotenv'
 import { execSync } from 'child_process'
 import { sanitize } from './lib/neon-branch-classifier'
+import { neonctl } from './lib/neonctl'
 
 config({ path: '.env.local' })
 
@@ -59,7 +60,7 @@ const isDocsPath = (f: string) =>
 
 function runNeonCmd(cmd: string) {
   try {
-    return JSON.parse(execSync(`npx --yes neonctl ${cmd} -o json`, { encoding: 'utf-8' }));
+    return JSON.parse(execSync(neonctl(`${cmd} -o json`), { encoding: 'utf-8' }));
   } catch (error: any) {
     console.error(`❌ Neon CLI error executing: ${cmd}`);
     console.error(error.message);

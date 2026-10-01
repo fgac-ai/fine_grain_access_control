@@ -11,6 +11,7 @@ import {
   type Verdict,
   type MergedRefs,
 } from './lib/neon-branch-classifier'
+import { neonctl, NEONCTL_SPEC } from './lib/neonctl'
 
 // Load environment variables from .env.local
 config({ path: '.env.local' })
@@ -36,18 +37,41 @@ config({ path: '.env.local' })
  * db:branch before its dev server will connect.
  *
  * `--dry-run` prints what would be deleted without deleting.
+ *
+ * The CLI is pinned (scripts/lib/neonctl.ts): unpinned `npx neonctl` tracked a
+ * registry that shipped three major versions in a week, and the 2026-09-26 run
+ * died on its first delete mid-drift. A delete that fails is reported and
+ * skipped, never fatal — the kept table and the cost line are the daily report,
+ * and one branch Neon refuses to drop must not hide them. The run still exits
+ * non-zero so the scheduled task notices.
  */
 
 const DRY_RUN = process.argv.includes('--dry-run');
 
+/** Read-side neonctl call. A failure here is fatal — nothing sensible can be
+ * decided without the branch and endpoint lists. */
 function runNeonCmd(cmd: string) {
   try {
-    const output = execSync(`npx --yes neonctl ${cmd} -o json`, { encoding: 'utf-8' });
+    const output = execSync(neonctl(`${cmd} -o json`), { encoding: 'utf-8' });
     return JSON.parse(output);
   } catch (error: any) {
     console.error(`❌ Neon CLI error executing: ${cmd}`);
     console.error(error.message);
     process.exit(1);
+  }
+}
+
+/** Write-side neonctl call that returns the failure instead of exiting. Success
+ * is the exit code, not the output: a delete's `-o json` body is not parsed, so
+ * a CLI that prints nothing (or prose) after a successful delete cannot be
+ * misreported as a failed one. */
+function tryNeonCmd(cmd: string): { error: string | null } {
+  try {
+    execSync(neonctl(`${cmd} -o json`), { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+    return { error: null };
+  } catch (error: any) {
+    const stderr = error?.stderr?.toString?.() ?? '';
+    return { error: (stderr || error?.message || 'unknown neonctl error').trim() };
   }
 }
 
@@ -139,6 +163,7 @@ function printKeptTable(kept: { branch: NeonBranchLike; verdict: Verdict }[], pr
 async function main() {
   console.log(`🧹 Scanning for stale Neon database branches...${DRY_RUN ? ' (dry run)' : ''}`);
   console.log(`   Policy: delete when idle more than ${IDLE_THRESHOLD_HOURS}h AND either older than ${AGE_THRESHOLD_HOURS}h or its PR is merged.`);
+  console.log(`   CLI: ${NEONCTL_SPEC} (pinned — see scripts/lib/neonctl.ts).`);
 
   let projectId = process.env.NEON_PROJECT_ID;
   if (!projectId) {
@@ -186,6 +211,7 @@ async function main() {
 
   const now = new Date();
   const kept: { branch: NeonBranchLike; verdict: Verdict }[] = [];
+  const failed: { branch: NeonBranchLike; error: string }[] = [];
   let deletedCount = 0;
 
   for (const branch of branches) {
@@ -201,20 +227,40 @@ async function main() {
 
     console.log(`🗑️  ${DRY_RUN ? 'Would delete' : 'Deleting'} stale Neon branch: ${branch.name} (${branch.id}) — ${verdict.reason}`);
     if (!DRY_RUN) {
-      runNeonCmd(`branches delete ${branch.id} --project-id ${projectId}`);
+      const { error } = tryNeonCmd(`branches delete ${branch.id} --project-id ${projectId}`);
+      if (error !== null) {
+        // Report and move on: the next candidate still gets its turn, the kept
+        // table and cost line still print, and this branch is retried tomorrow.
+        console.error(`❌ Could not delete ${branch.name} (${branch.id}) — skipping it, will retry next run.`);
+        console.error(`   ${error.split('\n')[0]}`);
+        failed.push({ branch, error });
+        continue;
+      }
+      console.log(`   Deleted ${branch.name}.`);
     }
     deletedCount++;
   }
 
-  if (deletedCount === 0) {
+  if (deletedCount === 0 && failed.length === 0) {
     console.log(`✨ No stale branches found to clean up (${kept.length} still in the window).`);
   } else {
-    console.log(`✅ ${DRY_RUN ? 'Would clean up' : 'Successfully cleaned up'} ${deletedCount} stale branch(es); ${kept.length} kept.`);
+    console.log(`✅ ${DRY_RUN ? 'Would clean up' : 'Successfully cleaned up'} ${deletedCount} stale branch(es); ${kept.length} kept${failed.length > 0 ? `; ${failed.length} delete(s) FAILED` : ''}.`);
   }
 
   printKeptTable(kept, prs);
-  const billable = Math.max(0, branches.length - deletedCount - 10);
-  console.log(`\n💰 ${branches.length - deletedCount} branch(es) remain (including main) — ${billable} billable ≈ $${(billable * 1.5).toFixed(2)}/month.`);
+  if (failed.length > 0) {
+    console.log(`\n⚠️  ${failed.length} stale branch(es) could NOT be deleted — they still count below and are retried next run:\n`);
+    for (const { branch, error } of failed) {
+      console.log(`   ${branch.name} (${branch.id}): ${error.split('\n')[0]}`);
+    }
+  }
+  const remaining = branches.length - deletedCount;
+  const billable = Math.max(0, remaining - 10);
+  console.log(`\n💰 ${remaining} branch(es) remain (including main) — ${billable} billable ≈ $${(billable * 1.5).toFixed(2)}/month.`);
+  if (failed.length > 0) process.exitCode = 1;
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
