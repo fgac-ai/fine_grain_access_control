@@ -1661,9 +1661,10 @@ rows still carry `kid = 'probe'` — keep both exclusions.
 **7.21f — the per-product split, with the non-Anthropic products on their
 own rows.** Added 2026-09-25, the day after the first Grok install
 (`docs/growth-channels.md`, Attribution). `client_name` and `user_agent`
-map to a product; the expression is the one PR #162's 7.31 uses for the
-inspector fold, plus a row per third-party family. Keep the two in step:
-a product added here is added there. The Grok arm lists both the hosted
+map to a product; the expression is the one 7.32 uses for the inspector
+fold (PR #162, numbered 7.31 while that PR was open), plus a row per
+third-party family. 7.32's own expressions carry the same arms since
+2026-10-01. Keep the two in step: a product added here is added there. The Grok arm lists both the hosted
 client and its add-time validator; the Cursor arm covers the desktop app
 and its server-side availability check.
 
@@ -2917,9 +2918,15 @@ the CLI's own calls are separable by user agent, remote Claude Code on the
 `Claude-User` agent is not.
 
 ```sql
--- 7.32 product expression, valid on both sides of the deploy.
-multiIf(properties.user_agent LIKE 'claude-code/%', 'claude-code',
-        properties.client_name = 'Anthropic/Toolbox', 'Anthropic/ClaudeAI',
+-- 7.32 product expression, valid on both sides of the deploy. The Grok and
+-- Cursor arms are 7.21f's (same strings; keep the two in step).
+multiIf(properties.user_agent LIKE 'grok-connectors-manager/%'
+          OR properties.user_agent = 'Grok'
+          OR properties.client_name IN ('connectors-manager', 'grok-validator'), 'Grok',
+        properties.user_agent LIKE 'Cursor/%' OR properties.user_agent LIKE 'CursorServer/%'
+          OR properties.client_name IN ('Cursor', 'Cursor MCP Availability'),   'Cursor',
+        properties.user_agent LIKE 'claude-code/%',                             'claude-code',
+        properties.client_name = 'Anthropic/Toolbox',                           'Anthropic/ClaudeAI',
         properties.client_name) AS product
 ```
 
@@ -2958,8 +2965,13 @@ GROUP BY day, transition, from_name, to_name ORDER BY day, n DESC
 -- 7.32c — the per-product split the directory-parity review wants, using the
 -- fold so the pre-deploy weeks are comparable.
 SELECT toStartOfWeek(timestamp, 1) AS week,
-       multiIf(properties.user_agent LIKE 'claude-code/%', 'claude-code',
-               properties.client_name = 'Anthropic/Toolbox', 'Anthropic/ClaudeAI',
+       multiIf(properties.user_agent LIKE 'grok-connectors-manager/%'
+                 OR properties.user_agent = 'Grok'
+                 OR properties.client_name IN ('connectors-manager', 'grok-validator'), 'Grok',
+               properties.user_agent LIKE 'Cursor/%' OR properties.user_agent LIKE 'CursorServer/%'
+                 OR properties.client_name IN ('Cursor', 'Cursor MCP Availability'),   'Cursor',
+               properties.user_agent LIKE 'claude-code/%',                             'claude-code',
+               properties.client_name = 'Anthropic/Toolbox',                           'Anthropic/ClaudeAI',
                properties.client_name) AS product,
        count() AS calls, uniq(person_id) AS callers
 FROM events
