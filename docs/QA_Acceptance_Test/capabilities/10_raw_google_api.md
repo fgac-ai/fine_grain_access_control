@@ -4,8 +4,8 @@
 > `raw_google_api_call` for Anthropic Connectors Directory compliance
 > (no single tool may mix safe and unsafe HTTP methods). Classification lives
 > in `src/app/api/mcp/googleApiPolicy.ts`; enforcement must be identical to
-> the dedicated tools. Hosted-MCP interface only (the REST proxy at
-> `/api/proxy` is a separate surface).
+> the dedicated tools. Hosted-MCP interface, except A16, which pins that the
+> REST proxy at `/api/proxy` runs the SAME classifier (since 2026-10-03).
 >
 > Posture (2026-08-30): Gmail writes are ALLOW-BY-DEFAULT — anything the
 > gmail.modify grant can do is forwarded and stamped for analytics. The gates
@@ -294,3 +294,31 @@
   not write through Sheets) must not reappear in the opposite direction.
 - **Cleanup**: trash all five (reversible; leave them trashed).
 
+### A16: The REST proxy runs the shared classifier — nothing it misses reaches Google
+- Setup: a proxy key K for USER_A (dashboard → API keys) whose profile has a
+  send whitelist rule matching USER_B only; a sheet S exposed Read Only to K;
+  a Drive file id U with NO FGAC rule. All calls are `curl` against
+  `<base>/api/proxy/<path>` with `Authorization: Bearer <K>` — no MCP.
+- Calls:
+  1. `PATCH upload/drive/v3/files/<U>?uploadType=media` (text body), and the
+     same against `<S>` (Read Only).
+  2. `POST upload/gmail/v1/users/me/messages/send?uploadType=media`,
+     `Content-Type: message/rfc822`, body `To: <an address not on the
+     whitelist>` + subject + body.
+  3. `POST gmail/v1/users/me/messages/send` JSON `{"raw": …}` with
+     `To: <USER_B>` and `Bcc: <an address not on the whitelist>`.
+  4. `POST batch/gmail/v1` (any multipart body); `GET calendar/v3/users/me/calendarList`;
+     `GET oauth2/v2/userinfo`.
+  5. `DELETE gmail/v1/users/me/messages/<any id>`.
+  6. Controls: `GET gmail/v1/users/me/messages?maxResults=3`;
+     `GET drive/v3/files?pageSize=3`; `GET v4/spreadsheets/<S>/values/A1:B2`;
+     JSON `{"raw"}` send with `To: <USER_B>` only.
+- **Expected**: 1–5 all answer **403** with a JSON `error` (and `code` for the
+  classifier refusals: `raw_api_batch_unsupported`, `raw_api_family_unsupported`,
+  `raw_api_method_unsupported`; send refusals name the recipient), and NOTHING
+  is sent — USER_B and the outside address receive no mail, `<U>`/`<S>`
+  content is unchanged. `proxy_request` rows for 1–5 carry `outcome: denied`
+  and a `denial_code`. 6 all SUCCEED (the USER_B mail arrives).
+  Before 2026-10-03 every call in 1–5 was forwarded with the owner's token.
+- **Also expected**: `npx tsx scripts/test-rest-proxy-policy.ts` passes (part
+  of `npm run mcp:lint`).
