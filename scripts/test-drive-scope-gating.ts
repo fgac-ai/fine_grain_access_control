@@ -56,8 +56,10 @@ const files = walk(ROOT);
 const rel = (p: string) => p.slice(join(__dirname, '..').length + 1);
 const namesFullScope = (src: string) => src.includes(`'${FULL_SCOPE}'`) || src.includes(`"${FULL_SCOPE}"`) || src.includes(SYMBOL);
 /** A line that mentions the scope only to READ it (compare / includes / define / import / comment). */
-const READ_LINE = [/\.includes\(/, /===/, /^\s*(export )?const DRIVE_FULL_SCOPE/, /^\s*import /, /^\s*\*/, /^\s*\/\//, /^\s*[^,]*, type /];
-const scopeLines = (src: string) => src.split('\n').filter(l => l.includes(FULL_SCOPE) || l.includes(SYMBOL));
+const READ_LINE = [/\.includes\(/, /===/, /^\s*(export )?const DRIVE_/, /^\s*import /, /^\s*\*/, /^\s*\/\//, /^\s*[^,]*, type /];
+// Exact matches only: the full scope is a prefix of `…/auth/drive.file`.
+const mentionsFullScope = (l: string) => l.includes(`'${FULL_SCOPE}'`) || l.includes(`"${FULL_SCOPE}"`) || l.includes(SYMBOL);
+const scopeLines = (src: string) => src.split('\n').filter(mentionsFullScope);
 
 console.log('full Drive scope: who may name it, who may request it');
 for (const file of files) {
