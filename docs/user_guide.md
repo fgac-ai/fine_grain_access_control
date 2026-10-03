@@ -168,6 +168,26 @@ Click **"+ Quick Add 2FA Block"** to instantly create a rule that blocks your ag
 
 ---
 
+### Google Drive access by folder (beta)
+
+Accounts in the Drive beta scope Google Drive by folder instead of exposing
+files one at a time. On an agent profile, **Enable full Drive access** asks
+Google once for the Drive permission; the profile page then shows your Drive as
+a tree (My Drive, Shared with me, Shared drives) with three quick options:
+
+- **Read everything** (default) — the agent can read any file you can.
+- **Read & write everything** — it can also edit; protect sensitive folders below.
+- **Only files I allow** — nothing is visible until you allow it.
+
+Any folder or file can be set to **Read**, **Write** or **Block**, or left on
+**Inherit**, which takes the setting of the nearest folder above it. Opening a
+folder shows that chain as a breadcrumb; searching finds folders and files
+anywhere in your Drive with their path. Blocked files are invisible to the
+agent, reads included. Settings you made earlier through the Picker or an
+approval link keep working as per-file settings.
+
+---
+
 ## Delegation: Access to Other People's Email
 
 Delegation lets one user grant another user's AI agents access to their Gmail. This is useful when:
@@ -312,6 +332,28 @@ Click **"Revoke"** to permanently disable a key. Revoked keys return `401 Unauth
 | `403 FGAC read rule '<name>' blocked this message` | A read rule matched (the error names the rule) | Adjust that rule on the dashboard |
 | `403 Unauthorized email address` | No send whitelist matches the recipient | Add a send whitelist rule |
 | `403 Could not fetch Google access token` | The email owner needs to reconnect Google | Sign out and sign back in with Google |
+
+---
+
+## Privacy and your data
+
+The full statement is the [Privacy Policy](https://fgac.ai/privacy); the short
+version, verified against the code on 2026-10-03:
+
+- **Google permissions.** Sign-in asks for your basic profile, `gmail.modify`
+  and `drive.file` (files you pick in the Picker or that an agent creates). The
+  full `drive` permission is requested only when a Drive-beta account clicks
+  **Enable full Drive access** on a profile.
+- **Nothing from your mail or files is stored.** Content passes through FGAC in
+  memory while a call is in flight. The database holds your account email, the
+  profiles, keys, rules, delegations and connections you create, and ledgers of
+  request metadata (never bodies, subjects or attachments). Drive file metadata
+  for the folder model is cached in server memory for 10 minutes.
+- **Tokens live in Clerk**, never in FGAC's database, and never reach an agent.
+- **Analytics** (PostHog) record usage events, errors and session replays of
+  fgac.ai pages (inputs masked, replays kept 30 days).
+- **Deleting your account** revokes every key and delegation immediately; the
+  inert account record stays unless you ask support@fgac.ai to erase it.
 
 ---
 

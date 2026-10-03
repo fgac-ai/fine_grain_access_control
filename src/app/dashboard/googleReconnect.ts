@@ -14,6 +14,8 @@
 
 export const DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 export const GMAIL_MODIFY_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
+/** The full Drive scope — requested only by the feature-flagged Drive tree card. */
+export const DRIVE_FULL_SCOPE = 'https://www.googleapis.com/auth/drive';
 
 /**
  * Google's `prompt` for the reauthorize leg. `consent` always shows the

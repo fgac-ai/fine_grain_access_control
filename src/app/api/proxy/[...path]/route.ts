@@ -10,6 +10,13 @@ import { checkReadRestrictions } from '@/lib/gmailRules';
 import { captureServerEvent } from '@/lib/posthogServer';
 import { GOOGLE_FETCH_TIMEOUT_MS, CLERK_TOKEN_TIMEOUT_MS, withTimeout, isUpstreamTimeout } from '@/lib/upstreamTimeouts';
 import { classifyClerkTokenError } from '@/lib/googleTokenFailure';
+import { driveTreeFlagOn } from '@/lib/featureFlags';
+import { liveTokenScopes, DRIVE_FULL_SCOPE } from '@/lib/googleTokenScopes';
+import {
+  resolveDriveTreeAccess, effectiveDriveAccess, settingsFromRules, normalizeDriveDefault, driveDenialText, widenListFields,
+  type DriveDefault, type DriveSetting,
+} from '@/lib/driveTreeAccess';
+import { resolveDriveLineage, resolveLineageFrom, parseDriveFileMeta, driveMetaUrl, LineageError, MAX_LINEAGE_HOPS, type MetaFetcher } from '@/lib/driveLineage';
 
 export const dynamic = 'force-dynamic';
 
@@ -246,6 +253,110 @@ function applicableFileRules(
   });
 }
 
+
+// ─── DRIVE TREE ENGINE (feature-flagged folder-inherited access) ─────────────
+// Mirror of the MCP route's engine (src/lib/driveTreeAccess.ts): with the
+// key owner's flag on and the live token carrying the full `drive` scope,
+// the Drive-file guard, the per-kind handlers and Drive listings below defer
+// to the folder-lineage resolver instead of the per-file rule table alone.
+
+type ProxyDriveTree = {
+  token: ProxyGoogleToken;
+  settings: Map<string, DriveSetting[]>;
+  driveDefault: DriveDefault;
+  fetchMeta: MetaFetcher;
+  clerkUserId: string;
+};
+
+function isDriveListPath(fullPath: string): boolean {
+  return /^drive\/v3\/files$/.test(fullPath.split('?')[0]);
+}
+
+async function proxyDriveTreeEngine(
+  dbUser: { id: string; email: string; clerkUserId: string },
+  proxyKeyId: string,
+  fullPath: string,
+  telemetry: ProxyTelemetry,
+): Promise<ProxyDriveTree | null> {
+  const drivePath = /^drive\/v[23]\/files/.test(fullPath) || !!driveFileKindForPath(fullPath);
+  if (!drivePath) return null;
+  if (!(await driveTreeFlagOn({ clerkUserId: dbUser.clerkUserId, email: dbUser.email }))) return null;
+  const token = await fetchClerkGoogleToken(dbUser.clerkUserId, dbUser.clerkUserId, telemetry);
+  if (!token) return null;
+  const scopes = await liveTokenScopes(token.token);
+  if (!scopes || !scopes.includes(DRIVE_FULL_SCOPE)) return null;
+
+  const [allRules, allAssignments, key] = await Promise.all([
+    db.select().from(accessRules).where(eq(accessRules.userId, dbUser.id)),
+    db.select().from(keyRuleAssignments),
+    db.select({ driveDefault: proxyKeys.driveDefault }).from(proxyKeys).where(eq(proxyKeys.id, proxyKeyId)).then(r => r[0]),
+  ]);
+  const rulesWithAssignments = new Set(allAssignments.map(a => a.accessRuleId));
+  const assignedToKey = new Set(allAssignments.filter(a => a.proxyKeyId === proxyKeyId).map(a => a.accessRuleId));
+  const applicable = allRules.filter(r => !rulesWithAssignments.has(r.id) || assignedToKey.has(r.id));
+
+  const fetchMeta: MetaFetcher = async (id) => {
+    try {
+      const res = await fetch(driveMetaUrl(id), {
+        headers: { Authorization: `Bearer ${token.token}` },
+        signal: AbortSignal.timeout(GOOGLE_FETCH_TIMEOUT_MS),
+      });
+      if (!res.ok) return { ok: false, status: res.status, error: `Google ${res.status}` };
+      const meta = parseDriveFileMeta(await res.json());
+      return meta ? { ok: true, meta } : { ok: false, error: 'Drive returned file metadata without an id.' };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  };
+  return { token, settings: settingsFromRules(applicable), driveDefault: normalizeDriveDefault(key?.driveDefault), fetchMeta, clerkUserId: dbUser.clerkUserId };
+}
+
+/** 403 with the engine's denial text (same wording as the MCP path, minus the outcome emoji), or null when allowed. */
+async function proxyDriveTreeDenial(engine: ProxyDriveTree, fileId: string, isMutating: boolean, telemetry: ProxyTelemetry): Promise<NextResponse | null> {
+  let decision;
+  let label = fileId;
+  try {
+    const lineage = await resolveDriveLineage(engine.clerkUserId, fileId, engine.fetchMeta);
+    label = lineage.file.name || fileId;
+    decision = resolveDriveTreeAccess(lineage.nodes, engine.settings, engine.driveDefault, isMutating);
+  } catch (err) {
+    if (!(err instanceof LineageError)) throw err;
+    telemetry.errorStatus = err.code;
+    if (err.code === 'file_not_found') {
+      return NextResponse.json({ error: `Google Drive reports no file '${fileId}' visible to this Google account — the id is wrong, the file was deleted, or it was never shared with this account.` }, { status: 404 });
+    }
+    if (err.code === 'lineage_too_deep') {
+      return NextResponse.json({ error: `'${fileId}' sits more than ${MAX_LINEAGE_HOPS} folders deep, deeper than FGAC resolves.` }, { status: 403 });
+    }
+    return NextResponse.json({ error: `Could not resolve where '${fileId}' lives in Google Drive (${err.message}); FGAC fails closed. Retry once.` }, { status: 502 });
+  }
+  if (decision.allowed) return null;
+  telemetry.errorStatus = decision.denial === 'blocked' ? 'drive_blocked' : decision.denial === 'read_only' ? 'drive_read_only' : 'drive_not_exposed';
+  const text = driveDenialText(decision, label, engine.driveDefault, `${DASHBOARD_URL}/dashboard`).replace(/^🚫 /u, '');
+  return NextResponse.json({ error: text }, { status: 403 });
+}
+
+/** Filter a files.list body: Blocked files are withheld and counted (fail closed per file). */
+async function proxyFilterDriveListing(engine: ProxyDriveTree, body: string): Promise<string> {
+  let data: { files?: unknown[] } | null = null;
+  try { data = JSON.parse(body); } catch { return body; }
+  if (!data || !Array.isArray(data.files)) return body;
+  const kept: unknown[] = [];
+  let withheld = 0;
+  for (const f of data.files) {
+    const meta = parseDriveFileMeta(f);
+    let access: 'read' | 'write' | 'block' = 'block';
+    if (meta) {
+      try {
+        const lineage = await resolveLineageFrom(engine.clerkUserId, meta, engine.fetchMeta);
+        access = effectiveDriveAccess(lineage.nodes, engine.settings, engine.driveDefault).access;
+      } catch { access = 'block'; }
+    }
+    if (access === 'block') withheld++; else kept.push(f);
+  }
+  return JSON.stringify({ ...data, files: kept, withheld });
+}
+
 async function handleProxyRequest(request: NextRequest, params: { path: string[] }, telemetry: ProxyTelemetry) {
   try {
     const authHeader = request.headers.get('authorization');
@@ -298,6 +409,10 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     telemetry.proxyKeyId = dbKey.id;
     telemetry.clerkUserId = dbUser.clerkUserId;
 
+    // Drive tree engine (null unless the flag is on for this owner, the path
+    // is a Drive/Sheets/Docs/Slides path, and the live token carries `drive`).
+    const driveTree = await proxyDriveTreeEngine(dbUser, dbKey.id, fullPath, telemetry);
+
     // ─── GOOGLE DRIVE PER-FILE ACCESS GUARD ──────────────────────────────────
     // Policy: never override Google's native API behavior for discovery —
     // listing (`drive/v3/files`) passes through untouched (under drive.file it
@@ -307,7 +422,13 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     // would be a bypass around them.
     {
       const driveFileMatch = fullPath.match(/^drive\/v[23]\/files\/([^/?]+)/);
-      if (driveFileMatch && driveFileMatch[1] !== 'generateIds') {
+      if (driveFileMatch && driveFileMatch[1] !== 'generateIds' && driveTree) {
+        const fileId = decodeURIComponent(driveFileMatch[1]);
+        const isMutating = request.method !== 'GET' && request.method !== 'HEAD';
+        const denied = await proxyDriveTreeDenial(driveTree, fileId, isMutating, telemetry);
+        if (denied) return denied;
+        // Permitted — falls through to the generic Google passthrough below.
+      } else if (driveFileMatch && driveFileMatch[1] !== 'generateIds') {
         const fileId = decodeURIComponent(driveFileMatch[1]);
 
         const allUserRules = await db
@@ -370,6 +491,11 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
         return NextResponse.json({ error: `Invalid ${d.productName} API path` }, { status: 400 });
       }
 
+      const isMutatingRequest = request.method !== 'GET' && request.method !== 'HEAD';
+      if (driveTree) {
+        const denied = await proxyDriveTreeDenial(driveTree, fileId, isMutatingRequest, telemetry);
+        if (denied) return denied;
+      } else {
       const allUserRules = await db
         .select()
         .from(accessRules)
@@ -402,7 +528,6 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
       }
 
       // Check write restrictions
-      const isMutatingRequest = request.method !== 'GET' && request.method !== 'HEAD';
       if (isMutatingRequest) {
         if (!applicableRules.some(r => r.actionType === d.actionTypes.readWrite)) {
           return NextResponse.json({
@@ -410,9 +535,10 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
           }, { status: 403 });
         }
       }
+      }
 
-      // Fetch Real Google Token from Clerk
-      const realGoogleToken = await fetchClerkGoogleToken(dbUser.clerkUserId, dbUser.clerkUserId, telemetry);
+      // Fetch Real Google Token from Clerk (the engine already holds it)
+      const realGoogleToken = driveTree?.token ?? await fetchClerkGoogleToken(dbUser.clerkUserId, dbUser.clerkUserId, telemetry);
 
       if (!realGoogleToken) {
         return NextResponse.json({
@@ -682,6 +808,16 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
       finalQueryString = urlParams.toString() ? `?${urlParams.toString()}` : '';
     }
 
+    // Drive tree engine: a Drive listing is forwarded with a fields mask wide
+    // enough to resolve each file's lineage, then filtered below.
+    const filterListing = !!driveTree && request.method === 'GET' && isDriveListPath(fullPath);
+    if (filterListing) {
+      const urlParams = new URLSearchParams(request.nextUrl.searchParams);
+      const widened = widenListFields(urlParams.get('fields'));
+      if (widened !== undefined) urlParams.set('fields', widened);
+      finalQueryString = urlParams.toString() ? `?${urlParams.toString()}` : '';
+    }
+
     const googleUrl = `https://www.googleapis.com/${fullPath}${finalQueryString}`;
     const headers = new Headers(request.headers);
     headers.set('Authorization', `Bearer ${realGoogleToken.token}`);
@@ -718,6 +854,14 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
         // classification emoji prefix.
         return NextResponse.json({ error: restriction.replace(/^🚫 /u, '') }, { status: 403 });
       }
+    }
+
+    if (filterListing && driveTree && forward.status === 200 && isJson) {
+      const filtered = await proxyFilterDriveListing(driveTree, returnBody);
+      const responseHeaders = new Headers(forward.headers);
+      responseHeaders.delete('content-encoding');
+      responseHeaders.delete('content-length');
+      return new NextResponse(filtered, { status: 200, headers: responseHeaders });
     }
 
     return passthroughResponse(forward);

@@ -7,6 +7,9 @@ import { Card, CardHeader, Badge, EmptyState, buttonPrimary, buttonSecondary, bu
 import { assignRulesToKey, unassignRuleFromKey, revokeProxyKey, setSheetRulePermission, exposeFilesFromPicker, applyRecommendedSecurityRules, enableSendToAnyone } from './actions';
 import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, kindForService, type DriveFileKind } from '@/lib/driveFileKinds';
 import { useGooglePicker, PickedSheet } from './useGooglePicker';
+import { DriveAccessCard } from './DriveAccessCard';
+import { EnableDriveAccessCard } from './EnableDriveAccessCard';
+import { DRIVE_SERVICE } from '@/lib/driveTreeAccess';
 
 /** access_rules.service values that are per-file grants (not Gmail rules). */
 const FILE_SERVICES: string[] = ACTIVE_DRIVE_FILE_KINDS.map(k => DRIVE_FILE_KINDS[k].service);
@@ -27,6 +30,10 @@ export interface Profile {
   createdAt: string;
   revokedAt: string | null;
   emailAccess: string[];
+  /** Drive tree model: the profile's default for every Drive file. */
+  driveDefault: 'read' | 'write' | 'explicit';
+  /** A quick option was saved — the profile uses the tree model (losing the scope then means "re-enable"). */
+  driveConfigured: boolean;
 }
 
 export interface Rule {
@@ -36,6 +43,8 @@ export interface Rule {
   actionType: string;
   regexPattern: string | null;
   targetResourceId: string | null;
+  /** Drive tree rules: what targetResourceId names (folder, shared_drive, …); null = file. */
+  targetKind?: string | null;
   resourceName: string | null;
   targetEmail: string | null;
   assignedKeyIds: string[];
@@ -90,6 +99,7 @@ export function AgentProfilesView({
   mcpEndpoint,
   hasCompleteGoogleAccess,
   activeId,
+  driveTree,
 }: {
   profiles: Profile[];
   rules: Rule[];
@@ -99,6 +109,8 @@ export function AgentProfilesView({
   /** Selected profile — owned by the route (/dashboard/agents/[slug]), not
    *  component state, so tabs are real links and profiles are bookmarkable. */
   activeId: string | null;
+  /** Drive tree model (feature-flagged). Absent/off → the legacy per-kind cards. */
+  driveTree?: { flagOn: boolean; hasFullScope: boolean };
 }) {
   const activeProfiles = useMemo(() => profiles.filter(p => !p.revokedAt), [profiles]);
   const [connections, setConnections] = useState<Connection[]>([]);
@@ -204,15 +216,35 @@ export function AgentProfilesView({
 
           <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-6 items-start">
             <div className="space-y-6 min-w-0">
-              {ACTIVE_DRIVE_FILE_KINDS.map(kind => (
-                <FilesRulesCard
-                  key={kind}
-                  kind={kind}
+              {driveTree?.flagOn && driveTree.hasFullScope ? (
+                // Drive tree model: one card for the whole Drive replaces the
+                // per-kind cards; legacy file rules show inside it as
+                // file-level settings.
+                <DriveAccessCard
                   profileId={active.id}
-                  rules={fileRulesByKind[kind]}
-                  grantStates={grantStates[kind] ?? {}}
+                  driveDefault={active.driveDefault}
+                  rules={rules.filter(r => (isGlobal(r) || r.assignedKeyIds.includes(active.id)) && (r.service === DRIVE_SERVICE || kindForService(r.service) !== null))}
                 />
-              ))}
+              ) : (
+                <>
+                  {driveTree?.flagOn && (
+                    <EnableDriveAccessCard
+                      profileId={active.id}
+                      driveDefault={active.driveDefault}
+                      reenable={active.driveConfigured || rules.some(r => r.service === DRIVE_SERVICE && (isGlobal(r) || r.assignedKeyIds.includes(active.id)))}
+                    />
+                  )}
+                  {ACTIVE_DRIVE_FILE_KINDS.map(kind => (
+                    <FilesRulesCard
+                      key={kind}
+                      kind={kind}
+                      profileId={active.id}
+                      rules={fileRulesByKind[kind]}
+                      grantStates={grantStates[kind] ?? {}}
+                    />
+                  ))}
+                </>
+              )}
 
               <GmailRulesCard
                 profileId={active.id}

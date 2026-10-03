@@ -10,10 +10,13 @@ export function Card({
   children,
   className = '',
   tone = 'default',
+  testId,
 }: {
   children: ReactNode;
   className?: string;
   tone?: 'default' | 'gmail' | 'sheets' | 'docs' | 'slides' | 'primary';
+  /** data-testid for QA runners (the card is the natural anchor for a feature). */
+  testId?: string;
 }) {
   const tones = {
     default: 'bg-card border-border',
@@ -25,7 +28,7 @@ export function Card({
   };
 
   return (
-    <div className={`rounded-md border ${tones[tone]} ${className}`}>
+    <div className={`rounded-md border ${tones[tone]} ${className}`} data-testid={testId}>
       {children}
     </div>
   );
