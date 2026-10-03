@@ -29,6 +29,13 @@ The second gate is unchanged: the engine applies only when the live token
 carries the full `drive` scope, and that scope is requested only from flagged
 users.
 
+## The flag
+
+PostHog project 343912, feature flag `drive_tree` (id 929626):
+https://us.posthog.com/project/343912/feature_flags/929626 — active, server
+evaluation only, one release condition on person property `email` (100 % of
+matches), seeded with the USER_A QA account so the preview test can start.
+
 ## Operating it
 
 - Add or remove a person: edit the `drive_tree` flag's release conditions in
