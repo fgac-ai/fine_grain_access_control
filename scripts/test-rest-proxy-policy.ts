@@ -124,6 +124,8 @@ async function main() {
   console.log('rest-proxy-policy — bypasses:');
   let r = await call('PATCH', `upload/drive/v3/files/${FILE_ID}?uploadType=media`, { body: 'overwritten', contentType: 'text/plain' });
   check('1. PATCH upload/drive/v3/files/{id} with no rule is refused before Google', refused(r), r);
+  r = await call('GET', `drive/v2/files/${FILE_ID}?alt=media`);
+  check('1c. Drive v2 file read with no rule is refused (no discovery-passthrough loophole)', refused(r), r);
   r = await call('PATCH', `upload/drive/v3/files/${FILE_ID}?uploadType=media`, { body: 'x', contentType: 'text/plain', rules: [sheetRead] });
   check('1b. PATCH upload/drive/v3/files/{id} under a Read Only rule is refused', refused(r), r);
 

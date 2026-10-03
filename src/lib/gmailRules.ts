@@ -10,6 +10,7 @@ import { db } from '@/db';
 import { accessRules, keyRuleAssignments } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import { collectLabelIds } from '@/app/api/mcp/googleApiPolicy';
+import { SEND_DISABLED_MESSAGE, recipientNotWhitelistedMessage } from '@/lib/denialCopy';
 
 export async function loadApplicableRules(userId: string, proxyKeyId: string, targetEmail: string) {
   const allUserRules = await db.select().from(accessRules)
@@ -32,6 +33,51 @@ export async function loadApplicableRules(userId: string, proxyKeyId: string, ta
 }
 
 export type ApplicableRules = Awaited<ReturnType<typeof loadApplicableRules>>;
+
+/**
+ * Send-whitelist enforcement shared by gmail_send, google_api_modify, and the
+ * REST proxy (src/app/api/proxy/[...path]/route.ts).
+ * Every recipient must match a whitelist pattern; unknown recipients deny.
+ * Returns a denial ({ message, deniedRecipient? }) or null if sending is
+ * allowed. deniedRecipient feeds the magic approval link — absent when we
+ * could not even parse who the mail was for (no link in that case).
+ */
+export type SendDenial = { message: string; deniedRecipient?: string; code: string };
+
+export function checkSendWhitelist(rules: ApplicableRules, recipients: string[] | null): SendDenial | null {
+  const sendRules = rules.filter(r => r.service === 'gmail' && r.actionType === 'send_whitelist');
+
+  if (!recipients || recipients.length === 0) {
+    return { message: '🚫 Could not determine the message recipients, so sending was denied. Provide a standard RFC 2822 message with To/Cc/Bcc headers.', code: 'recipients_undetermined' };
+  }
+
+  if (sendRules.length === 0) {
+    return {
+      message: SEND_DISABLED_MESSAGE,
+      deniedRecipient: recipients[0],
+      code: 'send_disabled',
+    };
+  }
+
+  for (const recipient of recipients) {
+    let isWhitelisted = false;
+    for (const rule of sendRules) {
+      if (!rule.regexPattern) continue;
+      const regex = compileRulePattern(rule.regexPattern);
+      if (!regex) continue;
+      if (regex.test(recipient)) { isWhitelisted = true; break; }
+    }
+    if (!isWhitelisted) {
+      return {
+        message: recipientNotWhitelistedMessage(recipient),
+        deniedRecipient: recipient,
+        code: 'recipient_not_whitelisted',
+      };
+    }
+  }
+
+  return null;
+}
 
 // ─── Message content extraction (shared with parseGmailMessage) ──────────────
 
