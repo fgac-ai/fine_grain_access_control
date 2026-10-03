@@ -85,13 +85,40 @@ at https://fgac.ai/privacy does not have sufficient content."*
 - `docs/tech_stack.md` — data-flow step 1 now lists `drive.file` beside
   `gmail.modify`.
 
-## 5. Validation
+## 5. Validation (done 2026-10-03)
 
-- Local: `preview_start fgac-dev`, `/privacy` and `/terms` at desktop and 375 px
-  widths; dark emulation (the site is light-only: `.dark` is never applied,
-  `color-scheme: light`); console clean; all anchors resolve.
-- Preview: `/deploy-pr-preview` once (static content).
-- Google: Ken resubmits the verification with the live https://fgac.ai/privacy.
+**Local — Path B (Playwright CLI via `npx -y @playwright/cli@latest`; the
+built-in pane refused every localhost origin, both `localhost` and
+`127.0.0.1`).** Dev server `fgac-dev` on the branch Neon database
+(`env:check`: branch host, `sk_test_` Clerk, consistent).
+
+| Check | /privacy | /terms |
+| --- | --- | --- |
+| HTTP | 200 | 200 |
+| Console errors (1280×900) | 0 (only Clerk's dev-keys warning) | 0 |
+| Headings / TOC anchors | 14 `h2`, 14 links, 0 missing | — |
+| Limited Use sentence + `#additional_requirements_for_specific_api_scopes` link | present | — |
+| Effective date fixed string | "October 3, 2026" | "October 3, 2026" |
+| 375×812: horizontal overflow | none (`scrollWidth` = 375); table rows `display: block` | none |
+| Dark `prefers-color-scheme` emulation | unchanged (site is light-only; `.dark` never applied) | — |
+| Screenshots | desktop, mobile, full-page, scope + retention tables | desktop, mobile |
+
+**Preview — built-in browser on the deployment for commit d824347** (SHA
+confirmed with `vercel ls --meta githubCommitSha=…`, not just the watcher):
+https://fine-grain-access-control-k4ok1248m-kenyesh-gmailcoms-projects.vercel.app
+
+| Check | /privacy | /terms |
+| --- | --- | --- |
+| Title | "Privacy Policy \| FGAC.ai" | "Terms of Service \| FGAC.ai" |
+| Effective date | October 3, 2026 | October 3, 2026 |
+| `h2` / TOC anchors | 14 / 14, 0 missing | — |
+| Limited Use link + verbatim sentence | present | — |
+| Console errors, desktop and mobile | none | none |
+| Overflow at 375 px | none; rows stack | none |
+| Touch-ups visible | — | "5. Acceptable Use", Drive/Sheets/Docs/Slides named |
+
+PR: https://github.com/fgac-ai/fine_grain_access_control/pull/178. Google: Ken
+resubmits the verification once this is live at https://fgac.ai/privacy.
 
 ## 6. Out of scope
 
