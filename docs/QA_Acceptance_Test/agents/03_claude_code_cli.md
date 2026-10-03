@@ -217,7 +217,7 @@ No tmux sessions to clean up. Results are saved to `test/qa-envs/cc-cli/evals/re
   eval harness, concatenate + decode once, compare length/hash.
 - A8: fold into the Analytics Events queries below (same run window).
 
-## Capability: Temporary API Keys (→ capabilities/22_temporary_api_keys.md)
+## Capability: Temporary API Keys (→ capabilities/23_temporary_api_keys.md)
 
 - Fixtures per the capability doc: a ~2 MB attachment in USER_A's mailbox, and for A8 a
   scratch profile + scratch connection (manual DCR token). Never revoke the baseline profile.
@@ -230,7 +230,7 @@ No tmux sessions to clean up. Results are saved to `test/qa-envs/cc-cli/evals/re
   never `skip`.
 - A13: fold into the Analytics Events queries below (same run window), plus monitoring §7.34 (1)–(2).
 
-## Capability: Large File Transfer (→ capabilities/23_large_file_transfer.md)
+## Capability: Large File Transfer (→ capabilities/24_large_file_transfer.md)
 
 - Fixtures: generate `qa-out/big.bin` (8 MB random), a ~1 MB PNG, and a ~6 MB attachment.
   `qa-out/` is gitignored scratch; delete it after the run. Hash every file sent and received.

@@ -1,4 +1,4 @@
-# Capability 22: Temporary API Keys
+# Capability 23: Temporary API Keys
 
 An MCP connection can mint a short-lived `sk_proxy_` key (`create_temporary_api_key`) so a
 script the agent runs can call the REST proxy (`/api/proxy/...`) directly — for payloads too
@@ -6,7 +6,7 @@ large for tool calls. The key resolves to the **calling connection's profile at 
 same rules, same refusals, nothing copied. Default lifetime 15 min, agent may ask up to 60.
 
 Plan: `docs/implementation_plans/large-api-payload-options_v3.md` (steps 2–3). Requests up to
-Vercel's 4.5 MB body cap only; larger transfers are capability 23.
+Vercel's 4.5 MB body cap only; larger transfers are capability 24.
 
 Fixtures:
 - the QA baseline profile and connection from setup (exposed sheet, send whitelist containing

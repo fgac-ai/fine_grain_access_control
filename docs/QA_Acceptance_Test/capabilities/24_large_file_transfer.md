@@ -1,6 +1,6 @@
-# Capability 23: Large File Transfer (streamed downloads, chunked uploads)
+# Capability 24: Large File Transfer (streamed downloads, chunked uploads)
 
-Builds on capability 22. Vercel rejects request bodies over 4.5 MB before FGAC code runs
+Builds on capability 23. Vercel rejects request bodies over 4.5 MB before FGAC code runs
 (responses are exempt when streamed), so:
 - **downloads** of any size stream through the proxy in one request;
 - **uploads** use Google's resumable protocol in ≤ 4 MB chunks, every chunk a normal proxy
@@ -14,7 +14,7 @@ Fixtures:
 - a ~1 MB PNG (binary-integrity regression for the old `.text()` buffering);
 - a ~6 MB attachment for Gmail (random bytes, `application/octet-stream`);
 - the exposed read-only and read-write QA files from setup, and one unexposed Drive file id;
-- `$TMP` minted per capability 22 with `ttl_minutes: 60` (A4 mints its own).
+- `$TMP` minted per capability 23 with `ttl_minutes: 60` (A4 mints its own).
 
 Record SHA-256 and length for every file sent and received.
 

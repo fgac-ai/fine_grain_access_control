@@ -378,7 +378,7 @@ curl -s $BASE_URL/api/mcp -X POST \
   A4/A5: concatenated windows must equal the windowless read.
 - A8: fold into the Analytics Events queries below (same run window).
 
-## Capability: Temporary API Keys (→ capabilities/22_temporary_api_keys.md)
+## Capability: Temporary API Keys (→ capabilities/23_temporary_api_keys.md)
 
 - Fixtures per the capability doc: a ~2 MB attachment in USER_A's mailbox, and for A8 a
   scratch profile + scratch connection (manual DCR token). Never revoke the baseline profile.
@@ -393,7 +393,7 @@ curl -s $BASE_URL/api/mcp -X POST \
 - A12: `skip` — no agent in this environment (pure curl).
 - A13: fold into the Analytics Events queries below (same run window), plus monitoring §7.34 (1)–(2).
 
-## Capability: Large File Transfer (→ capabilities/23_large_file_transfer.md)
+## Capability: Large File Transfer (→ capabilities/24_large_file_transfer.md)
 
 - Fixtures: generate `qa-out/big.bin` (8 MB random), a ~1 MB PNG, and a ~6 MB attachment.
   `qa-out/` is gitignored scratch; delete it after the run. Hash every file sent and received.
