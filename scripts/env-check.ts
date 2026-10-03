@@ -7,6 +7,7 @@
  * up by accident.
  */
 import { config } from 'dotenv';
+import { describeDriveTreeFlag } from '../src/lib/featureFlags';
 config({ path: '.env.local', quiet: true } as any);
 
 import { execSync } from 'child_process';
@@ -129,6 +130,9 @@ if (process.env.SUPPORT_FGAC_PROXY_KEY && process.env.SUPPORT_SENDER_EMAIL) {
   console.log('Approval reminder email: off (SUPPORT_FGAC_PROXY_KEY / SUPPORT_SENDER_EMAIL not set)');
   console.log('Bounce sweep: off (same two variables)');
 }
+
+console.log('\nFEATURE FLAGS');
+console.log(`Drive tree (folder-inherited Drive access): ${describeDriveTreeFlag()}`);
 
 const phKey = process.env.POSTHOG_PERSONAL_API_KEY;
 if (!phKey) {

@@ -60,6 +60,7 @@ export default async function AgentProfilePage({
         accessibleEmails={data.accessibleEmails}
         mcpEndpoint={data.mcpEndpoint}
         hasCompleteGoogleAccess={data.hasCompleteGoogleAccess}
+        driveTree={data.driveTree}
         activeId={profile.id}
       />
     </>

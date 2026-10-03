@@ -2,7 +2,8 @@
 
 import { db } from "@/db";
 import { users, proxyKeys, emailDelegations, keyEmailAccess, accessRules, keyRuleAssignments } from "@/db/schema";
-import { eq, and, desc, isNull } from "drizzle-orm";
+import { eq, and, desc, isNull, inArray } from "drizzle-orm";
+import { DRIVE_SERVICE, DRIVE_TARGET_KINDS, actionTypeForAccess, accessLabel, type DriveAccess, type DriveDefault, type DriveNodeKind } from "@/lib/driveTreeAccess";
 import { findActiveDelegation } from "@/db/delegationQueries";
 import { syncDefaultProfileDelegatedAccess } from "@/db/defaultProfile";
 import { currentUser, clerkClient } from "@clerk/nextjs/server";
@@ -1496,4 +1497,149 @@ export async function approveMagicLink(
   captureServerEvent(dbUser.clerkUserId, "approval_link_approved", { action: p.action, request_id: p.requestId });
   revalidateDashboard();
   return { ok: true, description: describeApproval(p) };
+}
+
+// ─── Drive tree model (feature-flagged folder-inherited Drive access) ───────
+// The profile's default for every Drive file lives on proxy_keys.drive_default;
+// folder/file settings are access_rules rows with service 'drive', assigned to
+// the profile. See src/lib/driveTreeAccess.ts for how they resolve.
+
+export type DriveNodeInput = { id: string; name: string; kind: DriveNodeKind };
+
+const DRIVE_NODE_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+async function ownedActiveKey(dbUserId: string, keyId: string) {
+  const key = await db.select().from(proxyKeys)
+    .where(and(eq(proxyKeys.id, keyId), eq(proxyKeys.userId, dbUserId), isNull(proxyKeys.revokedAt)))
+    .limit(1).then(r => r[0]);
+  if (!key) throw new Error("Unauthorized");
+  return key;
+}
+
+/** The quick option: what every Drive file is for this profile unless a setting says otherwise. */
+export async function setDriveDefault(keyId: string, value: DriveDefault) {
+  const dbUser = await getDbUser();
+  if (value !== 'read' && value !== 'write' && value !== 'explicit') throw new Error("Invalid Drive default");
+  const key = await ownedActiveKey(dbUser.id, keyId);
+  await db.update(proxyKeys).set({ driveDefault: value }).where(eq(proxyKeys.id, key.id));
+  const { captureServerEvent } = await import("@/lib/posthogServer");
+  captureServerEvent(dbUser.clerkUserId, "drive_tree_default_changed", { value, profile_default: key.isDefault });
+  revalidateDashboard();
+}
+
+/**
+ * Set (or clear, with 'inherit') one node's access for this profile. A node
+ * is a Drive file or folder id, a shared drive id, or one of the two
+ * pseudo-roots. The rule is the profile's own: a rule several profiles share
+ * is detached from this one and replaced, never edited for everyone; a
+ * global drive rule that this profile should stop inheriting is pinned to
+ * the other active profiles instead of deleted from under them.
+ */
+export async function setDriveNodeAccess(
+  keyId: string,
+  node: DriveNodeInput,
+  access: DriveAccess | 'inherit',
+): Promise<{ ruleId: string | null }> {
+  const dbUser = await getDbUser();
+  if (!DRIVE_NODE_ID.test(node.id)) throw new Error("Invalid Drive node id");
+  if (!DRIVE_TARGET_KINDS.includes(node.kind)) throw new Error("Invalid Drive node kind");
+  if (!['inherit', 'read', 'write', 'block'].includes(access)) throw new Error("Invalid access");
+  const name = (node.name || node.id).slice(0, 300);
+  const key = await ownedActiveKey(dbUser.id, keyId);
+
+  const candidates = await db.select().from(accessRules).where(and(
+    eq(accessRules.userId, dbUser.id),
+    eq(accessRules.service, DRIVE_SERVICE),
+    eq(accessRules.targetResourceId, node.id),
+  ));
+  const assignments = candidates.length > 0
+    ? await db.select().from(keyRuleAssignments).where(inArray(keyRuleAssignments.accessRuleId, candidates.map(r => r.id)))
+    : [];
+  const assignmentsOf = (ruleId: string) => assignments.filter(a => a.accessRuleId === ruleId);
+  const forThisKey = candidates.filter(r => assignmentsOf(r.id).some(a => a.proxyKeyId === key.id));
+  const globals = candidates.filter(r => assignmentsOf(r.id).length === 0);
+
+  const detachFromThisKey = async (ruleId: string) => {
+    const others = assignmentsOf(ruleId).filter(a => a.proxyKeyId !== key.id);
+    if (others.length === 0) {
+      await db.delete(keyRuleAssignments).where(eq(keyRuleAssignments.accessRuleId, ruleId));
+      await db.delete(accessRules).where(eq(accessRules.id, ruleId));
+    } else {
+      await db.delete(keyRuleAssignments).where(and(eq(keyRuleAssignments.accessRuleId, ruleId), eq(keyRuleAssignments.proxyKeyId, key.id)));
+    }
+  };
+
+  const { captureServerEvent } = await import("@/lib/posthogServer");
+
+  if (access === 'inherit') {
+    for (const r of forThisKey) await detachFromThisKey(r.id);
+    if (globals.length > 0) {
+      const others = (await db.select({ id: proxyKeys.id }).from(proxyKeys)
+        .where(and(eq(proxyKeys.userId, dbUser.id), isNull(proxyKeys.revokedAt))))
+        .filter(k => k.id !== key.id);
+      for (const r of globals) {
+        if (others.length === 0) {
+          await db.delete(accessRules).where(eq(accessRules.id, r.id));
+        } else {
+          await db.insert(keyRuleAssignments).values(others.map(k => ({ proxyKeyId: k.id, accessRuleId: r.id })));
+        }
+      }
+    }
+    captureServerEvent(dbUser.clerkUserId, "drive_tree_setting_changed", { node_kind: node.kind, access: 'inherit', profile_default: key.isDefault });
+    revalidateDashboard();
+    return { ruleId: null };
+  }
+
+  const actionType = actionTypeForAccess(access);
+  const ruleName = `${accessLabel(access)}: ${name}`.slice(0, 200);
+  // The profile's own rule (assigned to it alone) is updated in place; every
+  // other rule naming the node for this key is detached (duplicates, shared).
+  const own = forThisKey.find(r => assignmentsOf(r.id).length === 1);
+  let ruleId: string;
+  if (own) {
+    await db.update(accessRules)
+      .set({ actionType, ruleName, targetKind: node.kind, resourceName: name, updatedAt: new Date() })
+      .where(eq(accessRules.id, own.id));
+    ruleId = own.id;
+    for (const r of forThisKey) if (r.id !== own.id) await detachFromThisKey(r.id);
+  } else {
+    for (const r of forThisKey) await detachFromThisKey(r.id);
+    const [rule] = await db.insert(accessRules).values({
+      userId: dbUser.id,
+      ruleName,
+      service: DRIVE_SERVICE,
+      actionType,
+      targetResourceId: node.id,
+      targetKind: node.kind,
+      resourceName: name,
+    }).returning();
+    await db.insert(keyRuleAssignments).values({ proxyKeyId: key.id, accessRuleId: rule.id });
+    ruleId = rule.id;
+  }
+  captureServerEvent(dbUser.clerkUserId, "drive_tree_setting_changed", { node_kind: node.kind, access, profile_default: key.isDefault });
+  revalidateDashboard();
+  return { ruleId };
+}
+
+/** Remove every Drive tree setting this profile holds (its own rules are deleted, shared ones detached). */
+export async function clearDriveOverrides(keyId: string) {
+  const dbUser = await getDbUser();
+  const key = await ownedActiveKey(dbUser.id, keyId);
+  const mine = await db.select({ ruleId: keyRuleAssignments.accessRuleId })
+    .from(keyRuleAssignments)
+    .innerJoin(accessRules, eq(accessRules.id, keyRuleAssignments.accessRuleId))
+    .where(and(eq(keyRuleAssignments.proxyKeyId, key.id), eq(accessRules.service, DRIVE_SERVICE), eq(accessRules.userId, dbUser.id)));
+  for (const { ruleId } of mine) {
+    const others = await db.select().from(keyRuleAssignments)
+      .where(and(eq(keyRuleAssignments.accessRuleId, ruleId)));
+    if (others.every(a => a.proxyKeyId === key.id)) {
+      await db.delete(keyRuleAssignments).where(eq(keyRuleAssignments.accessRuleId, ruleId));
+      await db.delete(accessRules).where(eq(accessRules.id, ruleId));
+    } else {
+      await db.delete(keyRuleAssignments).where(and(eq(keyRuleAssignments.accessRuleId, ruleId), eq(keyRuleAssignments.proxyKeyId, key.id)));
+    }
+  }
+  const { captureServerEvent } = await import("@/lib/posthogServer");
+  captureServerEvent(dbUser.clerkUserId, "drive_tree_settings_cleared", { count: mine.length, profile_default: key.isDefault });
+  revalidateDashboard();
 }

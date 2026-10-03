@@ -168,6 +168,26 @@ Click **"+ Quick Add 2FA Block"** to instantly create a rule that blocks your ag
 
 ---
 
+### Google Drive access by folder (beta)
+
+Accounts in the Drive beta scope Google Drive by folder instead of exposing
+files one at a time. On an agent profile, **Enable full Drive access** asks
+Google once for the Drive permission; the profile page then shows your Drive as
+a tree (My Drive, Shared with me, Shared drives) with three quick options:
+
+- **Read everything** (default) — the agent can read any file you can.
+- **Read & write everything** — it can also edit; protect sensitive folders below.
+- **Only files I allow** — nothing is visible until you allow it.
+
+Any folder or file can be set to **Read**, **Write** or **Block**, or left on
+**Inherit**, which takes the setting of the nearest folder above it. Opening a
+folder shows that chain as a breadcrumb; searching finds folders and files
+anywhere in your Drive with their path. Blocked files are invisible to the
+agent, reads included. Settings you made earlier through the Picker or an
+approval link keep working as per-file settings.
+
+---
+
 ## Delegation: Access to Other People's Email
 
 Delegation lets one user grant another user's AI agents access to their Gmail. This is useful when:

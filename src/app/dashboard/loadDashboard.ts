@@ -9,6 +9,8 @@ import { checkGoogleAccess, type GoogleAccess } from './googleAccess';
 import { clerkPrimaryEmail } from '@/lib/clerkPrimaryEmail';
 import { slugifyProfileLabel } from '@/lib/profileSlugs';
 import type { Profile, Rule } from './AgentProfilesView';
+import { driveTreeFlagOn } from '@/lib/featureFlags';
+import { normalizeDriveDefault } from '@/lib/driveTreeAccess';
 
 /**
  * Everything the dashboard needs to render one signed-in user's profiles.
@@ -41,6 +43,9 @@ export interface DashboardData {
    *  second-account prompt names the mailbox and measures how new it is. */
   email: string;
   accountCreatedAt: Date;
+  /** Drive tree model (feature-flagged): whether this user is flagged, and
+   *  whether their live token already carries the full `drive` scope. */
+  driveTree: { flagOn: boolean; hasFullScope: boolean };
 }
 
 /**
@@ -68,6 +73,8 @@ export async function loadDashboardData(): Promise<DashboardData | null> {
 
   const googleAccess = await checkGoogleAccess(user);
   const hasCompleteGoogleAccess = googleAccess.gmail && googleAccess.driveFile;
+  // Drive tree feature flag (PostHog, cached; env override for local dev).
+  const driveTreeFlag = await driveTreeFlagOn({ clerkUserId: user.id, email: currentEmail });
 
   // ─── Emails this user can build profiles against ─────────────────────────
   // Resolved by email rather than user row id: duplicate `users` rows for one
@@ -98,6 +105,8 @@ export async function loadDashboardData(): Promise<DashboardData | null> {
     isDefault: k.isDefault,
     createdAt: k.createdAt.toISOString(),
     revokedAt: k.revokedAt ? k.revokedAt.toISOString() : null,
+    driveDefault: normalizeDriveDefault(k.driveDefault),
+    driveConfigured: k.driveDefault !== null,
     emailAccess: allKeyEmailAccess
       .filter(kea => kea.proxyKeyId === k.id)
       .map(kea => kea.targetEmail),
@@ -114,6 +123,7 @@ export async function loadDashboardData(): Promise<DashboardData | null> {
     actionType: rule.actionType,
     regexPattern: rule.regexPattern,
     targetResourceId: rule.targetResourceId,
+    targetKind: rule.targetKind,
     resourceName: rule.resourceName,
     targetEmail: rule.targetEmail,
     assignedKeyIds: allKeyRuleAssignments
@@ -135,5 +145,9 @@ export async function loadDashboardData(): Promise<DashboardData | null> {
     profiles, rules, accessibleEmails, mcpEndpoint, hasCompleteGoogleAccess,
     googleAccess, needsDriveFile, lastSignInAt: user.lastSignInAt, userId: dbUser.id, clerkUserId: user.id,
     email: dbUser.email, accountCreatedAt: dbUser.createdAt,
+    driveTree: {
+      flagOn: driveTreeFlag,
+      hasFullScope: googleAccess.driveFull,
+    },
   };
 }

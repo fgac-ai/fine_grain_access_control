@@ -27,6 +27,11 @@ export const proxyKeys = pgTable('proxy_keys', {
   // to (instant-start, connector-growth plan). At most one live default per
   // user; found by flag, never by label.
   isDefault: boolean('is_default').notNull().default(false),
+  // Drive tree model (feature-flagged, src/lib/driveTreeAccess.ts): the
+  // profile's default for every Drive file — NULL/'read' = Read everything,
+  // 'write' = Read & write everything, 'explicit' = Only files I allow.
+  // Folder/file overrides are access_rules rows with service 'drive'.
+  driveDefault: text('drive_default'),
   revokedAt: timestamp('revoked_at'), // NULL = active, set = revoked
   expiresAt: timestamp('expires_at'), // optional TTL
   createdAt: timestamp('created_at').defaultNow().notNull(),
@@ -290,6 +295,11 @@ export const accessRules = pgTable('access_rules', {
   actionType: text('action_type').notNull(), // Gmail: 'read_blacklist', 'send_whitelist', etc. | Sheets: 'sheet_read', 'sheet_read_write', 'sheet_block' | Docs: 'doc_read', 'doc_read_write', 'doc_block' | Slides: 'slide_read', 'slide_read_write', 'slide_block'
   regexPattern: text('regex_pattern'), // Optional: Gmail regex pattern or label ID
   targetResourceId: text('target_resource_id'), // e.g. spreadsheetId (sheets), documentId (docs), presentationId (slides)
+  // What target_resource_id names, for service 'drive' rules: NULL/'file'
+  // (every pre-existing row), 'folder', 'shared_drive', or the pseudo-roots
+  // 'shared_with_me' / 'shared_drives'. A setting on a folder is inherited by
+  // everything inside it until a nearer setting overrides it.
+  targetKind: text('target_kind'),
   resourceName: text('resource_name'), // e.g. human-readable document title "Q3 Financials"
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
