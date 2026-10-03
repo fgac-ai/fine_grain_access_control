@@ -2413,7 +2413,41 @@ async function notifyOwnerOfMissingScope(
  * gmailScopeDenial above. Applied by every typed per-file tool (sheets_*,
  * docs_*, comments_*) and by non-Gmail raw google_api_get/modify calls.
  */
+/** Does this profile use the Drive tree model: a quick option saved, or any drive-service setting applying to the key? */
+async function driveTreeConfigured(userId: string, proxyKeyId: string): Promise<boolean> {
+  const key = await db.select({ driveDefault: proxyKeys.driveDefault }).from(proxyKeys).where(eq(proxyKeys.id, proxyKeyId)).then(r => r[0]);
+  if (key?.driveDefault) return true;
+  const { settings } = await loadDriveTreeSettings(userId, proxyKeyId);
+  return [...settings.values()].some(list => list.some(s => s.source === 'drive'));
+}
+
+/**
+ * A flagged user whose profile uses the Drive tree model, but whose live
+ * token no longer carries the full `drive` scope: a plain Google sign-in, or
+ * a refresh over a narrower refresh token, drops it (preview QA 2026-10-03:
+ * the widened grant narrowed ~28 min after enabling and the dashboard fell
+ * back to the enable card with no error). Falling back silently to the
+ * per-file path would hand the user "expose this file" links for a Drive
+ * they scoped by folder — refuse instead, and point at the one-click
+ * re-enable. Settings are kept; Gmail is unaffected.
+ */
+async function driveTreeScopeLostDenial(conn: ConnectionApproved, resolved: ResolvedAccount) {
+  const engine = getDriveEngine();
+  if (!engine || !engine.flagOn || engine.active || engine.hasDriveFullScope) return null;
+  if (resolved.targetEmail.toLowerCase() !== conn.user.email.toLowerCase()) return null;
+  if (!(await driveTreeConfigured(conn.user.id, resolved.proxyKeyId))) return null;
+  addToolCallProps({ denial_code: 'drive_tree_scope_lost', drive_tree: true, google_scope_missing: true });
+  captureServerEvent(conn.user.clerkUserId, 'drive_tree_scope_lost', { via: 'mcp' });
+  return textResult(
+    `🚫 Drive access needs re-enabling: this agent profile uses FGAC's folder-based Google Drive access, but the Google account '${resolved.targetEmail}' no longer carries the Drive permission — it was dropped after a Google sign-in or a token refresh. ` +
+    `STOP — every Drive, Sheets, Docs and Slides call on this account will fail until it is re-enabled; retrying will NOT help. ` +
+    `👉 The account owner re-enables it in one click on the agent profile page, with the "Re-enable full Drive access" button: ${DASHBOARD_URL}/dashboard — their quick option and folder settings are kept. Gmail tools are unaffected.`,
+  );
+}
+
 async function driveFileScopeDenial(conn: ConnectionApproved, resolved: ResolvedAccount) {
+  const treeLost = await driveTreeScopeLostDenial(conn, resolved);
+  if (treeLost) return treeLost;
   if (resolved.hasDriveFileScope !== false) return null;
   addToolCallProps({ failure_reason: 'drive_file_scope_missing', denial_code: 'drive_file_scope_missing', google_scope_missing: true });
   captureServerEvent(conn.user.clerkUserId, 'google_scope_missing', {
@@ -2958,6 +2992,13 @@ function registerFgacTools(server: FgacMcpServer) {
         // instruction — then kept retrying (14 identical Sheets failures).
         const tokenBroken = accountDetails.find(d => d.google_token === 'unavailable' && d.reconnect_url);
         const mailboxGone = accountDetails.find(d => d.mailbox === 'gone');
+        // Drive tree model (feature-flagged): the owner's own token carries the
+        // full `drive` scope, so per-file exposure is not how Drive works here.
+        const ownIdx = emails.findIndex(e => e.targetEmail.toLowerCase() === conn.user.email.toLowerCase());
+        const ownProbe = ownIdx >= 0 ? probes[ownIdx] : undefined;
+        const ownToken = ownProbe && ownProbe.status === 'fulfilled' && !('failure' in ownProbe.value) ? ownProbe.value : null;
+        const driveTreeActive = ownToken?.hasDriveFullScope === true
+          && await driveTreeFlagOn({ clerkUserId: conn.user.clerkUserId, email: conn.user.email });
 
         // Onboarding nudge: list_accounts is most new users' first (and for
         // many, only) call — 2026-08 launch analytics showed a large cohort
@@ -2978,12 +3019,14 @@ function registerFgacTools(server: FgacMcpServer) {
             gmail: "Read a mailbox with gmail_list (pass account: '<address>' to target a specific one; defaults to the primary). Reads work out of the box.",
             // One entry per per-file kind (sheets / docs / slides), keyed by
             // its service name, so the agent sees every file type it can reach.
-            ...Object.fromEntries(ACTIVE_DRIVE_FILE_KINDS.map(k => {
+            ...(driveTreeActive ? {
+              drive: "Google Drive access is scoped by FOLDER for this profile (full Drive scope): call sheets_read_range / docs_read_document / slides_get_presentation / google_api_get directly with any file id the user can reach — there is no per-file exposure step. The profile's default and its folder/file settings decide (get_my_permissions shows them); a denial names the file and the setting that applies, and carries a one-click link where one can help.",
+            } : Object.fromEntries(ACTIVE_DRIVE_FILE_KINDS.map(k => {
               const d = DRIVE_FILE_KINDS[k];
               return [d.service, driveMissing
                 ? `'${driveMissing.email}' is connected WITHOUT the drive.file scope — every ${d.productName} call on it will fail until the account owner reconnects: ${driveMissing.reconnect_url}`
                 : `${d.productName} access is granted per ${d.noun}: call ${d.tools.read} with a ${d.idKey}, or request_access — a denial returns a one-click approval link for the user.`];
-            })),
+            }))),
             sending: 'Email sending is off by default; the first gmail_send returns a one-click approval link the user can use to whitelist the recipient.',
             raw_api: "Anything the typed tools can't express — Gmail mailbox writes (labels, drafts, archive/mark-read, trash) and threads, Drive listing and export, creating new docs, sheets, or slides — is reachable via google_api_get / google_api_modify under the same rules (see their descriptions). The Google grant covers ONLY Gmail plus per-file Drive access (Sheets/Docs/Slides/Drive files the user picked or this agent created); People/Contacts, Calendar, Tasks, and other Google APIs are not available and calls to them are refused.",
           },

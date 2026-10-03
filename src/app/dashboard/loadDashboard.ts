@@ -106,6 +106,7 @@ export async function loadDashboardData(): Promise<DashboardData | null> {
     createdAt: k.createdAt.toISOString(),
     revokedAt: k.revokedAt ? k.revokedAt.toISOString() : null,
     driveDefault: normalizeDriveDefault(k.driveDefault),
+    driveConfigured: k.driveDefault !== null,
     emailAccess: allKeyEmailAccess
       .filter(kea => kea.proxyKeyId === k.id)
       .map(kea => kea.targetEmail),

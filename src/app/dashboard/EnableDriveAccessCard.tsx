@@ -8,6 +8,8 @@ import { Card, CardHeader, Badge, buttonPrimary } from '@/components/ui';
 import {
   startGoogleReconnect, DRIVE_FULL_SCOPE, GMAIL_MODIFY_SCOPE, type ClerkUserLike,
 } from './googleReconnect';
+import { setDriveDefault } from './actions';
+import type { DriveDefault } from '@/lib/driveTreeAccess';
 
 const SCOPE_POLL_ATTEMPTS = 6;
 const SCOPE_POLL_INTERVAL_MS = 1500;
@@ -21,7 +23,12 @@ const SCOPE_POLL_INTERVAL_MS = 1500;
  * so the Drive tree card takes over. The scope is requested from nobody who
  * is not flagged — this card is the only place that asks for it.
  */
-export function EnableDriveAccessCard() {
+export function EnableDriveAccessCard({ profileId, driveDefault, reenable }: {
+  profileId: string;
+  driveDefault: DriveDefault;
+  /** The profile already uses the tree model (a quick option saved, or folder settings): the scope was LOST, not never granted. */
+  reenable: boolean;
+}) {
   const { user, isLoaded } = useUser();
   const router = useRouter();
   const pathname = usePathname();
@@ -47,7 +54,12 @@ export function EnableDriveAccessCard() {
           const res = await fetch('/api/auth/google-picker-token');
           const data = await res.json();
           if (res.ok && Array.isArray(data.scopes) && data.scopes.includes(DRIVE_FULL_SCOPE)) {
-            posthog?.capture('drive_scope_enabled');
+            posthog?.capture('drive_scope_enabled', { reenable });
+            // Record that this profile now uses the tree model (the quick
+            // option is written even when it is still the default), so a
+            // later loss of the scope is reported as "re-enable", not as a
+            // silent fallback to per-file access.
+            try { await setDriveDefault(profileId, driveDefault); } catch { /* the card still works without it */ }
             router.replace(pathname);
             router.refresh();
             return;
@@ -69,7 +81,7 @@ export function EnableDriveAccessCard() {
     if (!user || busy) return;
     setBusy(true);
     setError(null);
-    posthog?.capture('drive_scope_enable_started');
+    posthog?.capture('drive_scope_enable_started', { reenable });
     try {
       const url = await startGoogleReconnect(
         user as unknown as ClerkUserLike,
@@ -87,27 +99,35 @@ export function EnableDriveAccessCard() {
   };
 
   return (
-    <Card tone="primary" data-testid="enable-drive-access">
+    <Card tone={reenable ? 'default' : 'primary'} testId="enable-drive-access" className={reenable ? 'border-warning-foreground' : ''}>
       <CardHeader
-        title={<span className="inline-flex items-center gap-2">Google Drive access <Badge tone="primary">Beta</Badge></span>}
-        subtitle="Scope this agent by folder instead of file by file"
+        title={<span className="inline-flex items-center gap-2">{reenable ? 'Google Drive access needs re-enabling' : 'Google Drive access'} <Badge tone={reenable ? 'warning' : 'primary'}>{reenable ? 'Action needed' : 'Beta'}</Badge></span>}
+        subtitle={reenable ? 'Your Google token lost the Drive permission; your folder settings are kept' : 'Scope this agent by folder instead of file by file'}
         action={
           <button className={buttonPrimary} onClick={start} disabled={busy || !isLoaded}>
-            {busy ? 'Opening Google…' : 'Enable full Drive access'}
+            {busy ? 'Opening Google…' : reenable ? 'Re-enable full Drive access' : 'Enable full Drive access'}
           </button>
         }
       />
       <div className="px-5 pb-5 space-y-2 text-[13px] text-foreground">
-        <p>
-          Today this profile reaches only the files you expose one at a time. With full Drive access,
-          every file in your Drive is <strong>readable by default</strong>, and you set folders or files to
-          Read, Read &amp; write, or Blocked — a setting on a folder applies to everything inside it, and
-          the nearest setting wins.
-        </p>
+        {reenable ? (
+          <p>
+            Your Google account no longer carries the Drive permission FGAC needs for folder-based access —
+            this can happen after a Google sign-in or a token refresh. Until you re-enable it, this profile
+            is back on per-file access and your agent is told to stop and ask you. Your quick option and
+            every folder setting are kept and apply again the moment you re-enable.
+          </p>
+        ) : (
+          <p>
+            Today this profile reaches only the files you expose one at a time. With full Drive access,
+            every file in your Drive is <strong>readable by default</strong>, and you set folders or files to
+            Read, Read &amp; write, or Blocked — a setting on a folder applies to everything inside it, and
+            the nearest setting wins.
+          </p>
+        )}
         <p className="text-xs leading-relaxed text-muted-foreground">
-          Google will ask you once to let FGAC see and edit your Google Drive files. Nothing changes for
-          this profile until you come back and set it up; FGAC only asks for this permission because your
-          account is in the beta.
+          Google will ask you once to let FGAC see and edit your Google Drive files. FGAC only asks for this
+          permission because your account is in the beta.
         </p>
         {verify === 'checking' && <p className="text-[11px] text-muted-foreground">Confirming Google permissions…</p>}
         {verify === 'failed' && (

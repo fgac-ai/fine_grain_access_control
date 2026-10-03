@@ -32,6 +32,8 @@ export interface Profile {
   emailAccess: string[];
   /** Drive tree model: the profile's default for every Drive file. */
   driveDefault: 'read' | 'write' | 'explicit';
+  /** A quick option was saved — the profile uses the tree model (losing the scope then means "re-enable"). */
+  driveConfigured: boolean;
 }
 
 export interface Rule {
@@ -225,7 +227,13 @@ export function AgentProfilesView({
                 />
               ) : (
                 <>
-                  {driveTree?.flagOn && <EnableDriveAccessCard />}
+                  {driveTree?.flagOn && (
+                    <EnableDriveAccessCard
+                      profileId={active.id}
+                      driveDefault={active.driveDefault}
+                      reenable={active.driveConfigured || rules.some(r => r.service === DRIVE_SERVICE && (isGlobal(r) || r.assignedKeyIds.includes(active.id)))}
+                    />
+                  )}
                   {ACTIVE_DRIVE_FILE_KINDS.map(kind => (
                     <FilesRulesCard
                       key={kind}

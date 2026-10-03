@@ -349,7 +349,7 @@ export function DriveAccessCard({ profileId, driveDefault: initialDefault, rules
   );
 
   return (
-    <Card data-testid="drive-access-card">
+    <Card testId="drive-access-card">
       <div className="flex flex-wrap items-start justify-between gap-4 px-5 py-4">
         <div className="min-w-0">
           <h2 className="text-[15px] font-bold text-foreground">Google Drive access</h2>
@@ -463,7 +463,7 @@ export function DriveAccessCard({ profileId, driveDefault: initialDefault, rules
       )}
 
       {/* Column header */}
-      <div className="hidden grid-cols-[minmax(0,1fr)_190px_250px] gap-4 border-y border-border/60 bg-muted px-5 py-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground md:grid">
+      <div className="hidden grid-cols-[minmax(0,1fr)_200px_250px] gap-4 border-y border-border/60 bg-muted px-5 py-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground xl:grid">
         <span>{view.mode === 'search' ? 'Name and location' : 'Name'}</span>
         <span>Effective access</span>
         <span>Setting</span>
@@ -484,7 +484,7 @@ export function DriveAccessCard({ profileId, driveDefault: initialDefault, rules
           const source = explicit ? 'Set here' : eff.level === 'default' ? `default: ${driveDefaultLabel(driveDefault)}` : `from ${eff.decidedBy?.name}`;
           const legacyOnly = (settings.get(node.id) ?? []).length > 0 && !(settings.get(node.id) ?? []).some(s => s.source === 'drive');
           return (
-            <div key={`${node.id}-${depth}`} className={`grid grid-cols-1 items-center gap-2 border-b border-border/60 px-5 py-2 md:grid-cols-[minmax(0,1fr)_190px_250px] md:gap-4 ${isResult ? 'min-h-[60px]' : 'min-h-[46px]'} ${explicit ? 'bg-muted/30' : 'bg-card'}`}>
+            <div key={`${node.id}-${depth}`} className={`grid grid-cols-1 items-center gap-2 border-b border-border/60 px-5 py-2 xl:grid-cols-[minmax(0,1fr)_200px_250px] xl:gap-4 ${isResult ? 'min-h-[60px]' : 'min-h-[46px]'} ${explicit ? 'bg-muted/30' : 'bg-card'}`}>
               <div className="flex min-w-0 items-start gap-2">
                 <span className="shrink-0" style={{ width: isResult || inFolder ? 0 : depth * 22 }} />
                 {container && !isResult && !inFolder ? (
@@ -506,8 +506,8 @@ export function DriveAccessCard({ profileId, driveDefault: initialDefault, rules
                     {loading && <span className="text-[11px] text-subtle">loading…</span>}
                   </span>
                   {isResult && (
-                    <span className="flex items-center gap-1.5 text-xs text-subtle">
-                      <span className="truncate">{path || 'Shared with me'}</span>
+                    <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-subtle">
+                      <span className="break-words">{path || 'Shared with me'}</span>
                       <button type="button" onClick={() => (container ? openFolder(node) : openParentOf(node))} className="shrink-0 font-semibold text-primary hover:underline">Open folder</button>
                       <span className="text-border">·</span>
                       <button type="button" onClick={() => showInTree(node)} className="shrink-0 font-semibold text-primary hover:underline">Show in tree</button>
@@ -515,14 +515,14 @@ export function DriveAccessCard({ profileId, driveDefault: initialDefault, rules
                   )}
                 </span>
               </div>
-              <div className="flex min-w-0 items-center gap-2 pl-[52px] md:pl-0">
+              <div className="flex min-w-0 items-start gap-2 pl-[52px] xl:pl-0">
                 <Pill access={eff.access} explicit={explicit} />
-                <span className="flex min-w-0 items-center gap-1 truncate text-xs text-muted-foreground">
-                  {!explicit && <CornerLeftUp className="h-3 w-3 shrink-0 text-subtle" />}
-                  <span className="truncate">{source}</span>
+                <span className="flex min-w-0 items-start gap-1 text-xs text-muted-foreground">
+                  {!explicit && <CornerLeftUp className="mt-0.5 h-3 w-3 shrink-0 text-subtle" />}
+                  <span className="line-clamp-2 break-words">{source}</span>
                 </span>
               </div>
-              <div className="flex items-center gap-2.5 pl-[52px] md:pl-0">
+              <div className="flex items-center gap-2.5 pl-[52px] xl:pl-0">
                 <SettingControl
                   label={`Access setting for ${node.name}`}
                   value={setting}
