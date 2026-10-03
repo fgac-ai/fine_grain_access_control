@@ -44,5 +44,12 @@ line stays; the Terms page keeps its own "Changes" clause.
 Local (Path B, Playwright CLI, dev server on the branch database): 9 headings,
 9 contents links, 0 missing anchors, no stale "Section N" cross-references,
 Limited Use link and revoke link present, 0 console errors, no overflow at
-375 px. Preview: recorded in the PR after the watcher reports the build for the
-v2 commit.
+375 px.
+
+Preview (built-in browser, deployment for commit 0af5eea — SHA confirmed with
+`vercel ls --meta githubCommitSha=…`):
+https://fine-grain-access-control-83ozlzugm-kenyesh-gmailcoms-projects.vercel.app/privacy
+— title and effective date correct, 9 headings / 9 contents links / 0 missing
+anchors, no stale "Section N" references, Limited Use link + verbatim sentence
++ revoke link present, 0 console errors at desktop and 375 px, no overflow,
+table rows stack.
