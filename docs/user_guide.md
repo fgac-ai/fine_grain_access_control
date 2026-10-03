@@ -335,6 +335,28 @@ Click **"Revoke"** to permanently disable a key. Revoked keys return `401 Unauth
 
 ---
 
+## Privacy and your data
+
+The full statement is the [Privacy Policy](https://fgac.ai/privacy); the short
+version, verified against the code on 2026-10-03:
+
+- **Google permissions.** Sign-in asks for your basic profile, `gmail.modify`
+  and `drive.file` (files you pick in the Picker or that an agent creates). The
+  full `drive` permission is requested only when a Drive-beta account clicks
+  **Enable full Drive access** on a profile.
+- **Nothing from your mail or files is stored.** Content passes through FGAC in
+  memory while a call is in flight. The database holds your account email, the
+  profiles, keys, rules, delegations and connections you create, and ledgers of
+  request metadata (never bodies, subjects or attachments). Drive file metadata
+  for the folder model is cached in server memory for 10 minutes.
+- **Tokens live in Clerk**, never in FGAC's database, and never reach an agent.
+- **Analytics** (PostHog) record usage events, errors and session replays of
+  fgac.ai pages (inputs masked, replays kept 30 days).
+- **Deleting your account** revokes every key and delegation immediately; the
+  inert account record stays unless you ask support@fgac.ai to erase it.
+
+---
+
 ## Data Model Reference
 
 | Concept | Description |

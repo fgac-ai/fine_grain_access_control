@@ -23,7 +23,7 @@ The core architectural challenge of this platform is the **secure ingestion, sto
     *   Using **Clerk**, we offload the liability of storing the raw Google Refresh Tokens entirely to their highly compliant, SOC2-audited infrastructure. Our database only stores the proxy rules. This drastically shrinks our audit surface area and makes passing Google Security Review significantly easier.
 
 ## Data Flow (The Token Vault Pattern)
-1. **User Setup**: User authenticates with our application via **Clerk**. They grant our application access to their Google Account (`https://www.googleapis.com/auth/gmail.modify`). **Clerk** stores the Google Refresh Token natively.
+1. **User Setup**: User authenticates with our application via **Clerk**. They grant our application access to their Google Account (`https://www.googleapis.com/auth/gmail.modify` and the per-file `https://www.googleapis.com/auth/drive.file`; the full `drive` scope only through the feature-flagged Drive tree opt-in). **Clerk** stores the Google Refresh Token natively.
 2. **Credential Issuance**: We issue the user a "Fake" Google Service Account JSON file (or a Custom API Key from Clerk) linked to their internal `user_id`.
 3. **Agent Request**: The user's AI Agent makes a request to `https://proxy.ourdomain.com`, using our fake credential.
 4. **Proxy Intercept**: Our Vercel Edge function receives the request. It validates the fake credential via **Clerk**, mapping it back to the `user_id`.
