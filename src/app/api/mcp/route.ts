@@ -3028,7 +3028,11 @@ function registerFgacTools(server: FgacMcpServer) {
                 : `${d.productName} access is granted per ${d.noun}: call ${d.tools.read} with a ${d.idKey}, or request_access — a denial returns a one-click approval link for the user.`];
             }))),
             sending: 'Email sending is off by default; the first gmail_send returns a one-click approval link the user can use to whitelist the recipient.',
-            raw_api: "Anything the typed tools can't express — Gmail mailbox writes (labels, drafts, archive/mark-read, trash) and threads, Drive listing and export, creating new docs, sheets, or slides — is reachable via google_api_get / google_api_modify under the same rules (see their descriptions). The Google grant covers ONLY Gmail plus per-file Drive access (Sheets/Docs/Slides/Drive files the user picked or this agent created); People/Contacts, Calendar, Tasks, and other Google APIs are not available and calls to them are refused.",
+            raw_api: "Anything the typed tools can't express — Gmail mailbox writes (labels, drafts, archive/mark-read, trash) and threads, Drive listing and export, creating new docs, sheets, or slides — is reachable via google_api_get / google_api_modify under the same rules (see their descriptions). "
+              + (driveTreeActive
+                ? "The Google grant covers Gmail plus the user's whole Google Drive, scoped by this profile's folder and file settings (Blocked files are withheld from listings too); "
+                : "The Google grant covers ONLY Gmail plus per-file Drive access (Sheets/Docs/Slides/Drive files the user picked or this agent created); ")
+              + "People/Contacts, Calendar, Tasks, and other Google APIs are not available and calls to them are refused.",
           },
           add_more_accounts: {
             // Every extra mailbox — the user's own second account included —

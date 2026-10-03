@@ -463,7 +463,7 @@ export function DriveAccessCard({ profileId, driveDefault: initialDefault, rules
       )}
 
       {/* Column header */}
-      <div className="hidden grid-cols-[minmax(0,1fr)_200px_250px] gap-4 border-y border-border/60 bg-muted px-5 py-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground xl:grid">
+      <div className="hidden grid-cols-[minmax(0,1fr)_220px_250px] gap-4 border-y border-border/60 bg-muted px-5 py-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground xl:grid">
         <span>{view.mode === 'search' ? 'Name and location' : 'Name'}</span>
         <span>Effective access</span>
         <span>Setting</span>
@@ -484,7 +484,7 @@ export function DriveAccessCard({ profileId, driveDefault: initialDefault, rules
           const source = explicit ? 'Set here' : eff.level === 'default' ? `default: ${driveDefaultLabel(driveDefault)}` : `from ${eff.decidedBy?.name}`;
           const legacyOnly = (settings.get(node.id) ?? []).length > 0 && !(settings.get(node.id) ?? []).some(s => s.source === 'drive');
           return (
-            <div key={`${node.id}-${depth}`} className={`grid grid-cols-1 items-center gap-2 border-b border-border/60 px-5 py-2 xl:grid-cols-[minmax(0,1fr)_200px_250px] xl:gap-4 ${isResult ? 'min-h-[60px]' : 'min-h-[46px]'} ${explicit ? 'bg-muted/30' : 'bg-card'}`}>
+            <div key={`${node.id}-${depth}`} className={`grid grid-cols-1 items-center gap-2 border-b border-border/60 px-5 py-2 xl:grid-cols-[minmax(0,1fr)_220px_250px] xl:gap-4 ${isResult ? 'min-h-[60px]' : 'min-h-[46px]'} ${explicit ? 'bg-muted/30' : 'bg-card'}`}>
               <div className="flex min-w-0 items-start gap-2">
                 <span className="shrink-0" style={{ width: isResult || inFolder ? 0 : depth * 22 }} />
                 {container && !isResult && !inFolder ? (
@@ -496,9 +496,9 @@ export function DriveAccessCard({ profileId, driveDefault: initialDefault, rules
                 <span className="flex min-w-0 flex-col gap-0.5">
                   <span className="flex min-w-0 items-center gap-2">
                     {container ? (
-                      <button type="button" onClick={() => openFolder(node)} className={`truncate text-left text-[13px] font-semibold hover:underline ${dim ? 'text-subtle' : 'text-foreground'}`}>{node.name}</button>
+                      <button type="button" onClick={() => openFolder(node)} title={node.name} className={`truncate text-left text-[13px] font-semibold hover:underline ${dim ? 'text-subtle' : 'text-foreground'}`}>{node.name}</button>
                     ) : (
-                      <span className={`truncate text-[13px] font-medium ${dim ? 'text-subtle' : 'text-foreground'}`}>{node.name}</span>
+                      <span title={node.name} className={`truncate text-[13px] font-medium ${dim ? 'text-subtle' : 'text-foreground'}`}>{node.name}</span>
                     )}
                     {node.isShortcut && <span className="rounded-full bg-muted px-1.5 text-[10px] font-semibold text-muted-foreground">shortcut</span>}
                     {legacyOnly && <span className="rounded-full bg-muted px-1.5 text-[10px] font-semibold text-muted-foreground" title="Set by the Picker or an approval link before this profile had Drive access">per-file rule</span>}
@@ -515,11 +515,11 @@ export function DriveAccessCard({ profileId, driveDefault: initialDefault, rules
                   )}
                 </span>
               </div>
-              <div className="flex min-w-0 items-start gap-2 pl-[52px] xl:pl-0">
+              <div className="flex min-w-0 flex-col items-start gap-0.5 pl-[52px] xl:pl-0">
                 <Pill access={eff.access} explicit={explicit} />
-                <span className="flex min-w-0 items-start gap-1 text-xs text-muted-foreground">
+                <span className="flex min-w-0 max-w-full items-start gap-1 text-xs text-muted-foreground" title={source}>
                   {!explicit && <CornerLeftUp className="mt-0.5 h-3 w-3 shrink-0 text-subtle" />}
-                  <span className="line-clamp-2 break-words">{source}</span>
+                  <span className="min-w-0 break-words">{source}</span>
                 </span>
               </div>
               <div className="flex items-center gap-2.5 pl-[52px] xl:pl-0">
