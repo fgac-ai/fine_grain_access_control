@@ -251,6 +251,28 @@ tmux kill-session -t fgac-qa
   `next_offset` is null.
 - A8: fold into the Analytics Events queries below (same run window).
 
+## Capability: Temporary API Keys (→ capabilities/22_temporary_api_keys.md)
+
+- Fixtures per the capability doc: a ~2 MB attachment in USER_A's mailbox, and for A8 a
+  scratch profile + scratch connection (manual DCR token). Never revoke the baseline profile.
+- Mask minted keys in evidence (`sk_proxy_…<last4>`).
+- A1–A11: the tmux Claude Code session calls `create_temporary_api_key` and runs the proxy
+  requests with its Bash tool (instruct it to mask the key in output). Dashboard steps (A5, A7,
+  A8) run in the built-in browser.
+- A12: the **primary environment for this assertion** — a fresh tmux session, the prompt
+  verbatim, no hints. Grade on the transcript: mint call present, ≤ 2 proxy requests, hash
+  match, no key in the final reply.
+- A13: fold into the Analytics Events queries below (same run window), plus monitoring §7.34 (1)–(2).
+
+## Capability: Large File Transfer (→ capabilities/23_large_file_transfer.md)
+
+- Fixtures: generate `qa-out/big.bin` (8 MB random), a ~1 MB PNG, and a ~6 MB attachment.
+  `qa-out/` is gitignored scratch; delete it after the run. Hash every file sent and received.
+- A1–A8: drive through the tmux session's Bash tool, per the capability doc.
+- A9: the **primary environment** — a fresh session, the prompt verbatim. Grade on the
+  transcript and the proxy log (no 413s, chunk sizes ≤ 4 MB), plus USER_B's received hash.
+- A10: fold into the Analytics Events queries below, plus monitoring §7.34 (3).
+
 ---
 
 ## Capability: Analytics Events (→ capabilities/16_analytics_events.md)

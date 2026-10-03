@@ -105,3 +105,6 @@ test/qa-envs/hosted-mcp/playwright-auth.js
 docs/QA_Acceptance_Test/qa-results*.json
 qa-webhook-log.json
 qa-webhook-fail
+
+# QA runner scratch files (large-file transfer fixtures, capability 23)
+qa-out/
