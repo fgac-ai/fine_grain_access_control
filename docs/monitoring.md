@@ -3341,3 +3341,15 @@ sign-in and the OAuth consent page on fgac.ai (Clerk's `<OAuthConsent />`,
 Configure → Paths, and a `/sign-in` page), which moves the blind segment onto
 our Vercel logs and PostHog.
 
+**Alert (added 2026-10-03).** Insight `JuxnklA7` ("Directory connections,
+trailing 3 days, vs claude.ai connect attempts (7.33)") is a HogQL insight:
+per day, the trailing-3-day sum of `mcp_connection_created` and of claude.ai
+unauthenticated initializes at our 401 (the 7.5 attempt bound), production
+only. Its alert `01a1018c-a9eb-0000-7f02-9c3facedd0c4` checks hourly and
+fires when the last row's `connections_3d_given_attempts` is **below 2** —
+that column is the 3-day connection count when the 3-day attempt count is at
+least 24 (8/day, above probe noise; pre-gap attempts ran 9–20/day) and 99
+otherwise, so a quiet directory never pages. Pre-gap 3-day sums never fell
+below 11; the 2026-09-27 gap would have paged on 09-28 (1) instead of being
+noticed on 09-30. When it fires, run the steps above in order; a day of 0
+connections on its own is normal and does not trip it.
