@@ -63,7 +63,14 @@ by the nav UserButton's connect-account scopes (via `/api/drive/flag`).
 
 ## Assertions
 
-### A1: Flag off → legacy behaviour is byte-for-byte unchanged
+### A1: Flag off → legacy behaviour is unchanged (one deliberate, non-gated copy change)
+- Known and intended difference from the pre-branch build, for EVERY account:
+  the "Suggested wording to relay" line in linked denials now says what is being
+  approved — "FGAC needs your approval for spreadsheet <id> before I can
+  continue: <link> — …" (the file's title when the denial knows it) instead of
+  "FGAC is blocking this until you approve it here: <link> — …". Everything
+  else in the denial (header, link, signed-in-as line, IMPORTANT block) is
+  identical. Verified on the preview as USER_B, 2026-10-03.
 - Start the server with `fgac-dev` (flag unset). Load the Default Profile page;
   call `sheets_read_range` on `S-unpicked`.
 - **Expected**: The three per-kind cards render, no "Google Drive access"
