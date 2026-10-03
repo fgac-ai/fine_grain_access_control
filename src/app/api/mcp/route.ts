@@ -28,8 +28,7 @@ import { filterLiveDelegatedAccess } from '@/db/delegationQueries';
 import { delegateLinkPath } from '@/lib/secondAccount';
 import { clerkClient } from '@clerk/nextjs/server';
 import { resolveDbUser } from '@/db/userHelpers';
-import { loadApplicableRules, checkReadRestrictions, decodeB64Url, stripHtmlToText, type ApplicableRules } from '@/lib/gmailRules';
-import { compileRulePattern } from '@/lib/rulePatterns';
+import { loadApplicableRules, checkReadRestrictions, decodeB64Url, stripHtmlToText, checkSendWhitelist, type SendDenial } from '@/lib/gmailRules';
 import { captureServerEvent } from '@/lib/posthogServer';
 import { runWithToolCallProps, addToolCallProps, getToolCallProps, runWithRequestProps, getRequestProps, setDriveEngine, getDriveEngine, type DriveEngineContext } from '@/lib/toolCallContext';
 import { normalizeToolArguments, unknownArgumentKeys, describeArgumentFailure, rewriteValidationFailureBody, type AliasHit, type ZodIssueLike } from '@/lib/mcpArgumentGuidance';
@@ -52,7 +51,7 @@ import { mintApprovalLink, describeApproval, actionTarget, fileApprovalActionFor
 import { connectionsDeepLink } from '@/lib/dashboardAgentLinks';
 import { recordApprovalMint, getApprovalRequestResourceName } from '@/lib/approvalRequests';
 import {
-  AGENT_APPROVAL_PROTOCOL, SEND_DISABLED_MESSAGE, recipientNotWhitelistedMessage,
+  AGENT_APPROVAL_PROTOCOL,
   accountNotPermittedByCaller, accountNotPermittedByDefault, googleNotFoundMessage, crossMailboxHint, withNoLinkStop, withLinkUnavailableStop, LINK_UNAVAILABLE_STOP,
 } from '@/lib/denialCopy';
 import { TOOL_DEFS, toolAnnotations, type FgacToolDef } from './toolDefs';
@@ -659,49 +658,8 @@ async function getGoogleToken(
 // shared with the push-notification filter so read policy and notification
 // policy can never drift apart.
 
-/**
- * Send-whitelist enforcement shared by gmail_send and google_api_modify.
- * Every recipient must match a whitelist pattern; unknown recipients deny.
- * Returns a denial ({ message, deniedRecipient? }) or null if sending is
- * allowed. deniedRecipient feeds the magic approval link — absent when we
- * could not even parse who the mail was for (no link in that case).
- */
-type SendDenial = { message: string; deniedRecipient?: string; code: string };
-
-function checkSendWhitelist(rules: ApplicableRules, recipients: string[] | null): SendDenial | null {
-  const sendRules = rules.filter(r => r.service === 'gmail' && r.actionType === 'send_whitelist');
-
-  if (!recipients || recipients.length === 0) {
-    return { message: '🚫 Could not determine the message recipients, so sending was denied. Provide a standard RFC 2822 message with To/Cc/Bcc headers.', code: 'recipients_undetermined' };
-  }
-
-  if (sendRules.length === 0) {
-    return {
-      message: SEND_DISABLED_MESSAGE,
-      deniedRecipient: recipients[0],
-      code: 'send_disabled',
-    };
-  }
-
-  for (const recipient of recipients) {
-    let isWhitelisted = false;
-    for (const rule of sendRules) {
-      if (!rule.regexPattern) continue;
-      const regex = compileRulePattern(rule.regexPattern);
-      if (!regex) continue;
-      if (regex.test(recipient)) { isWhitelisted = true; break; }
-    }
-    if (!isWhitelisted) {
-      return {
-        message: recipientNotWhitelistedMessage(recipient),
-        deniedRecipient: recipient,
-        code: 'recipient_not_whitelisted',
-      };
-    }
-  }
-
-  return null;
-}
+// checkSendWhitelist moved to src/lib/gmailRules.ts — shared with the REST
+// proxy so both surfaces enforce one recipient policy.
 
 /**
  * Magic-link denial (connector-growth Phase C): policy denials that a user

@@ -311,7 +311,7 @@ export function classifyGoogleApiCall(rawPath: string, method: string): RawCallC
   // addressed) are content reads/writes on that file, so they inherit the
   // file's per-file rule instead of falling through to scope-only
   // passthrough — a read-only or blocked doc must not accept comment writes.
-  const commentsMatch = path.match(/^drive\/v3\/files\/([^/?#]+)\/comments(\/|$)/i);
+  const commentsMatch = path.match(/^drive\/v[23]\/files\/([^/?#]+)\/comments(\/|$)/i);
   if (commentsMatch) {
     return { kind: 'file_comments', fileId: decodeURIComponent(commentsMatch[1]), isMutating };
   }
@@ -326,11 +326,11 @@ export function classifyGoogleApiCall(rawPath: string, method: string): RawCallC
   // on the copy, then the copies renamed, shared and trashed — all
   // passthrough). Classifying them lets the route gate the copy on the
   // SOURCE file's rule and auto-grant the result like sheets_create does.
-  const copyMatch = path.match(/^drive\/v3\/files\/([^/?#]+)\/copy$/i);
+  const copyMatch = path.match(/^drive\/v[23]\/files\/([^/?#]+)\/copy$/i);
   if (copyMatch && isMutating) {
     return { kind: 'drive_copy', fileId: decodeURIComponent(copyMatch[1]) };
   }
-  if (/^drive\/v3\/files$/i.test(path.replace(/^upload\//i, '')) && isMutating) {
+  if (/^drive\/v[23]\/files$/i.test(path.replace(/^upload\//i, '')) && isMutating) {
     return { kind: 'drive_create' };
   }
 
@@ -348,7 +348,10 @@ export function classifyGoogleApiCall(rawPath: string, method: string): RawCallC
   // passthrough, as does listing (`GET drive/v3/files`, no id) — discovery is
   // never gated. `files/trash` (emptyTrash) is DELETE-only and never gets here.
   // `upload/drive/v3/files/{id}` (media content update) is the same file.
-  const fileMatch = path.replace(/^upload\//i, '').match(/^drive\/v3\/files\/([^/?#]+)(\/|$)/i);
+  // Drive v2 (`drive/v2/files/{id}`, still served by Google) is the same
+  // file too — the REST proxy's guard always matched v[23]; until 2026-10-03
+  // the classifier matched v3 only, so v2 calls rode scope-only passthrough.
+  const fileMatch = path.replace(/^upload\//i, '').match(/^drive\/v[23]\/files\/([^/?#]+)(\/|$)/i);
   if (fileMatch && fileMatch[1].toLowerCase() !== 'generateids') {
     return { kind: 'drive_file', fileId: decodeURIComponent(fileMatch[1]), isMutating };
   }
@@ -466,7 +469,16 @@ export function extractSendRecipients(body: unknown): string[] | null {
   } catch {
     return null;
   }
+  return extractRfc822Recipients(message);
+}
 
+/**
+ * To/Cc/Bcc addresses from a plain RFC 822 message — the `raw` field decoded,
+ * or the body of an `upload/…/messages/send?uploadType=media` request, which
+ * is the message itself (the REST proxy reads that form). Null when the
+ * header section names no recipient.
+ */
+export function extractRfc822Recipients(message: string): string[] | null {
   // Header section ends at the first blank line. Unfold continuation lines.
   const headerSection = message.split(/\r?\n\r?\n/)[0].replace(/\r?\n[ \t]+/g, ' ');
   const recipients: string[] = [];

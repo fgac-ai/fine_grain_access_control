@@ -1,12 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS } from '@/lib/driveFileKinds';
-import { driveFileKindForPath, extractDriveFileKindId, hasDotSegment } from '@/app/api/mcp/googleApiPolicy';
+import {
+  driveFileKindForPath, extractDriveFileKindId, hasDotSegment, classifyGoogleApiCall, canonicalizeGoogleApiPath,
+  extractSendRecipients, extractRfc822Recipients, extractDraftSendInfo,
+} from '@/app/api/mcp/googleApiPolicy';
 import { db } from '@/db';
 import { users, proxyKeys, emailDelegations, keyEmailAccess, accessRules, keyRuleAssignments } from '@/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { clerkClient } from '@clerk/nextjs/server';
-import { compileRulePattern } from '@/lib/rulePatterns';
-import { checkReadRestrictions } from '@/lib/gmailRules';
+import { checkReadRestrictions, checkSendWhitelist, loadApplicableRules, type SendDenial } from '@/lib/gmailRules';
 import { captureServerEvent } from '@/lib/posthogServer';
 import { GOOGLE_FETCH_TIMEOUT_MS, CLERK_TOKEN_TIMEOUT_MS, withTimeout, isUpstreamTimeout } from '@/lib/upstreamTimeouts';
 import { classifyClerkTokenError } from '@/lib/googleTokenFailure';
@@ -73,6 +75,8 @@ type ProxyTelemetry = {
   tokenMs?: number;
   /** Set when the upstream exchange failed before Google answered: 'timeout' | 'network'. */
   errorStatus?: string;
+  /** Machine-readable reason when FGAC refused the call before Google (classifier code). */
+  denialCode?: string;
 };
 
 /**
@@ -218,6 +222,7 @@ async function trackedProxyRequest(request: NextRequest, params: { path: string[
     google_ms: telemetry.googleMs,
     token_ms: telemetry.tokenMs,
     error_status: telemetry.errorStatus,
+    denial_code: telemetry.denialCode,
   });
 
   return response;
@@ -253,6 +258,93 @@ function applicableFileRules(
   });
 }
 
+/**
+ * A pre-flight refusal: nothing was sent to Google. The classifier's reason
+ * text is shared with the MCP tools; the REST surface drops the MCP outcome
+ * emoji prefix (same convention as the read-restriction denial below).
+ */
+function denied(telemetry: ProxyTelemetry, code: string, reason: string): NextResponse {
+  telemetry.denialCode = code;
+  return NextResponse.json({ error: reason.replace(/^(?:🚫|❌)\s*/u, ''), code }, { status: 403 });
+}
+
+/** Send-whitelist refusal in the REST proxy's long-standing wording (the MCP
+ * copy points at approval links this surface does not mint). */
+function sendDenied(telemetry: ProxyTelemetry, denial: SendDenial): NextResponse {
+  const r = denial.deniedRecipient;
+  const reason = denial.code === 'send_disabled' && r
+    ? `Unauthorized email address. Please ask your user to add '${r}' to the sending whitelist. Default access is DENIED.`
+    : denial.code === 'recipient_not_whitelisted' && r
+      ? `Unauthorized email address. Please ask your user to add '${r}' to the sending whitelist.`
+      : denial.code === 'recipients_undetermined' && denial.message.includes('RFC 2822')
+        ? 'Could not determine the message recipients, so sending was denied. Send a JSON body {"raw": "<base64url RFC 2822 message>"} ' +
+          '(or the RFC 822 message itself on upload/…?uploadType=media) with To/Cc/Bcc headers.'
+        : denial.message;
+  return denied(telemetry, denial.code, reason);
+}
+
+/**
+ * Recipients of a messages/send request: a JSON `{raw}` body, or — on the
+ * `upload/` media form — the RFC 822 message itself. Null (→ refused) for
+ * anything else, including multipart and resumable uploads.
+ */
+async function sendRecipientsFromRequest(request: NextRequest): Promise<string[] | null> {
+  const text = await request.clone().text();
+  const contentType = (request.headers.get('content-type') || '').toLowerCase();
+  if (contentType.includes('json') || /^\s*\{/.test(text)) return extractSendRecipients(text);
+  if (contentType.startsWith('message/rfc822')) return extractRfc822Recipients(text);
+  return null;
+}
+
+/**
+ * Forward a Drive call (already authorized above) on the key owner's own
+ * token — Drive files, like Sheets/Docs/Slides, are only ever the owner's;
+ * there is no delegated-mailbox path for them. The path is canonicalized so
+ * the bare `v3/files/…` spelling the classifier accepts reaches Drive.
+ */
+async function forwardDriveCall(
+  request: NextRequest, fullPath: string, owner: { clerkUserId: string; email: string }, telemetry: ProxyTelemetry,
+  driveTree: ProxyDriveTree | null = null,
+): Promise<NextResponse> {
+  telemetry.targetEmail = owner.email;
+  telemetry.accountDelegated = false;
+  // The Drive tree engine already holds the owner's token.
+  const realGoogleToken = driveTree?.token ?? await fetchClerkGoogleToken(owner.clerkUserId, owner.clerkUserId, telemetry);
+  if (!realGoogleToken) {
+    return NextResponse.json({
+      error: `Could not fetch Google access token for user '${owner.email}'. Please reconnect your Google account.`
+    }, { status: 403 });
+  }
+  const headers = new Headers(request.headers);
+  headers.set('Authorization', `Bearer ${realGoogleToken.token}`);
+  headers.delete('host');
+  const isMutating = request.method !== 'GET' && request.method !== 'HEAD';
+  const canonicalPath = canonicalizeGoogleApiPath(fullPath);
+  // Drive tree engine: a Drive listing is forwarded with a fields mask wide
+  // enough to resolve each file's lineage, then filtered below.
+  const filterListing = !!driveTree && request.method === 'GET' && isDriveListPath(canonicalPath);
+  let search = request.nextUrl.search;
+  if (filterListing) {
+    const urlParams = new URLSearchParams(request.nextUrl.searchParams);
+    const widened = widenListFields(urlParams.get('fields'));
+    if (widened !== undefined) urlParams.set('fields', widened);
+    search = urlParams.toString() ? `?${urlParams.toString()}` : '';
+  }
+  const forward = await forwardToGoogle(
+    `https://www.googleapis.com/${canonicalPath}${search}`,
+    { method: request.method, headers, body: isMutating ? await request.clone().arrayBuffer() : undefined },
+    telemetry,
+  );
+  if (!forward.ok) return forward.response;
+  if (filterListing && driveTree && forward.status === 200 && forward.headers.get('content-type')?.includes('application/json')) {
+    const filtered = await proxyFilterDriveListing(driveTree, forward.body);
+    const responseHeaders = new Headers(forward.headers);
+    responseHeaders.delete('content-encoding');
+    responseHeaders.delete('content-length');
+    return new NextResponse(filtered, { status: 200, headers: responseHeaders });
+  }
+  return passthroughResponse(forward);
+}
 
 // ─── DRIVE TREE ENGINE (feature-flagged folder-inherited access) ─────────────
 // Mirror of the MCP route's engine (src/lib/driveTreeAccess.ts): with the
@@ -409,68 +501,95 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     telemetry.proxyKeyId = dbKey.id;
     telemetry.clerkUserId = dbUser.clerkUserId;
 
+    // ─── CLASSIFY (shared policy with the MCP raw tools) ──────────────────────
+    // One classifier for both surfaces (googleApiPolicy.ts), so the REST proxy
+    // and google_api_get/modify agree on what a path IS: `upload/` media
+    // variants classify as their non-upload twins, `batch/` multiplexers and
+    // DELETE are refused, never-can-work families are refused. Until
+    // 2026-10-03 this route dispatched on its own anchored regexes, and
+    // everything they missed — `upload/drive/v3/files/{id}`, calendar, batch —
+    // fell into the Gmail branch and was forwarded with the owner's token.
+    const cls = classifyGoogleApiCall(fullPath, request.method);
+    if (cls.kind === 'denied') return denied(telemetry, cls.code, cls.reason);
+    // REST is deny-by-default for families FGAC does not enforce (the MCP tools
+    // classify-and-pass them; this surface never has). Drive discovery reads —
+    // listing, about, generateIds — stay open: never override Google's native
+    // discovery (under drive.file a listing only shows app-granted files).
+    if (cls.kind === 'passthrough' && !(cls.family.startsWith('drive/') && !cls.isMutating)) {
+      return denied(telemetry, 'raw_api_family_unsupported',
+        `This Google API path is not available through the FGAC REST proxy. Supported: Gmail (gmail/v1/…), ` +
+        `Sheets, Docs, and Slides files exposed in FGAC rules, and Drive calls on those files (drive/v3/files/{id}).`);
+    }
+
     // Drive tree engine (null unless the flag is on for this owner, the path
     // is a Drive/Sheets/Docs/Slides path, and the live token carries `drive`).
-    const driveTree = await proxyDriveTreeEngine(dbUser, dbKey.id, fullPath, telemetry);
+    // `upload/` media variants address the same files as their twins.
+    const driveTree = await proxyDriveTreeEngine(
+      dbUser, dbKey.id, canonicalizeGoogleApiPath(fullPath).replace(/^upload\//, ''), telemetry,
+    );
 
     // ─── GOOGLE DRIVE PER-FILE ACCESS GUARD ──────────────────────────────────
     // Policy: never override Google's native API behavior for discovery —
-    // listing (`drive/v3/files`) passes through untouched (under drive.file it
-    // naturally shows only app-granted files; agents discover FGAC-exposed
-    // sheet ids via get_my_permissions). But ACCESS to a specific file must
-    // respect the same sheets rules as the Sheets API, or drive get/export
-    // would be a bypass around them.
-    {
-      const driveFileMatch = fullPath.match(/^drive\/v[23]\/files\/([^/?]+)/);
-      if (driveFileMatch && driveFileMatch[1] !== 'generateIds' && driveTree) {
-        const fileId = decodeURIComponent(driveFileMatch[1]);
-        const isMutating = request.method !== 'GET' && request.method !== 'HEAD';
-        const denied = await proxyDriveTreeDenial(driveTree, fileId, isMutating, telemetry);
-        if (denied) return denied;
-        // Permitted — falls through to the generic Google passthrough below.
-      } else if (driveFileMatch && driveFileMatch[1] !== 'generateIds') {
-        const fileId = decodeURIComponent(driveFileMatch[1]);
+    // listing passes through (above; filtered by the tree engine when on). But ACCESS to a specific file
+    // (metadata, media get/update incl. `upload/`, export, comments, copy)
+    // must respect the same per-file rules as the Sheets/Docs/Slides APIs, or
+    // Drive would be a bypass around them.
+    if ((cls.kind === 'drive_file' || cls.kind === 'file_comments' || cls.kind === 'drive_copy') && driveTree) {
+      const isMutating = cls.kind === 'drive_copy' || cls.isMutating;
+      const treeDenial = await proxyDriveTreeDenial(driveTree, cls.fileId, isMutating, telemetry);
+      if (treeDenial) return treeDenial;
+      return forwardDriveCall(request, fullPath, dbUser, telemetry, driveTree);
+    }
+    if (cls.kind === 'drive_file' || cls.kind === 'file_comments' || cls.kind === 'drive_copy') {
+      const fileId = cls.fileId;
+      const allUserRules = await db
+        .select()
+        .from(accessRules)
+        .where(eq(accessRules.userId, dbUser.id));
 
-        const allUserRules = await db
-          .select()
-          .from(accessRules)
-          .where(eq(accessRules.userId, dbUser.id));
+      const keyAssignments = await db
+        .select()
+        .from(keyRuleAssignments)
+        .where(eq(keyRuleAssignments.proxyKeyId, dbKey.id));
 
-        const keyAssignments = await db
-          .select()
-          .from(keyRuleAssignments)
-          .where(eq(keyRuleAssignments.proxyKeyId, dbKey.id));
+      const assignedRuleIds = new Set(keyAssignments.map(a => a.accessRuleId));
+      const allAssignments = await db.select().from(keyRuleAssignments);
+      const rulesWithAssignments = new Set(allAssignments.map(a => a.accessRuleId));
 
-        const assignedRuleIds = new Set(keyAssignments.map(a => a.accessRuleId));
-        const allAssignments = await db.select().from(keyRuleAssignments);
-        const rulesWithAssignments = new Set(allAssignments.map(a => a.accessRuleId));
+      // A Drive file may be exposed as a spreadsheet, a document, or a
+      // presentation — any kind's rule authorizes it; a block on any denies it.
+      const fileRules = ACTIVE_DRIVE_FILE_KINDS.flatMap(k =>
+        applicableFileRules(allUserRules, rulesWithAssignments, assignedRuleIds, DRIVE_FILE_KINDS[k].service, fileId),
+      );
+      const blockTypes = new Set(ACTIVE_DRIVE_FILE_KINDS.map(k => DRIVE_FILE_KINDS[k].actionTypes.block));
+      const readWriteTypes = new Set(ACTIVE_DRIVE_FILE_KINDS.map(k => DRIVE_FILE_KINDS[k].actionTypes.readWrite));
 
-        // A Drive file may be exposed as a spreadsheet, a document, or a
-        // presentation — any kind's rule authorizes it; a block on any denies it.
-        const fileRules = ACTIVE_DRIVE_FILE_KINDS.flatMap(k =>
-          applicableFileRules(allUserRules, rulesWithAssignments, assignedRuleIds, DRIVE_FILE_KINDS[k].service, fileId),
-        );
-        const blockTypes = new Set(ACTIVE_DRIVE_FILE_KINDS.map(k => DRIVE_FILE_KINDS[k].actionTypes.block));
-        const readWriteTypes = new Set(ACTIVE_DRIVE_FILE_KINDS.map(k => DRIVE_FILE_KINDS[k].actionTypes.readWrite));
-
-        if (fileRules.length === 0) {
-          return NextResponse.json({
-            error: `Access Denied: File '${fileId}' is not exposed in FGAC rules for this API key.`
-          }, { status: 403 });
-        }
-        if (fileRules.some(r => blockTypes.has(r.actionType))) {
-          return NextResponse.json({
-            error: `Access Denied: Access to file '${fileId}' has been explicitly blocked.`
-          }, { status: 403 });
-        }
-        const isMutating = request.method !== 'GET' && request.method !== 'HEAD';
-        if (isMutating && !fileRules.some(r => readWriteTypes.has(r.actionType))) {
-          return NextResponse.json({
-            error: `Access Denied: Write operations on file '${fileId}' are restricted to Read-Only.`
-          }, { status: 403 });
-        }
-        // Permitted — falls through to the generic Google passthrough below.
+      if (fileRules.length === 0) {
+        return NextResponse.json({
+          error: `Access Denied: File '${fileId}' is not exposed in FGAC rules for this API key.`
+        }, { status: 403 });
       }
+      if (fileRules.some(r => blockTypes.has(r.actionType))) {
+        return NextResponse.json({
+          error: `Access Denied: Access to file '${fileId}' has been explicitly blocked.`
+        }, { status: 403 });
+      }
+      // A copy creates a file from this one; the REST proxy has always
+      // required Read & Write for it (it was a mutating POST to the file).
+      const isMutating = cls.kind === 'drive_copy' || cls.isMutating;
+      if (isMutating && !fileRules.some(r => readWriteTypes.has(r.actionType))) {
+        return NextResponse.json({
+          error: `Access Denied: Write operations on file '${fileId}' are restricted to Read-Only.`
+        }, { status: 403 });
+      }
+      return forwardDriveCall(request, fullPath, dbUser, telemetry);
+    }
+
+    // Drive discovery reads and Drive-side creates (POST drive/v3/files, incl.
+    // the `upload/` variant): the new file is app-owned, so no existing file
+    // is reachable through them.
+    if (cls.kind === 'passthrough' || cls.kind === 'drive_create') {
+      return forwardDriveCall(request, fullPath, dbUser, telemetry, driveTree);
     }
 
     // ─── PER-FILE PROXY HANDLER (Sheets / Docs / Slides) ─────────────────────
@@ -481,8 +600,8 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     // so the REST proxy and google_api_get/modify accept exactly the same
     // spellings (`v4/spreadsheets/{id}`, `docs/v1/documents/{id}`, bare
     // `presentations/{id}`) and disagree on none.
-    const fileKind = driveFileKindForPath(fullPath);
-    if (fileKind) {
+    if (cls.kind === 'file' || cls.kind === 'file_create') {
+      const fileKind = cls.fileKind;
       const d = DRIVE_FILE_KINDS[fileKind];
       telemetry.targetEmail = dbUser.email;
       telemetry.accountDelegated = false;
@@ -493,8 +612,8 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
 
       const isMutatingRequest = request.method !== 'GET' && request.method !== 'HEAD';
       if (driveTree) {
-        const denied = await proxyDriveTreeDenial(driveTree, fileId, isMutatingRequest, telemetry);
-        if (denied) return denied;
+        const treeDenial = await proxyDriveTreeDenial(driveTree, fileId, isMutatingRequest, telemetry);
+        if (treeDenial) return treeDenial;
       } else {
       const allUserRules = await db
         .select()
@@ -572,6 +691,11 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     }
 
     // ─── 2. Resolve Target Email (Gmail Proxy Handler) ───────────────────────────
+    // Only Gmail classes remain: every other kind returned above. Assert it so
+    // a new RawCallClass kind can never fall into this branch by default again.
+    if (cls.kind !== 'gmail_read' && cls.kind !== 'gmail_write' && cls.kind !== 'gmail_send' && cls.kind !== 'gmail_draft_send') {
+      return denied(telemetry, 'raw_api_family_unsupported', 'This Google API path is not available through the FGAC REST proxy.');
+    }
     const gmailUserId = extractGmailUserId(fullPath);
 
     // Resolve 'me' to the key owner's primary email, or use the specific email from the path
@@ -637,84 +761,20 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     }
 
     // ─── 4. Load Applicable Rules ───────────────────────────────────────────
-    const allUserRules = await db
-      .select()
-      .from(accessRules)
-      .where(eq(accessRules.userId, dbUser.id));
-
-    const keyAssignments = await db
-      .select()
-      .from(keyRuleAssignments)
-      .where(eq(keyRuleAssignments.proxyKeyId, dbKey.id));
-
-    const assignedRuleIds = new Set(keyAssignments.map(a => a.accessRuleId));
-
-    const allAssignments = await db.select().from(keyRuleAssignments);
-    const rulesWithAssignments = new Set(allAssignments.map(a => a.accessRuleId));
-
-    const applicableRules = allUserRules.filter(rule => {
-      const isGlobal = !rulesWithAssignments.has(rule.id);
-      const isAssignedToThisKey = assignedRuleIds.has(rule.id);
-      const emailMatches = !rule.targetEmail ||
-        rule.targetEmail.toLowerCase() === targetEmail.toLowerCase();
-      return (isGlobal || isAssignedToThisKey) && emailMatches;
-    });
+    const applicableRules = await loadApplicableRules(dbUser.id, dbKey.id, targetEmail);
 
     // ─── 5. Evaluate Send / Outbound Rules ──────────────────────────────────
-    if (request.method === 'POST' && fullPath.includes('messages/send')) {
-      const body = await request.clone().json().catch(() => ({}));
-
-      let toAddress = null;
-      if (body.raw) {
-        try {
-          const decoded = Buffer.from(body.raw, 'base64url').toString('utf8');
-          const toMatch = decoded.match(/^To:\s*(.+)$/im);
-          if (toMatch) {
-            toAddress = toMatch[1].trim();
-          }
-        } catch {
-          // Ignore decode errors
-        }
-      }
-
-      if (toAddress) {
-        const sendRules = applicableRules.filter(r => r.service === 'gmail' && r.actionType === 'send_whitelist');
-
-        if (sendRules.length > 0) {
-          let isWhitelisted = false;
-          for (const rule of sendRules) {
-            if (!rule.regexPattern) continue;
-            const regex = compileRulePattern(rule.regexPattern);
-            if (!regex) {
-              console.error(`Skipping unusable pattern on rule '${rule.ruleName}'`);
-              continue;
-            }
-            if (regex.test(toAddress)) {
-              isWhitelisted = true;
-              break;
-            }
-          }
-          if (!isWhitelisted) {
-            return NextResponse.json({
-              error: `Unauthorized email address. Please ask your user to add '${toAddress}' to the sending whitelist.`
-            }, { status: 403 });
-          }
-        } else {
-          return NextResponse.json({
-            error: `Unauthorized email address. Please ask your user to add '${toAddress}' to the sending whitelist. Default access is DENIED.`
-          }, { status: 403 });
-        }
-      }
+    // Same recipient policy as the MCP tools (checkSendWhitelist): EVERY
+    // To/Cc/Bcc address must be whitelisted, and a message whose recipients
+    // cannot be determined is refused — never forwarded blind. The body may be
+    // a JSON `{raw}` or, on `upload/…?uploadType=media`, the RFC 822 message.
+    if (cls.kind === 'gmail_send') {
+      const denial = checkSendWhitelist(applicableRules, await sendRecipientsFromRequest(request));
+      if (denial) return sendDenied(telemetry, denial);
     }
 
-    // ─── 6. Evaluate Deletion Rules ─────────────────────────────────────────
-    if (request.method === 'DELETE') {
-      if (fullPath.includes('messages/trash') || fullPath.includes('emptyTrash')) {
-        return NextResponse.json({
-          error: "Action Denied: Global safeguard prevents permanent deletion of all emails."
-        }, { status: 403 });
-      }
-    }
+    // DELETE never reaches this point: the classifier refuses it (deletion is
+    // a product guarantee on every surface).
 
     // ─── 7. Resolve the token owner's Clerk user ID ─────────────────────────
     // If the target email is the key owner's own email, use their Clerk ID.
@@ -783,6 +843,33 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
       }, { status: 403 });
     }
 
+    // ─── 8a. drafts/send: resolve the STORED draft's recipients ─────────────
+    // drafts/send delivers mail, so it rides the same whitelist as
+    // messages/send — but the recipients live in the draft. Fetch it
+    // (format=raw) and union with any inline message.raw; anything
+    // unresolvable is refused (mirror of the MCP gmail_draft_send branch).
+    if (cls.kind === 'gmail_draft_send') {
+      const bodyText = await request.clone().text();
+      const { draftId, bodyRecipients } = extractDraftSendInfo(bodyText);
+      if (!draftId) {
+        return sendDenied(telemetry, { code: 'recipients_undetermined', message: 'Could not determine which draft to send. Provide the draft id in a JSON body: {"id": "<draftId>"}.' });
+      }
+      const draftPath = canonicalizeGoogleApiPath(fullPath).replace(/^upload\//i, '').replace(/\/send$/i, `/${encodeURIComponent(draftId)}`);
+      const draft = await forwardToGoogle(`https://www.googleapis.com/${draftPath}?format=raw`, {
+        method: 'GET',
+        headers: new Headers({ Authorization: `Bearer ${realGoogleToken.token}` }),
+      }, telemetry);
+      if (!draft.ok) return draft.response;
+      let draftRaw: unknown;
+      try { draftRaw = (JSON.parse(draft.body) as { message?: { raw?: unknown } })?.message?.raw; } catch { /* not JSON */ }
+      if (draft.status >= 400 || typeof draftRaw !== 'string') {
+        return sendDenied(telemetry, { code: 'recipients_undetermined', message: `The draft could not be fetched to verify its recipients (Google answered ${draft.status}). Nothing was sent.` });
+      }
+      const recipients = [...new Set([...(extractSendRecipients({ raw: draftRaw }) ?? []), ...(bodyRecipients ?? [])])];
+      const denial = checkSendWhitelist(applicableRules, recipients.length > 0 ? recipients : null);
+      if (denial) return sendDenied(telemetry, denial);
+    }
+
     // ─── 8. Forward to Google ───────────────────────────────────────────────
     // For list queries, inject label filtering if rules exist
     let finalQueryString = request.nextUrl.search;
@@ -805,16 +892,6 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
       if (existingQ.trim() !== '') {
         urlParams.set('q', existingQ.trim());
       }
-      finalQueryString = urlParams.toString() ? `?${urlParams.toString()}` : '';
-    }
-
-    // Drive tree engine: a Drive listing is forwarded with a fields mask wide
-    // enough to resolve each file's lineage, then filtered below.
-    const filterListing = !!driveTree && request.method === 'GET' && isDriveListPath(fullPath);
-    if (filterListing) {
-      const urlParams = new URLSearchParams(request.nextUrl.searchParams);
-      const widened = widenListFields(urlParams.get('fields'));
-      if (widened !== undefined) urlParams.set('fields', widened);
       finalQueryString = urlParams.toString() ? `?${urlParams.toString()}` : '';
     }
 
@@ -844,7 +921,7 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     // every Gmail GET — not just messages/* — because thread (and draft)
     // reads return the same message content and previously bypassed rules on
     // this path while the MCP path checked them.
-    if (request.method === 'GET' && fullPath.startsWith('gmail/') && isJson) {
+    if (cls.kind === 'gmail_read' && isJson) {
       let parsedBody: unknown = null;
       try { parsedBody = JSON.parse(returnBody); } catch { /* not JSON */ }
       const restriction = checkReadRestrictions(applicableRules, parsedBody ?? returnBody);
@@ -854,14 +931,6 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
         // classification emoji prefix.
         return NextResponse.json({ error: restriction.replace(/^🚫 /u, '') }, { status: 403 });
       }
-    }
-
-    if (filterListing && driveTree && forward.status === 200 && isJson) {
-      const filtered = await proxyFilterDriveListing(driveTree, returnBody);
-      const responseHeaders = new Headers(forward.headers);
-      responseHeaders.delete('content-encoding');
-      responseHeaders.delete('content-length');
-      return new NextResponse(filtered, { status: 200, headers: responseHeaders });
     }
 
     return passthroughResponse(forward);
