@@ -34,6 +34,7 @@ const READERS = new Set([
   'src/app/dashboard/googleReconnect.ts',// exports the constant; default request stays drive.file
   'src/lib/driveTreeServer.ts',          // Drive routes require the scope on the token
   'src/app/api/proxy/[...path]/route.ts',// engine gate reads the live token
+  'src/app/dashboard/accounts/ReconnectGoogleButton.tsx', // post-reconnect verify treats a full-Drive token as satisfying drive.file; requests drive.file only
 ]);
 /** Files allowed to REQUEST it — each must be flag-gated (asserted below). */
 const REQUESTERS = new Set([
@@ -54,6 +55,9 @@ function walk(dir: string, out: string[] = []): string[] {
 const files = walk(ROOT);
 const rel = (p: string) => p.slice(join(__dirname, '..').length + 1);
 const namesFullScope = (src: string) => src.includes(`'${FULL_SCOPE}'`) || src.includes(`"${FULL_SCOPE}"`) || src.includes(SYMBOL);
+/** A line that mentions the scope only to READ it (compare / includes / define / import / comment). */
+const READ_LINE = [/\.includes\(/, /===/, /^\s*(export )?const DRIVE_FULL_SCOPE/, /^\s*import /, /^\s*\*/, /^\s*\/\//, /^\s*[^,]*, type /];
+const scopeLines = (src: string) => src.split('\n').filter(l => l.includes(FULL_SCOPE) || l.includes(SYMBOL));
 
 console.log('full Drive scope: who may name it, who may request it');
 for (const file of files) {
@@ -63,13 +67,19 @@ for (const file of files) {
   const allowed = READERS.has(r) || REQUESTERS.has(r);
   check(`${r} is on the allowlist`, allowed, 'a new file names the full Drive scope: read-only inspection goes in READERS, a request site must be flag-gated and listed in REQUESTERS');
   if (!allowed) continue;
-  const requests = REQUEST_MARKERS.some(m => src.includes(m));
   if (READERS.has(r)) {
+    // A reader may also REQUEST scopes (the Accounts reconnect button does),
+    // but every line that names the full scope must be a read: a compare,
+    // an includes(), the constant's definition, an import or a comment —
+    // never an argument list handed to a Google authorization.
+    const offending = scopeLines(src).filter(l => !READ_LINE.some(re => re.test(l)));
+    check(`${r} only reads the scope`, offending.length === 0, offending.map(l => l.trim()).join(' | '));
     // googleReconnect.ts defines the request helper; it must not default to the full scope.
     if (r === 'src/app/dashboard/googleReconnect.ts') {
       check('googleReconnect default additionalScopes is drive.file, not the full scope', src.includes('additionalScopes: string[] = [DRIVE_FILE_SCOPE]'));
-    } else {
-      check(`${r} only reads the scope (no request marker)`, !requests);
+    }
+    if (r === 'src/app/dashboard/accounts/ReconnectGoogleButton.tsx') {
+      check('ReconnectGoogleButton requests gmail + drive.file only', src.includes('[GMAIL_MODIFY_SCOPE, DRIVE_FILE_SCOPE]') && !REQUEST_MARKERS.some(m => scopeLines(src).some(l => l.includes(m))));
     }
   }
 }
@@ -93,7 +103,7 @@ const enable = readFileSync(join(ROOT, 'app/dashboard/EnableDriveAccessCard.tsx'
 check('EnableDriveAccessCard requests gmail + full drive with a consent prompt (refresh token)', enable.includes('[GMAIL_MODIFY_SCOPE, DRIVE_FULL_SCOPE]') && enable.includes("'consent'"));
 
 console.log('the legacy request sites stay on drive.file');
-for (const legacy of ['app/dashboard/ConnectGoogleWarning.tsx', 'app/dashboard/accounts/ReconnectGoogleButton.tsx', 'app/dashboard/useGooglePicker.ts']) {
+for (const legacy of ['app/dashboard/ConnectGoogleWarning.tsx', 'app/dashboard/useGooglePicker.ts']) {
   const src = readFileSync(join(ROOT, legacy), 'utf8');
   check(`${legacy} never names the full scope`, !namesFullScope(src));
 }
