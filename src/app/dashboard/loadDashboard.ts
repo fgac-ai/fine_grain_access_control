@@ -73,6 +73,8 @@ export async function loadDashboardData(): Promise<DashboardData | null> {
 
   const googleAccess = await checkGoogleAccess(user);
   const hasCompleteGoogleAccess = googleAccess.gmail && googleAccess.driveFile;
+  // Drive tree feature flag (PostHog, cached; env override for local dev).
+  const driveTreeFlag = await driveTreeFlagOn({ clerkUserId: user.id, email: currentEmail });
 
   // ─── Emails this user can build profiles against ─────────────────────────
   // Resolved by email rather than user row id: duplicate `users` rows for one
@@ -143,7 +145,7 @@ export async function loadDashboardData(): Promise<DashboardData | null> {
     googleAccess, needsDriveFile, lastSignInAt: user.lastSignInAt, userId: dbUser.id, clerkUserId: user.id,
     email: dbUser.email, accountCreatedAt: dbUser.createdAt,
     driveTree: {
-      flagOn: driveTreeFlagOn({ clerkUserId: user.id, email: currentEmail }),
+      flagOn: driveTreeFlag,
       hasFullScope: googleAccess.driveFull,
     },
   };

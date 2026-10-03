@@ -9,5 +9,5 @@ export const dynamic = 'force-dynamic';
 export async function GET() {
   const user = await currentUser();
   if (!user) return NextResponse.json({ flagOn: false }, { status: 401 });
-  return NextResponse.json({ flagOn: driveTreeFlagOn({ clerkUserId: user.id, email: clerkPrimaryEmail(user) }) });
+  return NextResponse.json({ flagOn: await driveTreeFlagOn({ clerkUserId: user.id, email: clerkPrimaryEmail(user) }) });
 }

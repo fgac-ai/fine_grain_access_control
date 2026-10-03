@@ -280,7 +280,7 @@ async function proxyDriveTreeEngine(
 ): Promise<ProxyDriveTree | null> {
   const drivePath = /^drive\/v[23]\/files/.test(fullPath) || !!driveFileKindForPath(fullPath);
   if (!drivePath) return null;
-  if (!driveTreeFlagOn({ clerkUserId: dbUser.clerkUserId, email: dbUser.email })) return null;
+  if (!(await driveTreeFlagOn({ clerkUserId: dbUser.clerkUserId, email: dbUser.email }))) return null;
   const token = await fetchClerkGoogleToken(dbUser.clerkUserId, dbUser.clerkUserId, telemetry);
   if (!token) return null;
   const scopes = await liveTokenScopes(token.token);

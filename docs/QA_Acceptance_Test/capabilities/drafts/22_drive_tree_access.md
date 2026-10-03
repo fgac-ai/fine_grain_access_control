@@ -24,9 +24,13 @@ agent-created files) are honoured as file-level settings.
 
 ## Feature flag and per-user gate
 Two conditions must BOTH hold for the engine to apply to a call:
-* `FGAC_DRIVE_TREE=1` (everyone) or the user in `FGAC_DRIVE_TREE_USERS`
-  (Clerk ids and/or emails). Locally: the `fgac-dev-drive-tree` launch
-  configuration sets `FGAC_DRIVE_TREE=1`.
+* The PostHog feature flag `drive_tree` is on for the user (a release
+  condition on the person property `email`, or on the Clerk id as distinct
+  id). People are added and removed in PostHog, no deploy; the verdict is
+  cached per user for 60 s and fails closed. Env overrides for local dev and
+  CI only: `FGAC_DRIVE_TREE=1` (everyone) or `FGAC_DRIVE_TREE_USERS` (Clerk
+  ids and/or emails) — the `fgac-dev-drive-tree` launch configuration sets
+  the first, so local QA never depends on PostHog.
 * The calling user's live Google token carries
   `https://www.googleapis.com/auth/drive` (tokeninfo decides, never Clerk's
   record).

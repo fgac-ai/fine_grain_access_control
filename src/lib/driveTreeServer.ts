@@ -25,7 +25,7 @@ export type DriveTreeSession = { clerkUserId: string; token: string };
 export async function requireDriveTreeSession(): Promise<DriveTreeSession | NextResponse> {
   const user = await currentUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  if (!driveTreeFlagOn({ clerkUserId: user.id, email: clerkPrimaryEmail(user) })) {
+  if (!(await driveTreeFlagOn({ clerkUserId: user.id, email: clerkPrimaryEmail(user) }))) {
     return NextResponse.json({ error: 'Not found' }, { status: 404 });
   }
   const client = await clerkClient();

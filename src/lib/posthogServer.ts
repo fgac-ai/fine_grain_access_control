@@ -11,6 +11,12 @@ function getClient(): PostHog | null {
   return client;
 }
 
+/** The shared server client (null when PostHog is not configured) — feature
+ * flag evaluation (src/lib/featureFlags.ts) rides the same instance. */
+export function posthogClient(): PostHog | null {
+  return getClient();
+}
+
 /**
  * Fire-and-forget server-side PostHog capture. Pass the Clerk user id as
  * distinctId whenever one is known — the dashboard identifies with the same id,

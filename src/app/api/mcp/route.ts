@@ -1640,7 +1640,7 @@ async function driveDefaultsForPermissions(conn: ConnectionApproved): Promise<Re
     const d = DRIVE_FILE_KINDS[k];
     return [d.service, `DENIED unless a per-${d.noun} rule below exposes the ${d.shortNoun}`];
   }));
-  if (!conn.proxyKeyId || !driveTreeFlagOn({ clerkUserId: conn.user.clerkUserId, email: conn.user.email })) return legacy;
+  if (!conn.proxyKeyId || !(await driveTreeFlagOn({ clerkUserId: conn.user.clerkUserId, email: conn.user.email }))) return legacy;
   const token = await getGoogleToken(conn.user.email, conn.user, { quiet: true });
   if ('failure' in token || token.hasDriveFullScope !== true) return legacy;
   const { driveDefault, settings } = await loadDriveTreeSettings(conn.user.id, conn.proxyKeyId);
@@ -2311,7 +2311,7 @@ async function resolveAccountAndToken(
   // `drive` scope. Delegated mailboxes stay on the per-file path — the tree
   // the owner configured is their own Drive. Stored on its own ALS store so
   // the token never rides into the analytics bag.
-  const driveTreeFlag = driveTreeFlagOn({ clerkUserId: conn.user.clerkUserId, email: conn.user.email });
+  const driveTreeFlag = await driveTreeFlagOn({ clerkUserId: conn.user.clerkUserId, email: conn.user.email });
   const driveTreeActive = driveTreeFlag && targetEmail.toLowerCase() === conn.user.email.toLowerCase() && googleToken.hasDriveFullScope === true;
   setDriveEngine({
     active: driveTreeActive, flagOn: driveTreeFlag, hasDriveFullScope: googleToken.hasDriveFullScope === true,
