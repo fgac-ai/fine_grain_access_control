@@ -28,15 +28,10 @@ const SECTIONS = [
   { id: 'information-we-collect', title: '3. Information we collect' },
   { id: 'how-we-use', title: '4. How we use information' },
   { id: 'ai-agents', title: '5. AI agents and MCP clients you connect' },
-  { id: 'delegated-access', title: '6. Delegated access to another person’s mailbox' },
-  { id: 'service-emails', title: '7. Emails FGAC sends you' },
-  { id: 'sharing', title: '8. Sharing and service providers' },
-  { id: 'security', title: '9. Security' },
-  { id: 'retention', title: '10. Retention and deletion' },
-  { id: 'your-rights', title: '11. Your rights and choices' },
-  { id: 'children', title: '12. Children' },
-  { id: 'changes', title: '13. Changes to this policy' },
-  { id: 'contact', title: '14. Contact' },
+  { id: 'sharing', title: '6. Sharing and service providers' },
+  { id: 'security', title: '7. Security' },
+  { id: 'retention', title: '8. Retention, deletion and revoking access' },
+  { id: 'contact', title: '9. Contact' },
 ] as const;
 
 type SectionId = (typeof SECTIONS)[number]['id'];
@@ -148,7 +143,7 @@ export default function PrivacyPolicy() {
               <li><strong className="text-foreground">Do not use it for advertising</strong>, and never sell it.</li>
               <li>
                 <strong className="text-foreground">Do not transfer it to anyone</strong> except the agent you connected, the service
-                providers in Section 8 that process it on our behalf, as required by law, or as needed to investigate abuse and protect
+                providers in Section 6 that process it on our behalf, as required by law, or as needed to investigate abuse and protect
                 the security of the service.
               </li>
               <li>
@@ -307,16 +302,11 @@ export default function PrivacyPolicy() {
           <Section id="how-we-use">
             <ul className="list-disc space-y-2 pl-5">
               <li><strong className="text-foreground">To provide the service</strong>: authenticate you, relay the calls your agents make to Google, enforce your rules, and show you your profiles, rules, approvals and connections.</li>
-              <li><strong className="text-foreground">To keep you informed</strong>: the service emails in Section 7, and answers to your support requests.</li>
+              <li><strong className="text-foreground">To keep you informed</strong>: transactional emails about an approval you have not acted on or a Google connection that stopped working, sent from FGAC&rsquo;s own mailbox and never through your Google account, and answers to your support requests.</li>
               <li><strong className="text-foreground">To keep the service secure</strong>: refuse agents presenting revoked keys, detect abuse and automated scanning, verify webhooks, and investigate incidents.</li>
               <li><strong className="text-foreground">To understand and improve the product</strong>: analytics and error tracking in Section 3.4, feature flags for betas such as Drive folder permissions.</li>
               <li><strong className="text-foreground">To comply with law</strong> and enforce our <Link href="/terms" className="text-primary underline underline-offset-2">Terms of Service</Link>.</li>
             </ul>
-            <p>
-              Where the GDPR or UK GDPR applies, our legal bases are: performance of our contract with you (providing the service),
-              our legitimate interests (security, analytics and product improvement), your consent (the optional full Google Drive
-              permission, which you can withdraw at any time), and compliance with legal obligations.
-            </p>
           </Section>
 
           <Section id="ai-agents">
@@ -338,46 +328,15 @@ export default function PrivacyPolicy() {
               it, revoke a proxy key, or remove a connection; the agent is refused from that moment. FGAC does not run AI models over
               your data and is not itself an agent.
             </p>
+            <p>
+              You can also delegate your mailbox to another FGAC user from the Accounts page. That user&rsquo;s agents then reach
+              your Gmail under the rules they configure; your Google token stays with your account and is never given to them,
+              their calls are recorded under both accounts, and you can revoke the delegation at any time, after which access stops
+              immediately.
+            </p>
           </Section>
 
-          <Section id="delegated-access">
-            <p>
-              FGAC lets one FGAC user (the owner) delegate their mailbox to another FGAC user (the delegate), so that the
-              delegate&rsquo;s agents can reach the owner&rsquo;s Gmail under the rules the delegate configures.
-            </p>
-            <ul className="list-disc space-y-2 pl-5">
-              <li>
-                <strong className="text-foreground">If you are the owner</strong>, your Google grant stays with your account and is used
-                for the delegate&rsquo;s calls; the delegate never receives your Google token. Those calls are recorded as request
-                metadata (Section 3.4) under both accounts. You can revoke a delegation at any time from the Accounts page, and access
-                stops immediately. If your Google grant stops working while a delegation is active, FGAC may email you once about it
-                and copy the delegate (Section 7).
-              </li>
-              <li>
-                <strong className="text-foreground">If you are the delegate</strong>, everything in this policy about Gmail data applies
-                equally to the owner&rsquo;s data your agents reach, and you must use that access only as the owner intended.
-              </li>
-            </ul>
-          </Section>
 
-          <Section id="service-emails">
-            <p>
-              FGAC sends a small number of transactional emails from its own support mailbox. They are sent through FGAC&rsquo;s own
-              Google account, never through yours:
-            </p>
-            <ul className="list-disc space-y-2 pl-5">
-              <li>an approval link, when an agent asks again for a permission you have not yet acted on;</li>
-              <li>a notice that your Google connection stopped working or lacks a permission an agent needs, with a reconnect link (copied to the delegate when the mailbox is delegated);</li>
-              <li>a notice that an agent keeps naming a mailbox its key cannot use, so you can fix the agent&rsquo;s configuration;</li>
-              <li>a confirmation of a contact-sales submission.</li>
-            </ul>
-            <p>
-              Each is sent once per event, never more than three per person per day, and the connection notices are additionally
-              capped across all users so that a provider outage cannot trigger a flood. Notices that bounce are recorded so we stop
-              writing to an address that no longer exists. These are the only automated emails FGAC sends; we do not send marketing
-              email.
-            </p>
-          </Section>
 
           <Section id="sharing">
             <p>We do not sell personal information and do not share it for advertising. We share information only as follows.</p>
@@ -394,7 +353,7 @@ export default function PrivacyPolicy() {
             />
             <p><strong className="text-foreground">Others, at your direction or as required:</strong></p>
             <ul className="list-disc space-y-2 pl-5">
-              <li>the AI agents and MCP clients you connect (Section 5) and the people you delegate to (Section 6);</li>
+              <li>the AI agents and MCP clients you connect (Section 5), including those of anyone you delegate your mailbox to;</li>
               <li>a partner application, if you connected FGAC through that partner&rsquo;s own &ldquo;connect&rdquo; flow: FGAC may send it notifications containing only Gmail message ids, never content, so the partner can fetch the message through FGAC under your rules;</li>
               <li>law enforcement or other parties when required by law, or to protect the rights, safety and security of FGAC, its users or the public;</li>
               <li>a successor, if FGAC is involved in a merger, acquisition or sale of assets, in which case this policy continues to apply and you will be notified.</li>
@@ -421,12 +380,21 @@ export default function PrivacyPolicy() {
                 [<span key="d">Drive file metadata (full-Drive beta)</span>, <span key="h">Up to 10 minutes in server memory, then discarded.</span>],
                 [<span key="d">Google OAuth tokens</span>, <span key="h">Held by Clerk until you revoke FGAC&rsquo;s access in your Google Account, remove the Google connection from your FGAC account settings, or delete your FGAC account.</span>],
                 [<span key="d">Account, profiles, keys, rules, delegations, connections</span>, <span key="h">While your account exists and until you delete them. Deleted rules are removed immediately. Revoked keys and delegations are kept as revoked records so that an agent presenting an old key is refused.</span>],
-                [<span key="d">Approval, connection-failure, refusal and bounce ledgers</span>, <span key="h">While your account exists; they are what keep the service emails in Section 7 to one per event.</span>],
+                [<span key="d">Approval, connection-failure, refusal and bounce ledgers</span>, <span key="h">While your account exists; they are what keep FGAC&rsquo;s transactional emails to one per event.</span>],
                 [<span key="d">Analytics events (PostHog)</span>, <span key="h">Up to seven years, under PostHog&rsquo;s standard retention.</span>],
                 [<span key="d">Session replays (PostHog)</span>, <span key="h">30 days.</span>],
                 [<span key="d">Server logs (Vercel) and database restore history (Neon)</span>, <span key="h">A short rolling window of days.</span>],
               ]}
             />
+            <H3>Revoking access</H3>
+            <ul className="list-disc space-y-2 pl-5">
+              <li>
+                <strong className="text-foreground">Revoke Google access at any time</strong> from your Google Account at{' '}
+                <Ext href={GOOGLE_PERMISSIONS_URL}>myaccount.google.com/permissions</Ext>. FGAC&rsquo;s token stops working
+                immediately and every agent call on that mailbox is refused until you reconnect.
+              </li>
+              <li><strong className="text-foreground">Control your agents</strong> in the dashboard: narrow a profile&rsquo;s rules, block or remove a connection, revoke a key, revoke a delegation, or withdraw the full Drive permission by reconnecting with the per-file permission only.</li>
+            </ul>
             <H3>Deleting your account</H3>
             <p>
               When you delete your FGAC account, Clerk notifies FGAC and FGAC immediately revokes all of your proxy keys, revokes
@@ -439,51 +407,13 @@ export default function PrivacyPolicy() {
             </p>
           </Section>
 
-          <Section id="your-rights">
-            <ul className="list-disc space-y-2 pl-5">
-              <li>
-                <strong className="text-foreground">Revoke Google access at any time</strong> from your Google Account at{' '}
-                <Ext href={GOOGLE_PERMISSIONS_URL}>myaccount.google.com/permissions</Ext>. FGAC&rsquo;s token stops working
-                immediately and every agent call on that mailbox is refused until you reconnect.
-              </li>
-              <li><strong className="text-foreground">Control your agents</strong> in the dashboard: narrow a profile&rsquo;s rules, block or remove a connection, revoke a key, revoke a delegation, or withdraw the full Drive permission by reconnecting with the per-file permission only.</li>
-              <li><strong className="text-foreground">Delete your account</strong> from the account menu (Manage account &rarr; Security) or by emailing <Mail />.</li>
-              <li><strong className="text-foreground">Limit analytics.</strong> Browser privacy tools that block analytics scripts do not affect the service.</li>
-              <li>
-                <strong className="text-foreground">Exercise your data-protection rights.</strong> Wherever you live, you can ask us to
-                access, correct, export, restrict or delete the personal information we hold about you, or object to our processing
-                of it. Residents of the EU, UK and similar jurisdictions have these rights under the GDPR and may lodge a complaint
-                with their supervisory authority; California residents have the rights to know, delete and correct under the CCPA,
-                and we do not sell or share personal information for cross-context behavioral advertising. We will not discriminate
-                against you for exercising any right.
-              </li>
-            </ul>
-            <p>
-              To make a request, email <Mail /> from the address on your account. We verify requests against that address, respond
-              within one month, and may ask for more information where a request is unclear.
-            </p>
-          </Section>
 
-          <Section id="children">
-            <p>
-              FGAC is not directed to children under 13 (or under 16 where local law sets that age), and we do not knowingly
-              collect personal information from them. If you believe a child has created an FGAC account, email <Mail /> and we
-              will delete it.
-            </p>
-          </Section>
 
-          <Section id="changes">
-            <p>
-              When we change this policy we update the effective date at the top of this page. If a change materially reduces your
-              rights or expands what we collect or share, we will notify you by email or by a notice on fgac.ai before it takes
-              effect. Earlier versions are available on request.
-            </p>
-          </Section>
 
           <Section id="contact">
             <p>
-              Questions about this policy, requests about your data, and privacy complaints go to <Mail />. FGAC.ai operates from
-              the United States.
+              Questions about this policy and requests about your data (access, correction, export or deletion) go to <Mail />.
+              We verify requests against the address on your account. FGAC.ai operates from the United States.
             </p>
           </Section>
         </div>
