@@ -7,7 +7,10 @@ Builds on capability 23. Vercel rejects request bodies over 4.5 MB before FGAC c
   request under the same rules. The proxy rewrites Google's `Location` header to its own host,
   so chunks never bypass FGAC.
 
-Plan: `docs/implementation_plans/large-api-payload-options_v3.md` (steps 4–6).
+Google's session URL never leaves the server: the caller's session URL carries FGAC's own
+opaque `upload_id`, mapped server-side (`resumable_uploads`), so chunks cannot be sent to Google
+directly past the Gmail recipient check. Plan:
+`docs/implementation_plans/large-api-payload-options_v5.md`.
 
 Fixtures:
 - an ~8 MB binary file on the runner's disk (`head -c 8388608 /dev/urandom > qa-out/big.bin`);
@@ -21,7 +24,10 @@ Record SHA-256 and length for every file sent and received.
 ### A1: Resumable Drive create in chunks, routed through FGAC
 
 `POST upload/drive/v3/files?uploadType=resumable` (metadata only) via the proxy → 200 with a
-`Location` header on **FGAC's host** (never `googleapis.com`), carrying `upload_id`. `PUT` the
+`Location` header on **FGAC's host** (never `googleapis.com`), carrying FGAC's `upload_id`.
+That id is FGAC's, not Google's: the same `upload_id` sent straight to
+`https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=<it>` is
+rejected by Google (4xx). `PUT` the
 8 MB file in 4 MB chunks to that location: intermediate chunks 308 with `Range`, the final
 chunk 200/201 with the file id. The new file is readable through the proxy with the same key
 (the `drive.file` create auto-grant), and its `md5Checksum` matches the local file.
@@ -30,7 +36,10 @@ chunk 200/201 with the file id. The new file is readable through the proxy with 
 
 `GET drive/v3/files/<A1 id>?alt=media` via the proxy → one 200 response whose body hashes to
 the local 8 MB file (over 4.5 MB, so streamed). Repeat with the 1 MB PNG (upload it the same
-way first): byte-identical — the binary-corruption regression.
+way first): byte-identical — the binary-corruption regression. Then the Gmail side: `GET
+gmail/v1/users/me/messages/<id>/attachments/<attId>` for the 6 MB attachment of A5 returns
+the full JSON in one response (≈ 8 MB, so it was streamed), and the same request for an
+attachment whose PARENT message matches the read-blacklist fixture → 403 with the rule text.
 
 ### A3: Uploads are authorized at initiation and on every chunk
 
@@ -65,8 +74,9 @@ the headers must fit in chunk 1.
 
 ### A7: Size limits answer with guidance
 
-- a single (non-resumable) request with `Content-Length` between 4 MB and 4.5 MB → FGAC's own
-  413, whose text names resumable chunking and the 4 MB chunk size;
+- a single (non-resumable) request with `Content-Length` between 4.25 MiB (4,456,448 bytes)
+  and 4.5 MB → FGAC's own 413, whose text names resumable chunking and the 4 MB chunk size
+  (a 4 MiB chunk itself must pass);
 - a 5 MB single request → **on the preview only**: Vercel's 413
   (`FUNCTION_PAYLOAD_TOO_LARGE`), which never reaches FGAC (the documented blind spot).
   Locally: `skip` (the dev server does not enforce Vercel's cap);
@@ -97,7 +107,8 @@ Record the tool and request counts. Runtimes without code execution: `skip` by d
 
 In the run window:
 - `proxy_request` rows carry `upload_type` (`resumable_init` / `resumable_chunk` /
-  `resumable_status`), `upload_id_hash`, `chunk_bytes`, and `request_bytes`;
+  `resumable_status`), `upload_id_hash`, and `request_bytes`; `service` is `drive` for
+  `upload/drive/…` (not `gmail`);
 - the final chunk carries `upload_complete: true`;
 - A2's rows carry `streamed: true` and `response_bytes` > 4.5 MB;
 - A4's 401 carries `auth_failure_reason: 'expired'`, followed by a new `temp_api_key_created`

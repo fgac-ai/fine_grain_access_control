@@ -1,11 +1,13 @@
 # Capability 23: Temporary API Keys
 
-An MCP connection can mint a short-lived `sk_proxy_` key (`create_temporary_api_key`) so a
+An MCP connection can mint a short-lived `sk_proxy_tmp_` key (`create_temporary_api_key`) so a
 script the agent runs can call the REST proxy (`/api/proxy/...`) directly — for payloads too
 large for tool calls. The key resolves to the **calling connection's profile at request time**:
 same rules, same refusals, nothing copied. Default lifetime 15 min, agent may ask up to 60.
 
-Plan: `docs/implementation_plans/large-api-payload-options_v3.md` (steps 2–3). Requests up to
+Temporary keys live in their own table (`temporary_api_keys`, SHA-256 only) and are never
+profiles: they do not appear in the profile tabs, token routes, or anything else that lists
+`proxy_keys`. Plan: `docs/implementation_plans/large-api-payload-options_v5.md`. Requests up to
 Vercel's 4.5 MB body cap only; larger transfers are capability 24.
 
 Fixtures:
@@ -22,8 +24,10 @@ evidence (`sk_proxy_…<last4>`).
 
 ### A1: Mint with defaults returns a usable, honest key
 
-`create_temporary_api_key {purpose: "download"}` returns `api_key` (`sk_proxy_` prefix),
-`expires_at` 15 min (±1 min) after the call, `base_url`, and a download recipe (`curl -o`).
+`create_temporary_api_key {purpose: "download"}` returns `api_key` (`sk_proxy_tmp_` prefix),
+an expiry 15 min (±1 min) after the call, `base_url`, and a download recipe (`curl -o`).
+`base_url` is **the host that served the MCP call** (the preview URL on a preview, localhost
+locally), never a hard-coded fgac.ai.
 The text says the key carries this connection's permissions, needs code execution with network
 access, and must not be shown to the user. No Google token appears anywhere in the response.
 
@@ -75,7 +79,8 @@ unaffected.
 ### A8: Revoking the parent profile kills its temporary keys
 
 On the **scratch** profile/connection: mint a key, confirm 200 on an allowed read, revoke the
-scratch profile in the dashboard → the temporary key 401s. The baseline profile and its keys
+scratch profile in the dashboard → the temporary key 401s with text naming the profile
+(`auth_failure_reason: 'parent_revoked'`). The baseline profile and its keys
 still work.
 
 ### A9: Connections that are not approved cannot mint
@@ -107,12 +112,13 @@ number of tool calls taken. Runtimes without code execution: `skip` by design.
 ### A13: Mint-to-use is measurable
 
 In the run window:
-- `temp_api_key_created` rows carry `purpose`, `ttl_requested`, `ttl_granted`,
-  `expected_bytes_bucket`, `client_name`, `client_id`, `parent_proxy_key_id`,
-  `temp_proxy_key_id`, `live_temp_keys` — A2's capped mint shows 120 → 60;
-- `temp_api_key_refused` rows exist for A9 (`connection_pending`) and A10 (`rate_capped`);
-- `proxy_request` rows from `$TMP` carry `key_kind: 'temporary'` and `parent_proxy_key_id`,
-  and join to the mint on `temp_proxy_key_id` = `proxy_key_id`;
-- A6/A7/A8 401s carry `auth_failure_reason` `expired` / `revoked` / `revoked`;
+- `temp_api_key_created` rows carry `purpose`, `ttl_requested`, `ttl_granted`, `ttl_capped`,
+  `expected_bytes_bucket`, `client_name`, `client_id`, `connection_id`, `parent_proxy_key_id`,
+  `temp_key_id`, `live_temp_keys` — A2's capped mint shows 120 → 60 with `ttl_capped: true`;
+- `temp_api_key_refused` rows exist for A9 (`connection_not_approved`) and A10 (`rate_capped`);
+- `proxy_request` rows from `$TMP` carry `key_kind: 'temporary'` and `temp_key_id`, with
+  `proxy_key_id` = the **parent profile** key; they join to the mint on `temp_key_id`;
+- A6/A7/A8 401s carry `auth_failure_reason` `expired` / `revoked` / `parent_revoked`;
+- A7's dashboard revoke emits `temp_api_key_revoked` (`via: 'dashboard'`);
 - runbook query `docs/monitoring.md` §7.34 (1) and (2) return the run's mints, with the
   never-used ones (e.g. A10's surplus keys) counted as never used.

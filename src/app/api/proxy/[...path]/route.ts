@@ -313,7 +313,8 @@ async function trackedProxyRequest(request: NextRequest, params: { path: string[
   const started = Date.now();
   const response = await handleProxyRequest(request, params, telemetry);
 
-  const fullPath = params.path.join('/');
+  // `upload/` media variants belong to their non-upload twin's service.
+  const fullPath = params.path.join('/').replace(/^upload\//, '');
   const fileKind = driveFileKindForPath(fullPath);
   const service = fileKind
     ? DRIVE_FILE_KINDS[fileKind].service
