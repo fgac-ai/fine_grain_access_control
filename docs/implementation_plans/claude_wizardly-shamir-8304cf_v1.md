@@ -264,9 +264,55 @@ other session's in-flight consent (02:55:46Z `unverified`). It restarted from a
 fresh transaction; the 02:56:03Z entry in the probe log is that artefact, not a
 measurement.
 
-### Post-expiry readings (first refreshed token after each mint)
+### Post-expiry readings (first refreshed token after each mint) — NOT OBTAINED
 
-_pending_
+Two attempts, both overwritten by other sessions before the token under test
+reached its first refresh (Clerk refreshes ~45 min after a mint):
+
+| token under test | minted | disturbed by | at |
+|---|---|---|---|
+| arm 1 (modal sign-in + parameter) | 01:32Z | another session's "Enable full Drive access" consent pass on a preview | 01:45Z |
+| M5 (chooser-only + parameter over a narrow refresh token) | 03:02Z | another session's plain sign-in on a preview (record narrowed again) | 03:17Z |
+
+Across the window the shared dev USER_A was written by other sessions at 01:28,
+01:45, 02:34, 02:43, 02:56 and 03:17Z — roughly every 20 minutes — so a clean
+45-minute reading was not available tonight. The experiment is fully specified
+and cheap to rerun when the account is quiet (or on a quiet flagged account):
+
+1. Fixture: a consent pass WITHOUT the parameter that requests only the sign-in
+   set (any Accounts "Reconnect Google" click on the pre-PR build, or Clerk's
+   hosted-route sign-in) → Clerk holds a refresh token scoped to that set, while
+   Google still holds `drive`.
+2. Pass under test: `reauthorize({additionalScopes: [gmail.modify], oidcPrompt:
+   'select_account'})` with `include_granted_scopes=true` appended → probe shows
+   the union immediately (measured three times).
+3. `scratchpad/watch-refresh.sh USER_A <expires_in> 70 "<note>"` (5-min probes)
+   until `expires_in` climbs → the refreshed token either carries `drive` (Google
+   issued a union refresh token on the chooser-only pass) or does not (the
+   stored narrow refresh token survived; the record now overstates the token,
+   the `recordOverstates` branch of `reconcileScopes` denies, and the card's
+   consent pass is the durable repair).
+4. Same watch after a CONSENT pass with the parameter (the shipped Accounts
+   button) answers whether consent-with-parameter refresh tokens are
+   union-scoped. Google's documentation and the IETF incremental-authorization
+   draft describe the new *grant* as including the previously granted scopes,
+   which is what a consent-issued refresh token is minted against — expected
+   yes, unmeasured here.
+
+**Design assumption used until measured (the conservative one):** a chooser-only
+pass never changes the stored refresh token (Google's documented rule: refresh
+tokens come from consent or the first authorization; `_v2.md`–`_v4.md` measured
+exactly that for Clerk's own passes). So the parameter on a chooser-only pass
+buys the current access token and the record, which is the whole first-hour
+outage and the whole "record narrower than token" class; a narrow refresh token
+still needs one consent pass, and with the parameter on that pass the consent is
+Google's "already has some access" summary rather than a new permission request.
+
+What is NOT in doubt from the measurements above: every pass that carried the
+parameter returned the union on the access token and on Clerk's record (arm 1,
+M1r, M5), every pass without it stayed narrow (M2, and the four plain sign-ins by
+other sessions), and Google never showed a consent screen for the chooser-only
+passes.
 
 ## Part 3 — go / no-go
 
