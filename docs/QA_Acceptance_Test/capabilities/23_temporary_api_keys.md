@@ -112,7 +112,8 @@ number of tool calls taken. Runtimes without code execution: `skip` by design.
 ### A13: Mint-to-use is measurable
 
 In the run window:
-- `temp_api_key_created` rows carry `purpose`, `ttl_requested`, `ttl_granted`, `ttl_capped`,
+- `temp_api_key_created` rows carry `purpose`, `ttl_requested` (only when the agent passed one),
+  `ttl_granted`, `ttl_capped`,
   `expected_bytes_bucket`, `client_name`, `client_id`, `connection_id`, `parent_proxy_key_id`,
   `temp_key_id`, `live_temp_keys` — A2's capped mint shows 120 → 60 with `ttl_capped: true`;
 - `temp_api_key_refused` rows exist for A9 (`connection_not_approved`) and A10 (`rate_capped`);

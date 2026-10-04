@@ -354,7 +354,7 @@ async function trackedProxyRequest(request: NextRequest, params: { path: string[
     : response.status === 504 ? 'timeout'
     : 'error';
 
-  captureServerEvent(telemetry.clerkUserId ?? 'anonymous-proxy', 'proxy_request', {
+  const capture = (extra: Record<string, unknown> = {}) => captureServerEvent(telemetry.clerkUserId ?? 'anonymous-proxy', 'proxy_request', {
     service,
     method: request.method,
     status: response.status,
@@ -378,8 +378,37 @@ async function trackedProxyRequest(request: NextRequest, params: { path: string[
     upload_id_hash: telemetry.uploadIdHash,
     upload_complete: telemetry.uploadComplete,
     oversize_refused: telemetry.oversizeRefused,
+    ...extra,
   });
 
+  // A piped body's size is known only once it has been sent (Google sends
+  // Drive media chunked, without Content-Length). Count the bytes on the way
+  // through and capture when the stream ends — `duration_ms` then covers the
+  // whole transfer, and a client that hangs up mid-download is recorded as
+  // `stream_aborted` with the bytes it got.
+  if (telemetry.streamed && response.body) {
+    let bytes = 0;
+    const counter = new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) { bytes += chunk.byteLength; controller.enqueue(chunk); },
+      flush() { capture({ response_bytes: bytes }); },
+    });
+    const body = response.body.pipeThrough(counter);
+    // pipeThrough does not surface a downstream cancel to `flush`; watch it.
+    const reader = body.getReader();
+    const counted = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        const { done, value } = await reader.read();
+        if (done) controller.close(); else controller.enqueue(value);
+      },
+      cancel(reason) {
+        capture({ response_bytes: bytes, stream_aborted: true });
+        return reader.cancel(reason);
+      },
+    });
+    return new NextResponse(counted, { status: response.status, statusText: response.statusText, headers: response.headers });
+  }
+
+  capture();
   return response;
 }
 
@@ -583,6 +612,7 @@ async function proxyDriveTreeDenial(engine: ProxyDriveTree, fileId: string, isMu
   } catch (err) {
     if (!(err instanceof LineageError)) throw err;
     telemetry.errorStatus = err.code;
+    telemetry.denialCode = err.code;
     if (err.code === 'file_not_found') {
       return NextResponse.json({ error: `Google Drive reports no file '${fileId}' visible to this Google account — the id is wrong, the file was deleted, or it was never shared with this account.` }, { status: 404 });
     }
@@ -593,6 +623,7 @@ async function proxyDriveTreeDenial(engine: ProxyDriveTree, fileId: string, isMu
   }
   if (decision.allowed) return null;
   telemetry.errorStatus = decision.denial === 'blocked' ? 'drive_blocked' : decision.denial === 'read_only' ? 'drive_read_only' : 'drive_not_exposed';
+  telemetry.denialCode = telemetry.errorStatus;
   const text = driveDenialText(decision, label, engine.driveDefault, `${DASHBOARD_URL}/dashboard`).replace(/^🚫 /u, '');
   return NextResponse.json({ error: text }, { status: 403 });
 }
@@ -655,16 +686,19 @@ async function driveFileDenial(
   const readWriteTypes = new Set(ACTIVE_DRIVE_FILE_KINDS.map(k => DRIVE_FILE_KINDS[k].actionTypes.readWrite));
 
   if (fileRules.length === 0) {
+    telemetry.denialCode = 'file_not_exposed';
     return NextResponse.json({
       error: `Access Denied: File '${fileId}' is not exposed in FGAC rules for this API key.`
     }, { status: 403 });
   }
   if (fileRules.some(r => blockTypes.has(r.actionType))) {
+    telemetry.denialCode = 'drive_blocked';
     return NextResponse.json({
       error: `Access Denied: Access to file '${fileId}' has been explicitly blocked.`
     }, { status: 403 });
   }
   if (isMutating && !fileRules.some(r => readWriteTypes.has(r.actionType))) {
+    telemetry.denialCode = 'drive_read_only';
     return NextResponse.json({
       error: `Access Denied: Write operations on file '${fileId}' are restricted to Read-Only.`
     }, { status: 403 });
@@ -1041,6 +1075,7 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
       );
 
       if (applicableRules.length === 0) {
+        telemetry.denialCode = `${d.service}_not_exposed`;
         return NextResponse.json({
           error: `Access Denied: ${d.nounCap} '${fileId}' is not exposed in FGAC rules for this API key.`
         }, { status: 403 });
@@ -1048,6 +1083,7 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
 
       // Check explicit block
       if (applicableRules.some(r => r.actionType === d.actionTypes.block)) {
+        telemetry.denialCode = `${d.service}_blocked`;
         return NextResponse.json({
           error: `Access Denied: Access to ${d.noun} '${fileId}' has been explicitly blocked.`
         }, { status: 403 });
@@ -1056,6 +1092,7 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
       // Check write restrictions
       if (isMutatingRequest) {
         if (!applicableRules.some(r => r.actionType === d.actionTypes.readWrite)) {
+          telemetry.denialCode = `${d.service}_read_only`;
           return NextResponse.json({
             error: `Access Denied: Write operations on ${d.noun} '${fileId}' are restricted to Read-Only.`
           }, { status: 403 });

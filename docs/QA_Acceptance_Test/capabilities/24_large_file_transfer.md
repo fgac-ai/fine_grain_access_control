@@ -73,7 +73,9 @@ attachment with matching hash (standing permission to send between the QA accoun
 ### A6: Gmail recipients are enforced on the first chunk
 
 Same as A5 but with a non-whitelisted `Cc` (an `@example.com` address) → the **first chunk** is
-refused with the send-whitelist text plus the approval link, and no message is sent (USER_B's
+refused with the REST proxy's send-whitelist text (`recipient_not_whitelisted`; the REST
+surface names the address to whitelist and, unlike MCP, mints no approval link), and no
+message is sent (USER_B's
 mailbox has nothing new). A later chunk for that `upload_id` is refused too. Repeat with `Bcc`.
 Then a first chunk that ends before the header block is complete → refused, and the text says
 the headers must fit in chunk 1; a header block padded past 256 KB → refused; a status query
@@ -88,8 +90,10 @@ before any byte-0 chunk → refused; after an allowed byte-0 chunk, a chunk star
 - a 5 MB single request → **on the preview only**: Vercel's 413
   (`FUNCTION_PAYLOAD_TOO_LARGE`), which never reaches FGAC (the documented blind spot).
   Locally: `skip` (the dev server does not enforce Vercel's cap);
-- a chunk that is not a multiple of 256 KB (and not the last) → Google's 400 passes through,
-  with FGAC's fix text appended.
+- a chunk that is not a multiple of 256 KB (and not the last) → Google does NOT reject it: it
+  answers 308 with a `Range` rounded DOWN to a 256 KiB multiple (e.g. a 300,000-byte chunk at
+  offset 0 → `bytes=0-262143`), and the client resends from there. This rounding is the
+  property the Gmail byte-0 rule relies on (measured 2026-10-03), so assert it explicitly.
 
 ### A8: Large windowed reads point to the script path, once
 
@@ -118,7 +122,8 @@ In the run window:
   `resumable_status`), `upload_id_hash`, and `request_bytes`; `service` is `drive` for
   `upload/drive/…` (not `gmail`);
 - the final chunk carries `upload_complete: true`;
-- A2's rows carry `streamed: true` and `response_bytes` > 4.5 MB;
+- A2's rows carry `streamed: true` and `response_bytes` > 4.5 MB (counted as the body is piped
+  — Google sends Drive media without Content-Length — and captured when the stream ends);
 - A4's 401 carries `auth_failure_reason: 'expired'`, followed by a new `temp_api_key_created`
   and the completed upload;
 - A7's FGAC 413 carries `oversize_refused: true`;
