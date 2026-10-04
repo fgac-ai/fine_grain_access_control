@@ -66,6 +66,10 @@ function installFetch() {
       }] }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
     googleCalls.push({ url, method });
+    // Drive metadata lookup (the no-rule mime gate): the fixture file is a Sheet.
+    if (method === 'GET' && /\/drive\/v3\/files\/[^/?]+\?fields=mimeType/.test(url)) {
+      return new Response(JSON.stringify({ mimeType: 'application/vnd.google-apps.spreadsheet' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
     if (method === 'GET' && /\/drafts\/[^/?]+\?format=raw/.test(url)) {
       return new Response(JSON.stringify({ id: 'd1', message: { raw: draftRaw } }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
@@ -116,7 +120,10 @@ async function main() {
     const res = await handlers[method](req, { params: Promise.resolve({ path: pathname.split('/').map(decodeURIComponent) }) });
     return { status: res.status, text: await res.text(), google: googleCalls };
   }
-  const refused = (r: { status: number; google: unknown[] }) => r.status >= 400 && r.status < 500 && r.google.length === 0;
+  // "Nothing reached Google" except the read-only metadata lookup the no-rule
+  // Drive gate makes to learn the file's kind (never a write, never content).
+  const refused = (r: { status: number; google: Array<{ url: string; method: string }> }) => r.status >= 400 && r.status < 500
+    && r.google.every(g => g.method === 'GET' && /\?fields=mimeType/.test(g.url));
 
   const sendRule = { id: 'r_send', userId: owner.id, service: 'gmail', actionType: 'send_whitelist', regexPattern: ALLOWED, targetEmail: null, targetResourceId: null, ruleName: 'allowed' };
   const sheetRead = { id: 'r_sheet', userId: owner.id, service: 'sheets', actionType: 'sheet_read', targetResourceId: FILE_ID, regexPattern: null, targetEmail: null, ruleName: 'sheet' };

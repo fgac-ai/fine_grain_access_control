@@ -50,6 +50,8 @@ let parentKeyRow: Row = {};
 let rules: Row[] = [];
 let sessions: Row[] = [];
 let mailboxRows: Row[] = [];
+const grantedRules: Row[] = [];
+const grantedAssignments: Row[] = [];
 let googleCalls: Array<{ url: string; method: string; headers: Headers; bodyBytes: number }> = [];
 const MEDIA = Buffer.from(Array.from({ length: 300_000 }, (_, i) => (i * 7) % 256)); // binary, not UTF-8 safe
 
@@ -81,6 +83,16 @@ function installFetch() {
       const m = range.match(/bytes (\d+)-(\d+)\/(\d+)/);
       if (m && Number(m[2]) + 1 < Number(m[3])) return new Response(null, { status: 308, headers: { range: `bytes=0-${m[2]}`, 'x-guploader-uploadid': GOOGLE_UPLOAD_ID } });
       return new Response(JSON.stringify({ id: 'new-file-id' }), { status: 200, headers: { 'content-type': 'application/json', 'x-guploader-uploadid': GOOGLE_UPLOAD_ID } });
+    }
+    const metaMatch = url.match(/\/drive\/v3\/files\/([^/?]+)\?fields=(mimeType|name,mimeType)/);
+    if (method === 'GET' && metaMatch) {
+      const id = metaMatch[1];
+      if (id === 'invisible-file') return new Response(JSON.stringify({ error: { code: 404 } }), { status: 404, headers: { 'content-type': 'application/json' } });
+      const mimeType = id === 'pdf-file' || id === 'new-file-id' ? 'application/pdf' : 'application/vnd.google-apps.spreadsheet';
+      return new Response(JSON.stringify({ id, name: 'fixture', mimeType }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (method === 'POST' && /\/upload\/drive\/v3\/files\?uploadType=media/.test(url) && u.searchParams.get('fixture') === 'sheet') {
+      return new Response(JSON.stringify({ id: 'created-sheet', name: 'Converted', mimeType: 'application/vnd.google-apps.spreadsheet' }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
     if (/\/messages\/m1\?format=full/.test(url)) {
       return new Response(JSON.stringify({ id: 'm1', labelIds: ['INBOX', 'SECRET'], payload: { headers: [] } }), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -146,7 +158,13 @@ async function main() {
   dbStub.insert = (table: unknown) => ({
     values(v: Row) {
       if (table === schema.resumableUploads) sessions.push({ id: `s${sessions.length + 1}`, recipientVerdict: null, ...v });
-      const done = { onConflictDoNothing: () => Promise.resolve(), then: (res: (x: unknown) => unknown) => Promise.resolve().then(res) };
+      if (table === schema.accessRules) grantedRules.push(v);
+      if (table === schema.keyRuleAssignments) grantedAssignments.push(v);
+      const done = {
+        onConflictDoNothing: () => Promise.resolve(),
+        returning: () => Promise.resolve([{ id: `rule${grantedRules.length}`, ...v }]),
+        then: (res: (x: unknown) => unknown) => Promise.resolve().then(res),
+      };
       return done;
     },
   });
@@ -169,7 +187,9 @@ async function main() {
     const buf = Buffer.from(await res.arrayBuffer());
     return { status: res.status, headers: res.headers, buf, text: buf.toString('utf8'), google: googleCalls };
   }
-  const refusedBeforeGoogle = (r: { status: number; google: unknown[] }) => r.status >= 400 && r.status < 500 && r.google.length === 0;
+  // Nothing but the read-only metadata lookup of the no-rule Drive gate may reach Google.
+  const refusedBeforeGoogle = (r: { status: number; google: Array<{ url: string; method: string }> }) => r.status >= 400 && r.status < 500
+    && r.google.every(g => g.method === 'GET' && /\?fields=(mimeType|name,mimeType)/.test(g.url));
   const reset = () => {
     tempKeyRow = { id: 't1', keyHash: TEMP.hash, parentKeyId: 'k1', expiresAt: minutesFromNow(15), revokedAt: null };
     parentKeyRow = { id: 'k1', userId: owner.id, key: 'sk_proxy_parent', revokedAt: null, expiresAt: null, driveDefault: null };
@@ -254,6 +274,23 @@ async function main() {
   rules = [{ ...rwRule, actionType: 'sheet_read' }];
   r = await call('PUT', updLoc, { body: Buffer.alloc(262_144), headers: { 'content-range': 'bytes 262144-524287/600000' } });
   check('a file switched to Read Only mid-upload stops receiving chunks', refusedBeforeGoogle(r), r);
+
+  console.log('temporary-api-keys — no-rule Drive files and created-file grants (parity with MCP):');
+  reset();
+  r = await call('GET', 'drive/v3/files/pdf-file?alt=media');
+  check('a non-Sheets/Docs/Slides file with no rule rides the drive.file grant (as on MCP)', r.status === 200, r);
+  r = await call('GET', 'drive/v3/files/invisible-file');
+  check('a file Google says this token cannot see is refused (404) before any content call', r.status === 404 && r.google.length === 1, r);
+  r = await call('PATCH', `drive/v3/files/${FILE_ID}`, { body: '{}', contentType: 'application/json' });
+  check('an unexposed Sheet stays refused', refusedBeforeGoogle(r), r);
+  grantedRules.length = 0; grantedAssignments.length = 0;
+  r = await call('POST', 'upload/drive/v3/files?uploadType=media&fixture=sheet', { body: 'a,b', contentType: 'text/csv' });
+  check('a create that yields a Sheet is granted Read & Write to the creating profile',
+    r.status === 200 && grantedRules.length === 1 && grantedRules[0].actionType === 'sheet_read_write'
+    && grantedRules[0].targetResourceId === 'created-sheet' && grantedAssignments[0]?.proxyKeyId === 'k1', { grantedRules, grantedAssignments });
+  grantedRules.length = 0;
+  r = await call('POST', 'upload/drive/v3/files?uploadType=media', { body: 'x', contentType: 'application/octet-stream' });
+  check('a plain upload needs no rule (other kind) and gets none', r.status === 200 && grantedRules.length === 0, grantedRules);
 
   console.log('temporary-api-keys — Gmail resumable send:');
   const sendRule = { id: 'r_send', userId: owner.id, service: 'gmail', actionType: 'send_whitelist', regexPattern: ALLOWED, targetEmail: null, targetResourceId: null, ruleName: 'allowed' };

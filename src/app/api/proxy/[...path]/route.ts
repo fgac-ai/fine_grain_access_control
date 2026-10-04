@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { randomBytes } from 'crypto';
-import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS } from '@/lib/driveFileKinds';
+import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, kindForMimeType } from '@/lib/driveFileKinds';
 import {
   driveFileKindForPath, extractDriveFileKindId, hasDotSegment, classifyGoogleApiCall, canonicalizeGoogleApiPath,
   extractSendRecipients, extractRfc822Recipients, extractDraftSendInfo,
@@ -99,6 +99,8 @@ type ProxyTelemetry = {
   uploadComplete?: boolean;
   /** FGAC refused the body as too large (413) before Vercel's own cap could. */
   oversizeRefused?: boolean;
+  /** A Drive create through the proxy: the created file's FGAC kind, or 'other'. */
+  fileCreatedKind?: string;
 };
 
 /**
@@ -396,6 +398,7 @@ async function trackedProxyRequest(request: NextRequest, params: { path: string[
     upload_id_hash: telemetry.uploadIdHash,
     upload_complete: telemetry.uploadComplete,
     oversize_refused: telemetry.oversizeRefused,
+    file_created_kind: telemetry.fileCreatedKind,
     ...extra,
   });
 
@@ -505,11 +508,13 @@ async function sendRecipientsFromRequest(request: NextRequest): Promise<string[]
  * the bare `v3/files/…` spelling the classifier accepts reaches Drive.
  */
 async function forwardDriveCall(
-  request: NextRequest, fullPath: string, owner: { clerkUserId: string; email: string }, telemetry: ProxyTelemetry,
+  request: NextRequest, fullPath: string, owner: { id: string; clerkUserId: string; email: string }, telemetry: ProxyTelemetry,
   profileKeyId: string,
   driveTree: ProxyDriveTree | null = null,
   /** The existing file a resumable update targets (re-checked on every chunk). */
   fileId?: string,
+  /** POST drive/v3/files (incl. upload/ media/multipart): grant the result to the profile. */
+  isCreate = false,
 ): Promise<NextResponse> {
   telemetry.targetEmail = owner.email;
   telemetry.accountDelegated = false;
@@ -548,6 +553,14 @@ async function forwardDriveCall(
       telemetry.responseBytes = Buffer.byteLength(filtered);
       return new NextResponse(filtered, { status: 200, headers: responseHeaders });
     }
+    return passthroughResponse(forward, telemetry);
+  }
+  if (isCreate && telemetry.uploadType !== 'resumable_init') {
+    // A create's answer is the new file's small JSON resource: buffer it, so
+    // the created file can be granted to the profile before replying.
+    const forward = await forwardToGoogle(url, { method: request.method, headers, body }, telemetry);
+    if (!forward.ok) return forward.response;
+    if (forward.status === 200) await grantProxyCreatedFile(owner, profileKeyId, forward.body, realGoogleToken.token, telemetry);
     return passthroughResponse(forward, telemetry);
   }
   // Everything else is piped: Drive media downloads and exports can be far
@@ -703,10 +716,34 @@ async function driveFileDenial(
   const readWriteTypes = new Set(ACTIVE_DRIVE_FILE_KINDS.map(k => DRIVE_FILE_KINDS[k].actionTypes.readWrite));
 
   if (fileRules.length === 0) {
-    telemetry.denialCode = 'file_not_exposed';
-    return NextResponse.json({
-      error: `Access Denied: File '${fileId}' is not exposed in FGAC rules for this API key.`
-    }, { status: 403 });
+    // No rule names the file. FGAC has rule types only for Sheets, Docs and
+    // Slides, so — as on the MCP path (checkDriveFileAccess) — ask Google what
+    // the file IS: a Sheets/Docs/Slides file needs a rule; any other kind
+    // (an uploaded PDF or binary, the agent's own uploads included) rides
+    // Google's per-file drive.file grant; a file the token cannot see at all
+    // is refused here. Before this, every non-Sheets/Docs/Slides file was
+    // refused on REST, so an agent could upload a file and never touch it again.
+    const token = await fetchClerkGoogleToken(dbUser.clerkUserId, dbUser.clerkUserId, telemetry);
+    const meta = token ? await forwardToGoogle(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=mimeType&supportsAllDrives=true`,
+      { method: 'GET', headers: new Headers({ Authorization: `Bearer ${token.token}` }) }, telemetry,
+    ) : null;
+    if (!meta || !meta.ok || meta.status !== 200) {
+      telemetry.denialCode = 'file_grant_missing_at_google';
+      return NextResponse.json({
+        error: `Google Drive reports no file '${fileId}' visible to this account through FGAC — the id is wrong, the file was deleted, ` +
+          'or it was never picked in FGAC or created by an agent. Expose it from the FGAC dashboard.',
+      }, { status: 404 });
+    }
+    let mimeType: string | undefined;
+    try { mimeType = (JSON.parse(meta.body) as { mimeType?: string }).mimeType; } catch { /* treated as other */ }
+    if (kindForMimeType(mimeType)) {
+      telemetry.denialCode = 'file_not_exposed';
+      return NextResponse.json({
+        error: `Access Denied: File '${fileId}' is not exposed in FGAC rules for this API key.`
+      }, { status: 403 });
+    }
+    return null;
   }
   if (fileRules.some(r => blockTypes.has(r.actionType))) {
     telemetry.denialCode = 'drive_blocked';
@@ -721,6 +758,56 @@ async function driveFileDenial(
     }, { status: 403 });
   }
   return null;
+}
+
+/**
+ * A Drive file the agent just created through the proxy is its own output:
+ * a Sheets/Docs/Slides file gets a Read & Write rule scoped to the creating
+ * profile — the same auto-grant the MCP route applies (autoGrantAgentCreatedFile)
+ * — so the agent can keep working on what it uploaded or converted. Other
+ * kinds need no rule (they ride Google's per-file drive.file grant). A failed
+ * grant is logged, never fatal: the file exists, and the next call simply
+ * refuses as not exposed.
+ */
+async function grantProxyCreatedFile(
+  dbUser: { id: string; clerkUserId: string },
+  profileKeyId: string,
+  createdBody: string,
+  token: string,
+  telemetry: ProxyTelemetry,
+): Promise<void> {
+  let file: { id?: string; name?: string; mimeType?: string } | null = null;
+  try { file = JSON.parse(createdBody); } catch { return; }
+  if (!file?.id) return;
+  let { name, mimeType } = file;
+  if (!mimeType) {
+    const meta = await forwardToGoogle(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.id)}?fields=name,mimeType&supportsAllDrives=true`,
+      { method: 'GET', headers: new Headers({ Authorization: `Bearer ${token}` }) }, telemetry,
+    );
+    if (meta.ok && meta.status === 200) {
+      try { ({ name = name, mimeType } = JSON.parse(meta.body) as { name?: string; mimeType?: string }); } catch { /* leave ungated */ }
+    }
+  }
+  const kind = kindForMimeType(mimeType);
+  telemetry.fileCreatedKind = kind ?? 'other';
+  if (!kind) return;
+  const d = DRIVE_FILE_KINDS[kind];
+  try {
+    const [rule] = await db.insert(accessRules).values({
+      userId: dbUser.id,
+      ruleName: `Agent-created: ${name || file.id}`,
+      service: d.service,
+      actionType: d.actionTypes.readWrite,
+      targetResourceId: file.id,
+      resourceName: name ?? null,
+    }).returning();
+    await db.insert(keyRuleAssignments).values({ proxyKeyId: profileKeyId, accessRuleId: rule.id });
+    captureServerEvent(dbUser.clerkUserId, d.createdAnalytics.event, { [d.createdAnalytics.idProp]: file.id, origin: 'rest_proxy', auto_granted: true });
+  } catch (err) {
+    console.error(`[PROXY] Failed to auto-grant agent-created ${d.noun}:`, err);
+    captureServerEvent(dbUser.clerkUserId, d.createdAnalytics.event, { [d.createdAnalytics.idProp]: file.id, origin: 'rest_proxy', auto_granted: false });
+  }
 }
 
 /**
@@ -866,7 +953,15 @@ async function handleResumableChunk(
     method: 'PUT', headers, body: parsed?.kind === 'status' ? undefined : body,
   }, telemetry);
   if (!forward.ok) return forward.response;
-  if (forward.status === 200 || forward.status === 201) telemetry.uploadComplete = true;
+  if (forward.status === 200 || forward.status === 201) {
+    telemetry.uploadComplete = true;
+    // A resumable Drive CREATE completes here: grant the new file like any
+    // create — on the completing data chunk only (a later status query also
+    // answers 200 with the file, and must not grant it twice).
+    if (session.kind === 'drive' && !session.fileId && parsed?.kind === 'chunk') {
+      await grantProxyCreatedFile(dbUser, profileKeyId, forward.body, token.token, telemetry);
+    }
+  }
   telemetry.responseBytes = Buffer.byteLength(forward.body);
   // Allow-listed headers only (see UPLOAD_RESPONSE_HEADERS): never Google's upload id.
   return new NextResponse(forward.body, { status: forward.status, headers: uploadResponseHeaders(forward.headers) });
@@ -1047,7 +1142,7 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     // the `upload/` variant): the new file is app-owned, so no existing file
     // is reachable through them.
     if (cls.kind === 'passthrough' || cls.kind === 'drive_create') {
-      return forwardDriveCall(request, fullPath, dbUser, telemetry, dbKey.id, driveTree);
+      return forwardDriveCall(request, fullPath, dbUser, telemetry, dbKey.id, driveTree, undefined, cls.kind === 'drive_create');
     }
 
     // ─── PER-FILE PROXY HANDLER (Sheets / Docs / Slides) ─────────────────────
