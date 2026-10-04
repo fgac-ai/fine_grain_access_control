@@ -466,7 +466,16 @@ export function extractSendRecipients(body: unknown): string[] | null {
   } catch {
     return null;
   }
+  return extractRfc822Recipients(message);
+}
 
+/**
+ * To/Cc/Bcc addresses from a plain RFC 822 message — the `raw` field decoded,
+ * or the body of an `upload/…/messages/send?uploadType=media` request, which
+ * is the message itself (the REST proxy reads that form). Null when the
+ * header section names no recipient.
+ */
+export function extractRfc822Recipients(message: string): string[] | null {
   // Header section ends at the first blank line. Unfold continuation lines.
   const headerSection = message.split(/\r?\n\r?\n/)[0].replace(/\r?\n[ \t]+/g, ' ');
   const recipients: string[] = [];
@@ -500,6 +509,16 @@ export function extractDraftSendInfo(body: unknown): { draftId: string | null; b
   const raw = draft.message && typeof draft.message === 'object' ? draft.message.raw : undefined;
   const bodyRecipients = typeof raw === 'string' ? extractSendRecipients({ raw }) : null;
   return { draftId, bodyRecipients };
+}
+
+/** Recipients a drafts/send delivers to: the stored draft's ∪ the inline message's. */
+export function draftSendRecipients(
+  draftRaw: unknown,
+  info: { bodyRecipients: string[] | null },
+): string[] | null {
+  const draftRecipients = typeof draftRaw === 'string' ? extractSendRecipients({ raw: draftRaw }) : null;
+  const recipients = [...new Set([...(draftRecipients ?? []), ...(info.bodyRecipients ?? [])])];
+  return recipients.length > 0 ? recipients : null;
 }
 
 /**
