@@ -205,6 +205,11 @@ async function main() {
   check('the session is bound to the opening profile and Google\'s URL kept server-side',
     sessions.length === 1 && sessions[0].parentKeyId === 'k1' && String(sessions[0].googleSessionUrl).includes(GOOGLE_UPLOAD_ID)
     && sessions[0].uploadIdHash === hashUploadId(new URL(loc).searchParams.get('upload_id') ?? ''), sessions);
+  const viaGmailHost = await call('POST', 'https://gmail.fgac.ai/api/proxy/upload/drive/v3/files?uploadType=resumable', { body: '{}', contentType: 'application/json' });
+  const gmailHostLoc = viaGmailHost.headers.get('location') ?? '';
+  check('on the gmail.fgac.ai proxy host the session URL has no /api/proxy prefix (the middleware adds it)',
+    gmailHostLoc.startsWith('https://gmail.fgac.ai/upload/drive/v3/files?'), gmailHostLoc);
+  sessions = sessions.slice(0, 1);
   r = await call('PUT', loc, { body: Buffer.alloc(262_144), headers: { 'content-range': 'bytes 0-262143/600000' } });
   check('a chunk is relayed to Google\'s session URL with its Content-Range (308 = continue)',
     r.status === 308 && r.google.length === 1 && r.google[0].url.includes(GOOGLE_UPLOAD_ID)

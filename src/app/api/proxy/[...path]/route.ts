@@ -304,7 +304,11 @@ async function adoptResumableSession(
     expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
   }).onConflictDoNothing();
   const headers = new Headers(response.headers);
-  headers.set('location', `${requestOrigin(request)}/api/proxy${googleUrl.pathname}?uploadType=resumable&upload_id=${fgacUploadId}`);
+  // On the gmail.fgac.ai proxy host the middleware already maps every path
+  // onto /api/proxy, so the prefix there would be applied twice.
+  const origin = requestOrigin(request);
+  const prefix = new URL(origin).hostname.startsWith('gmail.') ? '' : '/api/proxy';
+  headers.set('location', `${origin}${prefix}${googleUrl.pathname}?uploadType=resumable&upload_id=${fgacUploadId}`);
   return new NextResponse(response.body, { status: response.status, headers });
 }
 
@@ -611,7 +615,6 @@ function headerBlockEnd(text: string): number {
  */
 async function handleResumableChunk(
   request: NextRequest,
-  fullPath: string,
   uploadId: string,
   profileKeyId: string,
   dbUser: { id: string; email: string; clerkUserId: string },
@@ -788,7 +791,7 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     // session binding, not by re-classifying the path.
     const uploadId = request.nextUrl.searchParams.get('upload_id');
     if (uploadId) {
-      return handleResumableChunk(request, fullPath, uploadId, dbKey.id, dbUser, telemetry);
+      return handleResumableChunk(request, uploadId, dbKey.id, dbUser, telemetry);
     }
 
     // ─── CLASSIFY (shared policy with the MCP raw tools) ──────────────────────
