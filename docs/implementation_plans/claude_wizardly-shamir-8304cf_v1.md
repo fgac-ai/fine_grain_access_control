@@ -264,6 +264,25 @@ other session's in-flight consent (02:55:46Z `unverified`). It restarted from a
 fresh transaction; the 02:56:03Z entry in the probe log is that artefact, not a
 measurement.
 
+### Shipped change, validated end to end on the local build (03:26Z–03:29Z)
+
+Fixture: USER_A narrow again after another session's 03:17Z sign-in (record,
+token endpoint and tokeninfo all without `drive`). Action: the real Accounts page
+"Reconnect Google" button on the dev server running this branch (requests
+gmail.modify + drive.file, `prompt=consent`).
+
+| check | result |
+|---|---|
+| first Google URL after the click | `accounts.google.com/o/oauth2/auth` with `include_granted_scopes=true` at top level; `scope` = the five sign-in scopes (drive.file, not `drive`); `prompt=consent`; `access_type=offline` |
+| Google screens | unverified-app warning → "You're signing back in" → consent "accounts.dev already has some access — see the 6 services", no checkboxes → Continue (03:27:13Z) |
+| landing | `/dashboard/accounts?reconnected=1` → "Confirming Google permissions…" → **"✓ Google reconnected — gmail.modify and drive.file confirmed."** |
+| probe 35 s later (record `updated_at` 03:27:14Z) | record = token endpoint = tokeninfo = base + gmail.modify + drive.file + **drive** (`expires_in` 3559) |
+| +60 s | unchanged |
+| profile page | Drive tree card ("Read everything · 0 overrides"), no "Enable full Drive access" card |
+
+So a reconnect that asks for `drive.file` no longer strips `drive`; it restores it.
+Capability 18 A17 passes locally. (Preview result recorded below when available.)
+
 ### Post-expiry readings (first refreshed token after each mint) — NOT OBTAINED
 
 Two attempts, both overwritten by other sessions before the token under test
