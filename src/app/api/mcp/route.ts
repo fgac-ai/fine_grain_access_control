@@ -77,6 +77,7 @@ import { driveTreeFlagOn } from '@/lib/featureFlags';
 import {
   resolveDriveTreeAccess, effectiveDriveAccess, settingsFromRules, normalizeDriveDefault, driveDefaultLabel,
   driveDenialText, widenListFields, DRIVE_SERVICE, type DriveDefault, type DriveSetting,
+  classifyDriveDiscovery, driveDiscoveryRefusal, sharedDriveAccess, filterSharedDrives, sharedDriveBlockedText,
 } from '@/lib/driveTreeAccess';
 import {
   resolveDriveLineage, resolveLineageFrom, parseDriveFileMeta, driveMetaUrl, LineageError, MAX_LINEAGE_HOPS,
@@ -1634,6 +1635,42 @@ async function filteredDriveListing(engine: DriveEngineContext, cleanPath: strin
   return jsonResult({ ...data, files: kept, withheld });
 }
 
+/**
+ * Drive tree engine: every Drive call not addressed to one file by id goes
+ * through the shared discovery classifier (classifyDriveDiscovery) — files
+ * and shared-drive listings are filtered, a shared drive fetched by id is
+ * gated on its own setting, and listing-shaped reads the engine cannot
+ * filter (changes, v2 lists, v2 children, …) are refused with guidance to
+ * use drive/v3/files. Returns null when the call is not discovery or is on
+ * the allowlist, so the caller's normal dispatch runs.
+ */
+async function driveTreeDiscovery(engine: DriveEngineContext, cleanPath: string, method: string, rawUrl: (p: string) => string, resolved: ResolvedAccount) {
+  const discovery = classifyDriveDiscovery(cleanPath, method);
+  if (!discovery || discovery.kind === 'allow') return null;
+  if (discovery.kind === 'refuse') {
+    addToolCallProps({ drive_tree: true, denial_code: 'drive_discovery_unfiltered' });
+    return textResult(`🚫 ${driveDiscoveryRefusal(discovery.endpoint)}`);
+  }
+  if (discovery.kind === 'filter_files') return filteredDriveListing(engine, cleanPath, rawUrl, resolved);
+  const { settings, driveDefault } = await loadDriveTreeSettings(engine.userId, engine.proxyKeyId);
+  if (discovery.kind === 'shared_drive') {
+    // Decided on settings alone (a shared drive is a root: nothing above it
+    // but "Shared drives"), so a Blocked drive's name never leaves Google.
+    if (sharedDriveAccess(discovery.driveId, '', settings, driveDefault) === 'block') {
+      addToolCallProps({ drive_tree: true, denial_code: 'drive_blocked', rule_match_level: 'shared_drive', drive_default: driveDefault });
+      return textResult(`🚫 ${sharedDriveBlockedText(discovery.driveId)}`);
+    }
+    return null;
+  }
+  const result = await googleFetch(rawUrl(cleanPath), engine.token, 'GET', undefined, engine.targetEmail);
+  if (!result.ok) return passthroughErrorResult(result, cleanPath, resolved);
+  const data = result.data as { drives?: unknown[] } | null;
+  if (!data || !Array.isArray(data.drives)) return jsonResult(result.data);
+  const filtered = filterSharedDrives(data, settings, driveDefault);
+  addToolCallProps({ drive_tree: true, drive_list_total: data.drives.length, drive_list_withheld: filtered.withheld, drive_default: driveDefault });
+  return jsonResult(filtered);
+}
+
 /** `defaults` entries for Drive in get_my_permissions: the tree posture when the engine applies to this owner, else the legacy per-kind lines. */
 async function driveDefaultsForPermissions(conn: ConnectionApproved): Promise<Record<string, string>> {
   const legacy = Object.fromEntries(ACTIVE_DRIVE_FILE_KINDS.map(k => {
@@ -2687,6 +2724,15 @@ async function executeRawGoogleCall(
       : `https://www.googleapis.com/${p}`;
   };
 
+  // Drive tree engine: any Drive discovery read (listings, changes, v2
+  // children, shared drives) can name files the profile Blocks, so it is
+  // filtered or refused before the per-kind dispatch below.
+  const driveEngine = getDriveEngine();
+  if (driveEngine?.active) {
+    const discovery = await driveTreeDiscovery(driveEngine, cleanPath, method, rawUrl, resolved);
+    if (discovery) return discovery;
+  }
+
   if (cls.kind === 'file_create') {
     // Agent-created files (POST v4/spreadsheets / v1/documents /
     // v1/presentations) are allowed and auto-granted to the calling key
@@ -2774,12 +2820,6 @@ async function executeRawGoogleCall(
   }
 
   if (cls.kind === 'passthrough') {
-    // Drive tree engine: a Drive listing is the one passthrough that can
-    // reveal files the profile blocks, so it is forwarded and filtered.
-    const engine = getDriveEngine();
-    if (engine?.active && method === 'GET' && /^drive\/v3\/files(\?|$)/.test(cleanPath)) {
-      return filteredDriveListing(engine, cleanPath, rawUrl, resolved);
-    }
     // Classify-don't-block: unknown Google API families are forwarded with
     // the account's token (Google's scopes are the enforcement backstop) and
     // flagged so demand is visible in analytics before we build rules for it
@@ -3030,7 +3070,7 @@ function registerFgacTools(server: FgacMcpServer) {
             sending: 'Email sending is off by default; the first gmail_send returns a one-click approval link the user can use to whitelist the recipient.',
             raw_api: "Anything the typed tools can't express — Gmail mailbox writes (labels, drafts, archive/mark-read, trash) and threads, Drive listing and export, creating new docs, sheets, or slides — is reachable via google_api_get / google_api_modify under the same rules (see their descriptions). "
               + (driveTreeActive
-                ? "The Google grant covers Gmail plus the user's whole Google Drive, scoped by this profile's folder and file settings (Blocked files are withheld from listings too); "
+                ? "The Google grant covers Gmail plus the user's whole Google Drive, scoped by this profile's folder and file settings (Blocked files are withheld from listings too — list and search files with GET drive/v3/files; the changes feed, Drive v2 listings and v2 folder children are refused because they cannot be filtered); "
                 : "The Google grant covers ONLY Gmail plus per-file Drive access (Sheets/Docs/Slides/Drive files the user picked or this agent created); ")
               + "People/Contacts, Calendar, Tasks, and other Google APIs are not available and calls to them are refused.",
           },

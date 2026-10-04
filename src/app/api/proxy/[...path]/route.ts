@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS } from '@/lib/driveFileKinds';
-import { driveFileKindForPath, extractDriveFileKindId, hasDotSegment } from '@/app/api/mcp/googleApiPolicy';
+import { driveFileKindForPath, extractDriveFileKindId, hasDotSegment, canonicalizeGoogleApiPath } from '@/app/api/mcp/googleApiPolicy';
 import { db } from '@/db';
 import { users, proxyKeys, emailDelegations, keyEmailAccess, accessRules, keyRuleAssignments } from '@/db/schema';
 import { eq, and } from 'drizzle-orm';
@@ -14,7 +14,8 @@ import { driveTreeFlagOn } from '@/lib/featureFlags';
 import { liveTokenScopes, DRIVE_FULL_SCOPE } from '@/lib/googleTokenScopes';
 import {
   resolveDriveTreeAccess, effectiveDriveAccess, settingsFromRules, normalizeDriveDefault, driveDenialText, widenListFields,
-  type DriveDefault, type DriveSetting,
+  classifyDriveDiscovery, driveDiscoveryRefusal, sharedDriveAccess, sharedDriveBlockedText, filterSharedDrives,
+  type DriveDefault, type DriveSetting, type DriveDiscovery,
 } from '@/lib/driveTreeAccess';
 import { resolveDriveLineage, resolveLineageFrom, parseDriveFileMeta, driveMetaUrl, LineageError, MAX_LINEAGE_HOPS, type MetaFetcher } from '@/lib/driveLineage';
 
@@ -257,7 +258,8 @@ function applicableFileRules(
 // ─── DRIVE TREE ENGINE (feature-flagged folder-inherited access) ─────────────
 // Mirror of the MCP route's engine (src/lib/driveTreeAccess.ts): with the
 // key owner's flag on and the live token carrying the full `drive` scope,
-// the Drive-file guard, the per-kind handlers and Drive listings below defer
+// the Drive-file guard, the per-kind handlers and Drive discovery reads
+// (classifyDriveDiscovery: listings filtered, unfilterable ones refused) defer
 // to the folder-lineage resolver instead of the per-file rule table alone.
 
 type ProxyDriveTree = {
@@ -268,17 +270,15 @@ type ProxyDriveTree = {
   clerkUserId: string;
 };
 
-function isDriveListPath(fullPath: string): boolean {
-  return /^drive\/v3\/files$/.test(fullPath.split('?')[0]);
-}
-
 async function proxyDriveTreeEngine(
   dbUser: { id: string; email: string; clerkUserId: string },
   proxyKeyId: string,
   fullPath: string,
   telemetry: ProxyTelemetry,
 ): Promise<ProxyDriveTree | null> {
-  const drivePath = /^drive\/v[23]\/files/.test(fullPath) || !!driveFileKindForPath(fullPath);
+  // Every drive/ path, not only drive/v[23]/files: changes, drives and v2
+  // listings name files too (2026-10-03 review).
+  const drivePath = /^(upload\/)?drive\//i.test(fullPath) || !!driveFileKindForPath(fullPath);
   if (!drivePath) return null;
   if (!(await driveTreeFlagOn({ clerkUserId: dbUser.clerkUserId, email: dbUser.email }))) return null;
   const token = await fetchClerkGoogleToken(dbUser.clerkUserId, dbUser.clerkUserId, telemetry);
@@ -357,6 +357,14 @@ async function proxyFilterDriveListing(engine: ProxyDriveTree, body: string): Pr
   return JSON.stringify({ ...data, files: kept, withheld });
 }
 
+/** drives.list under the tree engine: Blocked shared drives withheld, `withheld` says how many. */
+function proxyFilterSharedDrives(engine: ProxyDriveTree, body: string): string {
+  let data: { drives?: unknown[] } | null = null;
+  try { data = JSON.parse(body); } catch { return body; }
+  if (!data || !Array.isArray(data.drives)) return body;
+  return JSON.stringify(filterSharedDrives(data, engine.settings, engine.driveDefault));
+}
+
 async function handleProxyRequest(request: NextRequest, params: { path: string[] }, telemetry: ProxyTelemetry) {
   try {
     const authHeader = request.headers.get('authorization');
@@ -365,7 +373,10 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     }
 
     const keyValue = authHeader.split(' ')[1];
-    const fullPath = params.path.join('/');
+    // Canonical spelling (bare `v3/files` → `drive/v3/files`, Drive slashes
+    // collapsed) so the guards below and the forwarded URL see one path —
+    // `drive/v3/files/` or `files//{id}` must not slip past an exact match.
+    const fullPath = canonicalizeGoogleApiPath(params.path.join('/'));
     // Same guard as the MCP classifier: a `..` segment would let the per-file
     // check authorize one id while Google serves another.
     if (hasDotSegment(fullPath)) {
@@ -413,11 +424,23 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     // is a Drive/Sheets/Docs/Slides path, and the live token carries `drive`).
     const driveTree = await proxyDriveTreeEngine(dbUser, dbKey.id, fullPath, telemetry);
 
+    // Drive discovery under the tree engine: listing-shaped reads can name
+    // Blocked files, so they are filtered below or refused here.
+    const driveDiscovery: DriveDiscovery | null = driveTree ? classifyDriveDiscovery(fullPath, request.method) : null;
+    if (driveDiscovery?.kind === 'refuse') {
+      return NextResponse.json({ error: driveDiscoveryRefusal(driveDiscovery.endpoint) }, { status: 403 });
+    }
+    if (driveTree && driveDiscovery?.kind === 'shared_drive'
+      && sharedDriveAccess(driveDiscovery.driveId, '', driveTree.settings, driveTree.driveDefault) === 'block') {
+      return NextResponse.json({ error: sharedDriveBlockedText(driveDiscovery.driveId) }, { status: 403 });
+    }
+
     // ─── GOOGLE DRIVE PER-FILE ACCESS GUARD ──────────────────────────────────
-    // Policy: never override Google's native API behavior for discovery —
-    // listing (`drive/v3/files`) passes through untouched (under drive.file it
+    // Policy: on the legacy drive.file grant, discovery is Google's native
+    // behavior — listing (`drive/v3/files`) passes through untouched (it
     // naturally shows only app-granted files; agents discover FGAC-exposed
-    // sheet ids via get_my_permissions). But ACCESS to a specific file must
+    // sheet ids via get_my_permissions). Under the tree engine it is filtered
+    // or refused above (classifyDriveDiscovery). ACCESS to a specific file must
     // respect the same sheets rules as the Sheets API, or drive get/export
     // would be a bypass around them.
     {
@@ -810,7 +833,7 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
 
     // Drive tree engine: a Drive listing is forwarded with a fields mask wide
     // enough to resolve each file's lineage, then filtered below.
-    const filterListing = !!driveTree && request.method === 'GET' && isDriveListPath(fullPath);
+    const filterListing = driveDiscovery?.kind === 'filter_files';
     if (filterListing) {
       const urlParams = new URLSearchParams(request.nextUrl.searchParams);
       const widened = widenListFields(urlParams.get('fields'));
@@ -856,8 +879,11 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
       }
     }
 
-    if (filterListing && driveTree && forward.status === 200 && isJson) {
-      const filtered = await proxyFilterDriveListing(driveTree, returnBody);
+    const filterDrives = driveDiscovery?.kind === 'filter_drives';
+    if ((filterListing || filterDrives) && driveTree && forward.status === 200 && isJson) {
+      const filtered = filterListing
+        ? await proxyFilterDriveListing(driveTree, returnBody)
+        : proxyFilterSharedDrives(driveTree, returnBody);
       const responseHeaders = new Headers(forward.headers);
       responseHeaders.delete('content-encoding');
       responseHeaders.delete('content-length');
