@@ -398,6 +398,16 @@ expect('clean stored draft, no inline message → its recipients',
 expect('both clean → union, deduplicated',
   draftSendRecipients(okDraft, extractDraftSendInfo({ id: 'r1', message: { raw: benignRaw } })),
   (r: string[] | null) => !!r && r.length === 1 && r[0] === 'alice@example.com');
+expect('inline message without raw → undetermined (Google may still rewrite the draft)',
+  draftSendRecipients(okDraft, extractDraftSendInfo({ id: 'r1', message: { threadId: 't1' } })), undetermined);
+expect('draft body with a repeated id → no draft id (fetched draft ≠ sent draft)',
+  extractDraftSendInfo('{"id":"r-benign","id":"r-evil"}'),
+  (d: { draftId: string | null }) => d.draftId === null);
+expect('draft body with a repeated nested raw → undetermined',
+  draftSendRecipients(okDraft, extractDraftSendInfo(`{"id":"r1","message":{"raw":"${benignRaw}","raw":"${evilRaw}"}}`)), undetermined);
+expect('same key in sibling objects is not a duplicate',
+  extractDraftSendInfo(`{"id":"r1","message":{"id":"m1","raw":"${benignRaw}"}}`),
+  (d: { draftId: string | null; bodyRecipients: string[] | null }) => d.draftId === 'r1' && !!d.bodyRecipients);
 expect('stored draft raw missing → undetermined',
   draftSendRecipients(undefined, extractDraftSendInfo({ id: 'r1' })), undetermined);
 
