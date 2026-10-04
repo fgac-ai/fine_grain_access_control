@@ -309,10 +309,27 @@ Two things this adds to the picture:
 
 Capability 18 A17 passes on the preview.
 
-### Post-expiry readings (first refreshed token after each mint) — NOT OBTAINED
+### Post-expiry readings (first refreshed token after each mint)
 
-Two attempts, both overwritten by other sessions before the token under test
-reached its first refresh (Clerk refreshes ~45 min after a mint):
+**Obtained for the consent-with-parameter pass.** The token minted by the preview's
+second "Reconnect Google" pass (`prompt=consent`, request = sign-in set +
+drive.file, `include_granted_scopes=true`, 03:49:50Z) was watched every 5 min
+with nothing else writing the record (`updated_at` stayed 03:49:50Z,
+`last_sign_in_at` stayed 03:38:14Z): `expires_in` ran down to 1017 s at 04:32Z and
+Clerk served a refreshed token at 04:37:53Z (`expires_in` 3598) that **carries
+`drive`** (record = token endpoint = tokeninfo = base + gmail.modify + drive.file +
+drive). The refresh token Clerk holds was issued by a consent pass that carried
+the parameter (03:49:50Z, or at the earliest the identical 03:27Z local pass);
+the hosted sign-in's consent at 03:38Z had issued a narrow one in between. So **a
+consent pass with `include_granted_scopes=true` yields a refresh token scoped to
+the union** — every FGAC reconnect leg now repairs `drive` durably, not for an
+hour. (Google's and the IETF draft's wording — the new *grant* includes the
+previously granted scopes — predicted this; it is now measured.)
+
+**Not obtained for the chooser-only pass** (`prompt=select_account` + parameter
+over a narrow refresh token, arms 1 and M5). Two attempts, both overwritten by
+other sessions before the token under test reached its first refresh (Clerk
+refreshes ~45 min after a mint):
 
 | token under test | minted | disturbed by | at |
 |---|---|---|---|
@@ -337,21 +354,17 @@ and cheap to rerun when the account is quiet (or on a quiet flagged account):
    stored narrow refresh token survived; the record now overstates the token,
    the `recordOverstates` branch of `reconcileScopes` denies, and the card's
    consent pass is the durable repair).
-4. Same watch after a CONSENT pass with the parameter (the shipped Accounts
-   button) answers whether consent-with-parameter refresh tokens are
-   union-scoped. Google's documentation and the IETF incremental-authorization
-   draft describe the new *grant* as including the previously granted scopes,
-   which is what a consent-issued refresh token is minted against — expected
-   yes, unmeasured here.
+4. (Answered above for the consent pass: union-scoped.)
 
-**Design assumption used until measured (the conservative one):** a chooser-only
-pass never changes the stored refresh token (Google's documented rule: refresh
-tokens come from consent or the first authorization; `_v2.md`–`_v4.md` measured
-exactly that for Clerk's own passes). So the parameter on a chooser-only pass
-buys the current access token and the record, which is the whole first-hour
-outage and the whole "record narrower than token" class; a narrow refresh token
-still needs one consent pass, and with the parameter on that pass the consent is
-Google's "already has some access" summary rather than a new permission request.
+**Design assumption for the chooser-only pass (the conservative one):** it never
+changes the stored refresh token (Google's documented rule: refresh tokens come
+from consent or the first authorization; `_v2.md`–`_v4.md` measured exactly that
+for Clerk's own passes). So the parameter on a chooser-only pass buys the current
+access token and the record — the whole first-hour outage and the whole "record
+narrower than token" class — and a narrow refresh token still needs one consent
+pass, which with the parameter is Google's "already has some access" summary
+rather than a new permission request, and is now measured to leave a union
+refresh token behind.
 
 What is NOT in doubt from the measurements above: every pass that carried the
 parameter returned the union on the access token and on Clerk's record (arm 1,
@@ -370,11 +383,16 @@ API surface, which is still true — Clerk offers no carrier for the parameter �
 the URL Clerk hands the browser is Google's own, and FGAC holds it on every leg it
 starts itself.
 
-What the parameter cannot do: change the stored refresh token on a chooser-only
-pass (Google issues refresh tokens on consent only), or reach the one sign-in
-path FGAC does not render — Clerk's hosted OAuth-server sign-in used by MCP
-connector connects, which shows consent and issues a refresh token scoped to the
-sign-in set. Those bound the residual, sized by the post-expiry readings below.
+What the parameter cannot do: reach the sign-in paths FGAC does not render. The
+in-app modal (`select_account`) narrows the access token and the record until
+the next FGAC pass or the first refresh; Clerk's hosted sign-in page
+(`prompt=consent select_account` — previews, the Account Portal, and the
+OAuth-server authorize flow MCP connector connects go through) also issues a
+refresh token scoped to the sign-in set, so after a connector connect `drive`
+stays gone until the next FGAC consent pass. With the parameter that pass (the
+re-enable card, or any reconnect) is one "already has some access" confirmation
+and leaves a union refresh token behind (measured below), so the damage is
+bounded to the interval between a hosted sign-in and the next FGAC pass.
 
 ### Smallest change (recommended)
 
