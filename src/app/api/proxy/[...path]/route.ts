@@ -436,10 +436,11 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     }
 
     // ─── GOOGLE DRIVE PER-FILE ACCESS GUARD ──────────────────────────────────
-    // Policy: never override Google's native API behavior for discovery —
-    // listing (`drive/v3/files`) passes through untouched (under drive.file it
+    // Policy: on the legacy drive.file grant, discovery is Google's native
+    // behavior — listing (`drive/v3/files`) passes through untouched (it
     // naturally shows only app-granted files; agents discover FGAC-exposed
-    // sheet ids via get_my_permissions). But ACCESS to a specific file must
+    // sheet ids via get_my_permissions). Under the tree engine it is filtered
+    // or refused above (classifyDriveDiscovery). ACCESS to a specific file must
     // respect the same sheets rules as the Sheets API, or drive get/export
     // would be a bypass around them.
     {
