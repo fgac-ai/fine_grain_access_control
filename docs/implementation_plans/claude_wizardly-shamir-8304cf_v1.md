@@ -208,16 +208,61 @@ What this settles:
   shows the first-time wording, not "needs re-enabling", because the profile had
   no tree setting saved); after M1r the card was gone. The Accounts page badge
   row only ever shows `gmail.modify` and `drive.file`, never `drive`.
-- **M3's failure is a harness hazard, not a parameter effect**: M1r and arm 1
-  carried the same parameter and completed. The consent pass took 85 s across
-  three Google screens, during which another session was driving a Google sign-in
-  through the same single-session Clerk client in the same Chrome (tab 7 moved
-  from a preview's oauth_callback to accounts.google.com during the run). Clerk
-  then rejected the returning verification. A failed reauthorize leaves the
-  external account `unverified` with `approved_scopes` cleared — the dashboard
-  showed "Action Required: Connect Google Account" and the Accounts page
-  "gmail.modify missing / drive.file missing". Clerk trace id in the probe log
-  for the Application Logs. Repaired below.
+- **M3's failure is a harness hazard, not a parameter effect** (M1r and arm 1
+  carried the same parameter and completed), and PostHog pins the mechanism:
+  `reauthorize()` reports the external account as `unverified` for as long as
+  the pass is pending (M2/M1r returned that status too; they completed in ~30 s).
+  M3 took 85 s across three Google screens. In that window another session's
+  preview dashboard loaded for USER_A, `checkGoogleAccess` saw no *verified*
+  Google account and rendered "Action Required: Connect Google Account", and
+  that session's runner clicked its button — `google_reconnect_started
+  {source: card}` at 02:40:55.3Z, the same second our consent pass returned to
+  Clerk. That click runs `startGoogleReconnect`'s not-verified branch: destroy
+  the external account and create a new one. Our code arrived for an account
+  that no longer existed → `authorization_invalid`; the probe's
+  `unverified / scopes empty` at 02:41Z was the OTHER session's new pending
+  account, which its consent pass completed at 02:43:25Z. Two product notes
+  fall out of this, for a follow-up rather than this spike: (a) a pending
+  reauthorize makes a healthy grant look dead on every other open dashboard
+  for its duration, and (b) the card's destroy-and-recreate branch fires on
+  that transient state — a second tab or device can break a user's grant
+  mid-consent. Clerk trace id in the probe log for the Application Logs.
+- **Repaired by another session at 02:43:25Z** before our repair runner acted (it
+  checked first and stopped — the account was `verified` again). The repair was a
+  standard consent reconnect without the parameter: record and token came back as
+  base + gmail.modify + drive.file, no `drive`, and a consent pass issues a new
+  refresh token, so from 02:43Z USER_A holds a NARROW refresh token while Google
+  still holds `drive`. That is the fixture for the decisive reading below (M5).
+
+### M5 — chooser-only pass with the parameter over a NARROW refresh token (03:02:33Z)
+
+Fixture confirmed twice over: after the 02:43Z repair, yet another session ran a
+consent pass on USER_A at 02:55:46Z–02:56:50Z (the runner saw Google's
+consentview in the shared Chrome's console log; record rewritten 02:56:50Z, still
+without `drive`). So immediately before M5 the stored refresh token was at most
+six minutes old and scoped to the sign-in set; Google's grant still held `drive`.
+
+Pass: in-place `reauthorize` (verified branch), `additionalScopes: [gmail.modify]`,
+`prompt=select_account`, URL sent with `include_granted_scopes=true`
+(request `scope` = the same five sign-in scopes, no `drive`). Google: account
+chooser only, one row, no consent. Round trip 03:02:23Z → 03:02:37Z.
+
+| reading | value |
+|---|---|
+| pre-M5 (02:52:57Z) record = token endpoint = tokeninfo | base + gmail.modify + drive.file (no `drive`) |
+| post-M5 (03:02:39Z, record `updated_at` 03:02:33.6Z) record = token endpoint = tokeninfo | base + gmail.modify + drive.file + **drive**, `expires_in` 3593 |
+| +60 s | unchanged |
+| dashboard | Drive tree card ("Read everything · 0 overrides") renders; the "Enable full Drive access" card is gone |
+| Accounts page | badges `gmail.modify`, `drive.file` only — the card never renders a `drive` badge, even with it on the record (the Drive tree card on the profile page is where the scope is surfaced) |
+
+First refresh after this mint: see "Post-expiry readings".
+
+Harness note: the runner's first attempt never reached Google — its chooser click
+landed on a background tab (another session's new preview tab had taken the
+foreground; `visibilityState` "hidden"), and the probe it ran meanwhile read the
+other session's in-flight consent (02:55:46Z `unverified`). It restarted from a
+fresh transaction; the 02:56:03Z entry in the probe log is that artefact, not a
+measurement.
 
 ### Post-expiry readings (first refreshed token after each mint)
 
