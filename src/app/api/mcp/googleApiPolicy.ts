@@ -144,7 +144,22 @@ const GOOGLEAPIS_ORIGIN = /^https?:\/\/(?:[a-z0-9-]+\.)*googleapis\.com(?::\d+)?
 
 export function canonicalizeGoogleApiPath(rawPath: string): string {
   const path = rawPath.replace(GOOGLEAPIS_ORIGIN, '').replace(/^\/+/, '');
-  return DRIVE_BARE_PATH.test(path) ? `drive/${path}` : path;
+  return collapseDrivePath(DRIVE_BARE_PATH.test(path) ? `drive/${path}` : path);
+}
+
+/**
+ * One spelling per Drive path: repeated slashes collapsed and a trailing
+ * slash dropped (query untouched). Without it `drive/v3/files/` was a listing
+ * Google served but no FGAC check recognised — the Drive tree engine filtered
+ * only the exact `drive/v3/files` spelling (2026-10-03 review) — and
+ * `files//{id}` slipped past the per-file id match. Drive only: other
+ * families' paths are forwarded exactly as given.
+ */
+function collapseDrivePath(path: string): string {
+  if (!/^(upload\/+)?drive\//i.test(path)) return path;
+  const cut = path.search(/[?#]/);
+  const [base, rest] = cut === -1 ? [path, ''] : [path.slice(0, cut), path.slice(cut)];
+  return base.replace(/\/{2,}/g, '/').replace(/\/+$/, '') + rest;
 }
 
 /**
@@ -348,7 +363,10 @@ export function classifyGoogleApiCall(rawPath: string, method: string): RawCallC
   // passthrough, as does listing (`GET drive/v3/files`, no id) — discovery is
   // never gated. `files/trash` (emptyTrash) is DELETE-only and never gets here.
   // `upload/drive/v3/files/{id}` (media content update) is the same file.
-  const fileMatch = path.replace(/^upload\//i, '').match(/^drive\/v3\/files\/([^/?#]+)(\/|$)/i);
+  // Drive v2 addresses the same files (`drive/v2/files/{id}?alt=media`
+  // downloads, exportLinks): gated identically since 2026-10-03 — before, a
+  // v2 id-addressed call was unknown-family passthrough.
+  const fileMatch = path.replace(/^upload\//i, '').match(/^drive\/v[23]\/files\/([^/?#]+)(\/|$)/i);
   if (fileMatch && fileMatch[1].toLowerCase() !== 'generateids') {
     return { kind: 'drive_file', fileId: decodeURIComponent(fileMatch[1]), isMutating };
   }
