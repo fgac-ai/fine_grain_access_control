@@ -28,14 +28,17 @@ a profile, and every tool works with that profile's rules from then on.
 
 ## What the agent gets
 
-Nineteen tools, all annotated (`readOnlyHint` / `destructiveHint`) so clients can
+Twenty-two tools, all annotated (`readOnlyHint` / `destructiveHint`) so clients can
 auto-run reads and prompt before writes:
 
 - **Gmail**: `list_accounts`, `gmail_list`, `gmail_read`, `gmail_get_attachment`, `gmail_labels`, `gmail_send`
 - **Sheets**: `sheets_get_spreadsheet`, `sheets_read_range`, `sheets_update_range`, `sheets_append_rows`, `sheets_edit`
 - **Docs and comments**: `docs_read_document`, `docs_edit`, `comments_read`, `comments_add`
+- **Slides**: `slides_get_presentation`, `slides_edit`
 - **Rule-checked raw Google API**: `google_api_get`, `google_api_modify`
 - **Self-service**: `get_my_permissions`, `request_access`
+- **Large files**: `create_temporary_api_key` — a short-lived key so a script can upload or
+  download files too large for tool calls, under the same rules
 
 Every tool takes an optional `account` argument, so one connection can reach a
 work inbox, a school inbox, and inboxes teammates have delegated.

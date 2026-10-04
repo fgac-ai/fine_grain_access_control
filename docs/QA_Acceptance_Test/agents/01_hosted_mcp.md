@@ -378,6 +378,31 @@ curl -s $BASE_URL/api/mcp -X POST \
   A4/A5: concatenated windows must equal the windowless read.
 - A8: fold into the Analytics Events queries below (same run window).
 
+## Capability: Temporary API Keys (→ capabilities/23_temporary_api_keys.md)
+
+- Fixtures per the capability doc: a ~2 MB attachment in USER_A's mailbox, and for A8 a
+  scratch profile + scratch connection (manual DCR token). Never revoke the baseline profile.
+- Mask minted keys in evidence (`sk_proxy_…<last4>`).
+- A1, A2, A9, A10: `tools/call` `create_temporary_api_key` via curl, using the baseline token
+  (pending connection for A9 = a fresh manual-DCR registration left unapproved).
+- A3–A6: curl the proxy with `Authorization: Bearer $TMP`; for A4, run each refusal row with
+  the baseline standing key too and assert identical status and text.
+- A7, A8: dashboard steps via the built-in browser (JS clicks are fine for FGAC UI); proxy
+  calls via curl.
+- A11: `tools/list` + `initialize` via curl; grep the descriptions.
+- A12: `skip` — no agent in this environment (pure curl).
+- A13: fold into the Analytics Events queries below (same run window), plus monitoring §7.34 (1)–(2).
+
+## Capability: Large File Transfer (→ capabilities/24_large_file_transfer.md)
+
+- Fixtures: generate `qa-out/big.bin` (8 MB random), a ~1 MB PNG, and a ~6 MB attachment.
+  `qa-out/` is gitignored scratch; delete it after the run. Hash every file sent and received.
+- A1–A8: curl only. A1/A4 chunk with `dd`/`split -b 4m` and `Content-Range`; A2 `curl -o`
+  then `shasum -a 256`; A5/A6 build the MIME with python3 `email` stdlib, then chunk it.
+- A7: the 5 MB row runs against the preview only.
+- A9: `skip` — no agent in this environment.
+- A10: fold into the Analytics Events queries below, plus monitoring §7.34 (3).
+
 ---
 
 ## Capability: Argument tolerance (→ capabilities/09 A13, 15 A10, 16 A29)

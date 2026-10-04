@@ -217,6 +217,28 @@ No tmux sessions to clean up. Results are saved to `test/qa-envs/cc-cli/evals/re
   eval harness, concatenate + decode once, compare length/hash.
 - A8: fold into the Analytics Events queries below (same run window).
 
+## Capability: Temporary API Keys (→ capabilities/23_temporary_api_keys.md)
+
+- Fixtures per the capability doc: a ~2 MB attachment in USER_A's mailbox, and for A8 a
+  scratch profile + scratch connection (manual DCR token). Never revoke the baseline profile.
+- Mask minted keys in evidence (`sk_proxy_…<last4>`).
+- A1–A11: headless `claude -p` evals that call the tool and script the proxy requests; grade on
+  the response text and HTTP statuses. Dashboard steps (A5, A7, A8) run in the built-in browser.
+- A12: a `claude -p` eval with the capability's prompt verbatim, graded on the stream-json
+  transcript (mint call, request count, hash, no key echoed).
+- If the CLI login has expired, these are `blocked` ("USER ACTION REQUIRED: `claude login`"),
+  never `skip`.
+- A13: fold into the Analytics Events queries below (same run window), plus monitoring §7.34 (1)–(2).
+
+## Capability: Large File Transfer (→ capabilities/24_large_file_transfer.md)
+
+- Fixtures: generate `qa-out/big.bin` (8 MB random), a ~1 MB PNG, and a ~6 MB attachment.
+  `qa-out/` is gitignored scratch; delete it after the run. Hash every file sent and received.
+- A1–A8: eval-driven scripts per the capability doc.
+- A9: a `claude -p` eval with the prompt verbatim, graded as in the CC MCP runbook.
+- An expired CLI login → `blocked` with USER ACTION.
+- A10: fold into the Analytics Events queries below, plus monitoring §7.34 (3).
+
 ---
 
 ## Capability: Analytics Events (→ capabilities/16_analytics_events.md)

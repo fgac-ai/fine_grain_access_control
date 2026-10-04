@@ -21,15 +21,18 @@ import { z } from 'zod';
 import { db } from '@/db';
 import {
   agentConnections, users, proxyKeys, keyEmailAccess,
-  accessRules, keyRuleAssignments, emailDelegations,
+  accessRules, keyRuleAssignments, emailDelegations, temporaryApiKeys,
 } from '@/db/schema';
-import { eq, and, isNull } from 'drizzle-orm';
+import { eq, and, isNull, gt, sql } from 'drizzle-orm';
+import {
+  TEMP_KEY_PURPOSES, TEMP_KEY_MAX_LIVE_PER_CONNECTION, TEMP_KEY_MAX_TTL_MINUTES, type TempKeyPurpose,
+  clampTtlMinutes, expectedBytesBucket, generateTemporaryKey, requestOrigin, temporaryKeyRecipe,
+} from '@/lib/temporaryApiKeys';
 import { filterLiveDelegatedAccess } from '@/db/delegationQueries';
 import { delegateLinkPath } from '@/lib/secondAccount';
 import { clerkClient } from '@clerk/nextjs/server';
 import { resolveDbUser } from '@/db/userHelpers';
-import { loadApplicableRules, checkReadRestrictions, decodeB64Url, stripHtmlToText, type ApplicableRules } from '@/lib/gmailRules';
-import { compileRulePattern } from '@/lib/rulePatterns';
+import { loadApplicableRules, checkReadRestrictions, decodeB64Url, stripHtmlToText, checkSendWhitelist, type SendDenial } from '@/lib/gmailRules';
 import { captureServerEvent } from '@/lib/posthogServer';
 import { runWithToolCallProps, addToolCallProps, getToolCallProps, runWithRequestProps, getRequestProps, setDriveEngine, getDriveEngine, type DriveEngineContext } from '@/lib/toolCallContext';
 import { normalizeToolArguments, unknownArgumentKeys, describeArgumentFailure, rewriteValidationFailureBody, type AliasHit, type ZodIssueLike } from '@/lib/mcpArgumentGuidance';
@@ -52,7 +55,7 @@ import { mintApprovalLink, describeApproval, actionTarget, fileApprovalActionFor
 import { connectionsDeepLink } from '@/lib/dashboardAgentLinks';
 import { recordApprovalMint, getApprovalRequestResourceName } from '@/lib/approvalRequests';
 import {
-  AGENT_APPROVAL_PROTOCOL, SEND_DISABLED_MESSAGE, recipientNotWhitelistedMessage,
+  AGENT_APPROVAL_PROTOCOL,
   accountNotPermittedByCaller, accountNotPermittedByDefault, googleNotFoundMessage, crossMailboxHint, withNoLinkStop, withLinkUnavailableStop, LINK_UNAVAILABLE_STOP,
 } from '@/lib/denialCopy';
 import { TOOL_DEFS, toolAnnotations, type FgacToolDef } from './toolDefs';
@@ -659,49 +662,8 @@ async function getGoogleToken(
 // shared with the push-notification filter so read policy and notification
 // policy can never drift apart.
 
-/**
- * Send-whitelist enforcement shared by gmail_send and google_api_modify.
- * Every recipient must match a whitelist pattern; unknown recipients deny.
- * Returns a denial ({ message, deniedRecipient? }) or null if sending is
- * allowed. deniedRecipient feeds the magic approval link — absent when we
- * could not even parse who the mail was for (no link in that case).
- */
-type SendDenial = { message: string; deniedRecipient?: string; code: string };
-
-function checkSendWhitelist(rules: ApplicableRules, recipients: string[] | null): SendDenial | null {
-  const sendRules = rules.filter(r => r.service === 'gmail' && r.actionType === 'send_whitelist');
-
-  if (!recipients || recipients.length === 0) {
-    return { message: '🚫 Could not determine the message recipients, so sending was denied. Provide a standard RFC 2822 message with To/Cc/Bcc headers.', code: 'recipients_undetermined' };
-  }
-
-  if (sendRules.length === 0) {
-    return {
-      message: SEND_DISABLED_MESSAGE,
-      deniedRecipient: recipients[0],
-      code: 'send_disabled',
-    };
-  }
-
-  for (const recipient of recipients) {
-    let isWhitelisted = false;
-    for (const rule of sendRules) {
-      if (!rule.regexPattern) continue;
-      const regex = compileRulePattern(rule.regexPattern);
-      if (!regex) continue;
-      if (regex.test(recipient)) { isWhitelisted = true; break; }
-    }
-    if (!isWhitelisted) {
-      return {
-        message: recipientNotWhitelistedMessage(recipient),
-        deniedRecipient: recipient,
-        code: 'recipient_not_whitelisted',
-      };
-    }
-  }
-
-  return null;
-}
+// checkSendWhitelist moved to src/lib/gmailRules.ts — shared with the REST
+// proxy so both surfaces enforce one recipient policy.
 
 /**
  * Magic-link denial (connector-growth Phase C): policy denials that a user
@@ -1880,6 +1842,22 @@ const MAX_ATTACHMENT_CHARS = 200_000; // base64url chars ≈ 150 KB decoded
  */
 const RESPONSE_WINDOW_MAX_CHARS = 200_000;
 
+/**
+ * Payloads this big (≈1.1 MB of base64 / 1.5 MB of JSON) take enough windowed
+ * calls that a script with a temporary API key is the better path. The hint
+ * rides the FIRST response only (offset 0 / the ⚠️ size cap), never every
+ * window. `large_file_hint_shown` measures demand the hint did not convert
+ * (monitoring §7.34 (5)).
+ */
+const LARGE_FILE_HINT_CHARS = 1_500_000;
+
+function largeFileHint(totalChars: number, windowChars: number): string {
+  addToolCallProps({ large_file_hint_shown: true });
+  const calls = Math.ceil(totalChars / windowChars);
+  return `This payload needs about ${calls} windowed calls. If you can run code with network access, ` +
+    `create_temporary_api_key (purpose "download") fetches it in one request instead.`;
+}
+
 function windowPayload(payload: string, offset: number, limit: number | undefined) {
   const cappedLimit = Math.min(Math.max(1, limit ?? RESPONSE_WINDOW_MAX_CHARS), RESPONSE_WINDOW_MAX_CHARS);
   const data = payload.slice(offset, offset + cappedLimit);
@@ -1917,10 +1895,13 @@ function windowedResult(
   const reassemble = encoding === 'base64url'
     ? 'concatenate the data strings in offset order, then base64url-decode the result once'
     : 'concatenate the data strings in offset order to reconstruct the full payload';
+  const hint = off === 0 && win.next_offset !== null && payload.length >= LARGE_FILE_HINT_CHARS
+    ? largeFileHint(payload.length, win.chars_returned) : undefined;
   return jsonResult({
     ...extra,
     ...(encoding ? { encoding } : {}),
     ...win,
+    ...(hint ? { large_file_hint: hint } : {}),
     note: win.next_offset === null
       ? `Final window — ${reassemble}.`
       : `Partial content — call again with offset: ${win.next_offset} for the next window; ${reassemble}.`,
@@ -3315,6 +3296,7 @@ function registerFgacTools(server: FgacMcpServer) {
               `⚠️ Attachment is ~${approxKb} KB, which exceeds the ~150 KB limit for a single MCP response. ` +
               `Retrieve it in windows: call again with offset: 0 and a limit sized to your tool-result budget (chars of base64url data, max 200000). ` +
               `Each response reports total_chars and next_offset — concatenate the data strings in offset order, then base64url-decode the result once. ` +
+              (attachmentChars >= LARGE_FILE_HINT_CHARS ? largeFileHint(attachmentChars, RESPONSE_WINDOW_MAX_CHARS) + ' ' : '') +
               `Or ask the user to retrieve it directly from Gmail.`);
           }
           return jsonResult(attachment);
@@ -3927,6 +3909,88 @@ function registerFgacTools(server: FgacMcpServer) {
       }
     );
 
+    // ── create_temporary_api_key ──────────────────────────────────────
+    // A short-lived REST-proxy key for scripts the agent runs (payloads too
+    // large for tool calls). It is a pointer to this connection's profile key,
+    // resolved by the proxy on every request — never a profile of its own.
+    // Plan: docs/implementation_plans/large-api-payload-options_v5.md
+    server.registerTool(
+      TOOL_DEFS.create_temporary_api_key.name,
+      toolConfig(TOOL_DEFS.create_temporary_api_key, {
+        purpose: z.enum(TEMP_KEY_PURPOSES).optional().describe('What the script will do: upload (file to Drive), download (Drive file or Gmail attachment), send_attachment (email with a large attachment), bulk_calls, or other. Selects the recipe returned with the key. Default other.'),
+        ttl_minutes: z.number().optional().describe(`Key lifetime in minutes, 1–${TEMP_KEY_MAX_TTL_MINUTES} (default 15). Ask for more only when a transfer will take longer; an expired upload can be resumed with a new key.`),
+        expected_bytes: z.number().optional().describe('Approximate size of the file or payload, if known (used for usage statistics only).'),
+      }),
+      async ({ purpose, ttl_minutes, expected_bytes }, { authInfo }) => {
+        const chosen: TempKeyPurpose = purpose ?? 'other';
+        addToolCallProps({ temp_key_purpose: chosen });
+        const conn = await requireApproval(authInfo);
+        if ('content' in conn) {
+          const userId = authInfo?.extra?.userId as string | undefined;
+          if (userId) captureServerEvent(userId, 'temp_api_key_refused', { reason: 'connection_not_approved', purpose: chosen, client_id: authInfo?.clientId });
+          return conn;
+        }
+        if (!conn.proxyKeyId) {
+          captureServerEvent(conn.user.clerkUserId, 'temp_api_key_refused', { reason: 'no_profile', purpose: chosen, client_id: conn.clientId });
+          return textResult('❌ This connection is not bound to an agent profile yet, so there are no permissions to put on a key. Ask the user to finish approving the connection in the FGAC dashboard.');
+        }
+        if (ttl_minutes !== undefined && ttl_minutes < 1) {
+          return textResult(`❌ ttl_minutes must be between 1 and ${TEMP_KEY_MAX_TTL_MINUTES}. Omit it for the 15-minute default. No key was created.`);
+        }
+        const ttl = clampTtlMinutes(ttl_minutes);
+        const now = new Date();
+
+        const [{ live }] = await db
+          .select({ live: sql<number>`count(*)::int` })
+          .from(temporaryApiKeys)
+          .where(and(
+            eq(temporaryApiKeys.connectionId, conn.connectionId),
+            isNull(temporaryApiKeys.revokedAt),
+            gt(temporaryApiKeys.expiresAt, now),
+          ));
+        if (live >= TEMP_KEY_MAX_LIVE_PER_CONNECTION) {
+          captureServerEvent(conn.user.clerkUserId, 'temp_api_key_refused', {
+            reason: 'rate_capped', purpose: chosen, client_id: conn.clientId, live_temp_keys: live,
+          });
+          return textResult(`❌ This connection already has ${live} unexpired temporary keys (the limit is ${TEMP_KEY_MAX_LIVE_PER_CONNECTION}). Reuse the key you created most recently — it works for any number of requests until it expires. No new key was created.`);
+        }
+
+        const generated = generateTemporaryKey();
+        const expiresAt = new Date(now.getTime() + ttl.granted * 60_000);
+        const [row] = await db.insert(temporaryApiKeys).values({
+          keyHash: generated.hash,
+          keyLast4: generated.last4,
+          parentKeyId: conn.proxyKeyId,
+          userId: conn.user.id,
+          connectionId: conn.connectionId,
+          purpose: chosen,
+          expiresAt,
+        }).returning({ id: temporaryApiKeys.id });
+
+        const props = {
+          purpose: chosen,
+          ttl_requested: ttl_minutes,
+          ttl_granted: ttl.granted,
+          ttl_capped: ttl.capped,
+          expected_bytes_bucket: expectedBytesBucket(expected_bytes),
+          client_id: conn.clientId,
+          client_name: conn.clientName ?? undefined,
+          connection_id: conn.connectionId,
+          parent_proxy_key_id: conn.proxyKeyId,
+          temp_key_id: row.id,
+          live_temp_keys: live + 1,
+        };
+        captureServerEvent(conn.user.clerkUserId, 'temp_api_key_created', props);
+        addToolCallProps({ temp_key_id: row.id, ttl_granted: ttl.granted });
+
+        const baseUrl = (authInfo?.extra?.requestOrigin as string | undefined) ?? DASHBOARD_URL;
+        return textResult(temporaryKeyRecipe({
+          key: generated.key, baseUrl, purpose: chosen, ttlGranted: ttl.granted,
+          ttlRequested: ttl_minutes, capped: ttl.capped, expiresAt,
+        }));
+      }
+    );
+
     // ── get_my_permissions ────────────────────────────────────────────
     server.registerTool(
       TOOL_DEFS.get_my_permissions.name,
@@ -4033,7 +4097,9 @@ const handler = createMcpHandler(
       'cell formatting, charts, sheet tabs, slides and shapes), comments_read and comments_add cover Drive-API comments on docs, sheets, and slides, and the values/gmail tools ' +
       'handle the simple cases. The full Google API surface is available through google_api_get (reads) and google_api_modify (writes) — Gmail threads, ' +
       'drafts, labels, and mailbox organization (archive, mark read, trash), Drive file listing and export, creating new documents, spreadsheets, or presentations. Fall back to them instead of treating an operation as ' +
-      'unsupported. A denied call is not a dead end: it returns a one-click approval link — show it to the user and retry after they approve.',
+      'unsupported. A denied call is not a dead end: it returns a one-click approval link — show it to the user and retry after they approve. ' +
+      'For files too large for a tool call (uploads, or attachments and downloads over ~1 MB), call create_temporary_api_key and move the bytes ' +
+      'with a script — the same access rules apply.',
   },
   {
     basePath: '/api',
@@ -4362,7 +4428,10 @@ const verifyMcpAuth = async (req: Request, bearerToken?: string) => {
     const clientId = (authInfo as Record<string, unknown>).clientId as string | undefined;
     // withToolAnalytics sees only authInfo, never the Request — ride the
     // user-agent along so $mcp_tool_call can be split by client product.
-    (authInfo as { extra?: Record<string, unknown> }).extra = { ...authInfo.extra, userAgent, profileSlug };
+    // requestOrigin: the host serving THIS request — a temporary API key must
+    // point its script at the same deployment (a preview's keys do not exist
+    // on fgac.ai), so NEXT_PUBLIC_APP_URL is the wrong source for it.
+    (authInfo as { extra?: Record<string, unknown> }).extra = { ...authInfo.extra, userAgent, profileSlug, requestOrigin: requestOrigin(req) };
     // Once-per-MCP-session product attribution (the initialize handshake).
     // Deliberately NOT coalesced: automation that spawns a fresh Claude Code
     // process every ~30 s (2026-09-08) makes this the largest event in the

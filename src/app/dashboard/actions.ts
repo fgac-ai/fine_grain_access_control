@@ -1,7 +1,7 @@
 "use server";
 
 import { db } from "@/db";
-import { users, proxyKeys, emailDelegations, keyEmailAccess, accessRules, keyRuleAssignments } from "@/db/schema";
+import { users, proxyKeys, emailDelegations, keyEmailAccess, accessRules, keyRuleAssignments, temporaryApiKeys } from "@/db/schema";
 import { eq, and, desc, isNull, inArray } from "drizzle-orm";
 import { DRIVE_SERVICE, DRIVE_TARGET_KINDS, actionTypeForAccess, accessLabel, type DriveAccess, type DriveDefault, type DriveNodeKind } from "@/lib/driveTreeAccess";
 import { findActiveDelegation } from "@/db/delegationQueries";
@@ -490,6 +490,19 @@ export async function revokeProxyKey(keyId: string) {
   if (!key || key.userId !== dbUser.id) throw new Error("Unauthorized");
 
   await db.update(proxyKeys).set({ revokedAt: new Date() }).where(eq(proxyKeys.id, keyId));
+  revalidateDashboard();
+}
+
+/** Revoke one temporary API key (create_temporary_api_key) the user's agent minted. */
+export async function revokeTemporaryKey(tempKeyId: string) {
+  const dbUser = await getDbUser();
+  const updated = await db.update(temporaryApiKeys)
+    .set({ revokedAt: new Date() })
+    .where(and(eq(temporaryApiKeys.id, tempKeyId), eq(temporaryApiKeys.userId, dbUser.id), isNull(temporaryApiKeys.revokedAt)))
+    .returning({ id: temporaryApiKeys.id, purpose: temporaryApiKeys.purpose });
+  if (updated.length === 0) throw new Error("Unauthorized");
+  const { captureServerEvent } = await import("@/lib/posthogServer");
+  captureServerEvent(dbUser.clerkUserId, 'temp_api_key_revoked', { temp_key_id: updated[0].id, purpose: updated[0].purpose, via: 'dashboard' });
   revalidateDashboard();
 }
 

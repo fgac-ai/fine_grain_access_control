@@ -157,6 +157,12 @@ expect('drive files GET (list) stays passthrough — discovery is never gated',
 // Blocked spreadsheet could be trashed via PATCH {trashed:true} while these
 // were passthrough. Every call naming ONE file by id is drive_file so the
 // route can run the per-file guard the REST proxy has always had. ──
+expect('drive v2 file GET → drive_file (v2 is still served; was passthrough)',
+  classifyGoogleApiCall('drive/v2/files/1BxiM2doc-ID_x?alt=media', 'GET'),
+  (c: { kind: string; fileId?: string; isMutating?: boolean }) => c.kind === 'drive_file' && c.fileId === '1BxiM2doc-ID_x' && c.isMutating === false);
+expect('upload/ drive v2 media update → drive_file mutating',
+  classifyGoogleApiCall('upload/drive/v2/files/1BxiM2doc-ID_x?uploadType=media', 'PUT'),
+  (c: { kind: string; fileId?: string; isMutating?: boolean }) => c.kind === 'drive_file' && c.isMutating === true);
 expect('drive file PATCH (rename/trash) → drive_file mutating with id',
   classifyGoogleApiCall('drive/v3/files/1BxiM2doc-ID_x', 'PATCH'),
   (c: { kind: string; fileId?: string; isMutating?: boolean }) => c.kind === 'drive_file' && c.fileId === '1BxiM2doc-ID_x' && c.isMutating === true);
