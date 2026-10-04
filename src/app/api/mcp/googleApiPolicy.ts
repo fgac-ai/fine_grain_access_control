@@ -451,6 +451,10 @@ export function rawApiFamily(cls: RawCallClass): string | null {
 export function extractSendRecipients(body: unknown): string[] | null {
   let raw: string | undefined;
   try {
+    // A JSON string with a repeated key is read differently by different
+    // parsers: JSON.parse keeps the LAST `raw`, Google's may keep the first.
+    // Checking one message while Google sends the other is a bypass.
+    if (typeof body === 'string' && hasDuplicateJsonKey(body)) return null;
     const obj = typeof body === 'string' ? JSON.parse(body) : body;
     if (obj && typeof obj === 'object' && typeof (obj as { raw?: unknown }).raw === 'string') {
       raw = (obj as { raw: string }).raw;
@@ -466,40 +470,146 @@ export function extractSendRecipients(body: unknown): string[] | null {
   } catch {
     return null;
   }
+  return extractRfc822Recipients(message);
+}
 
-  // Header section ends at the first blank line. Unfold continuation lines.
-  const headerSection = message.split(/\r?\n\r?\n/)[0].replace(/\r?\n[ \t]+/g, ' ');
+// At-signs a mail system could read as one: ASCII, full-width (U+FF20) and
+// small (U+FE6B).
+const AT_SIGN = /[@＠﹫]/;
+// `To:`, obsolete-syntax `To :` (RFC 5322 §4.5.3 allows WSP before the
+// colon), and the Resent- variants. Leading whitespace is tolerated because
+// only the very first header line can still carry it after unfolding.
+const RECIPIENT_HEADER = /^[ \t]*(?:resent-)?(?:to|cc|bcc)[ \t]*:/i;
+// An ordinary address, counted only when cleanly delimited — so
+// `ü-alice@…` can never be read as `-alice@…`, nor `bob@example.com_x` as
+// `bob@example.com`. A double quote may sit directly around it (a display
+// name that repeats the address) only when the quote is itself delimited.
+const ADDRESS = /(?<=(?:^|[\s<>,;:()])"?)[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?="?(?:$|[\s<>,;:()]))/g;
+// RFC 2047 encoded-word.
+const ENCODED_WORD = /=\?[^?\s]+\?([BbQq])\?([^?\s]*)\?=/g;
+
+/**
+ * To/Cc/Bcc addresses from a plain RFC 822 message — the `raw` field decoded,
+ * or the body of an `upload/…/messages/send?uploadType=media` request, which
+ * is the message itself (the REST proxy reads that form).
+ *
+ * Fails CLOSED: null (→ recipients_undetermined) when the header section
+ * names no recipient, AND whenever a recipient header holds an at-sign that
+ * is not inside a cleanly parsed address — quoted local parts, domain
+ * literals, UTF-8/IDN addresses, encoded-words. Until 2026-10-03 such
+ * recipients were silently dropped, so one whitelisted address beside them
+ * passed the whitelist and the unparsed recipient got the mail.
+ */
+export function extractRfc822Recipients(message: string): string[] | null {
+  // Where the header section ends depends on which line endings the reader
+  // honours, so scan the LONGEST plausible span (up to the latest of the
+  // first blank line in each style) and split lines on every style. Reading
+  // more headers than Gmail does can only add recipients, never hide one.
+  const ends = [/\r\n\r\n/, /\n\n/, /\r\r/, /\r\n\n/, /\n\r\n/]
+    .map(re => message.search(re))
+    .filter(i => i >= 0);
+  const headerSection = (ends.length > 0 ? message.slice(0, Math.max(...ends)) : message)
+    .replace(/(?:\r\n|\r|\n)[ \t]+/g, ' ');
   const recipients: string[] = [];
-  for (const line of headerSection.split(/\r?\n/)) {
-    if (/^(to|cc|bcc):/i.test(line)) {
-      const found = line.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g);
-      if (found) recipients.push(...found);
+  for (const line of headerSection.split(/\r\n|\r|\n/)) {
+    const header = line.match(RECIPIENT_HEADER);
+    if (!header) continue;
+    const value = line.slice(header[0].length);
+    const found = value.match(ADDRESS) ?? [];
+    if (AT_SIGN.test(value.replace(ADDRESS, ' '))) return null;
+    for (const [, enc, text] of value.matchAll(ENCODED_WORD)) {
+      if (AT_SIGN.test(decodeEncodedWord(enc, text))) return null;
     }
+    recipients.push(...found);
   }
   return recipients.length > 0 ? recipients : null;
+}
+
+function decodeEncodedWord(encoding: string, text: string): string {
+  const bytes = encoding.toUpperCase() === 'B'
+    ? Buffer.from(text, 'base64')
+    : Buffer.from(text.replace(/_/g, ' ').replace(/=([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16))), 'latin1');
+  // Charset is ignored: an ASCII at-sign is the same byte in every charset a
+  // mail reader would accept, and the UTF-8 view catches the wide forms.
+  return bytes.toString('latin1') + bytes.toString('utf8');
+}
+
+/**
+ * True when any object in a JSON document repeats a key (compared after
+ * unescaping, so `"raw"` repeats `"raw"`). The text must already be
+ * valid JSON — callers JSON.parse it too.
+ */
+export function hasDuplicateJsonKey(text: string): boolean {
+  const stack: Array<Set<string> | null> = [];
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '{') stack.push(new Set());
+    else if (c === '[') stack.push(null);
+    else if (c === '}' || c === ']') stack.pop();
+    else if (c === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
+      const token = text.slice(i, j + 1);
+      i = j;
+      let k = j + 1;
+      while (k < text.length && /\s/.test(text[k])) k++;
+      const keys = stack[stack.length - 1];
+      if (text[k] !== ':' || !keys) continue;
+      let key: string;
+      try { key = JSON.parse(token); } catch { return true; }
+      if (keys.has(key)) return true;
+      keys.add(key);
+    }
+  }
+  return false;
 }
 
 /**
  * Parse a Gmail drafts/send request body (a Draft resource: `{ id, message? }`).
  * `draftId` is the stored draft to send; `bodyRecipients` are To/Cc/Bcc parsed
  * out of an inline `message.raw`, when the caller updates the draft while
- * sending. The route unions bodyRecipients with the recipients of the FETCHED
- * draft — every address from either source must pass the send whitelist, so
- * neither a stale draft nor an inline rewrite can smuggle a recipient past it.
+ * sending; `hasInlineMessage` says the body carried a `message` at all, so an
+ * unparseable one can be told apart from an absent one. Combine with the
+ * FETCHED draft through draftSendRecipients.
  */
-export function extractDraftSendInfo(body: unknown): { draftId: string | null; bodyRecipients: string[] | null } {
+export function extractDraftSendInfo(body: unknown): { draftId: string | null; bodyRecipients: string[] | null; hasInlineMessage: boolean } {
+  // Unreadable body: no draft id (the route refuses), and an inline message
+  // is assumed — never read as "nothing inline".
+  const none = { draftId: null, bodyRecipients: null, hasInlineMessage: true };
   let obj: unknown = body;
   try {
+    // A repeated `id` or `raw` would let the fetched draft (or the parsed
+    // inline message) differ from the one Google sends.
+    if (typeof body === 'string' && hasDuplicateJsonKey(body)) return none;
     if (typeof body === 'string') obj = JSON.parse(body);
   } catch {
-    return { draftId: null, bodyRecipients: null };
+    return none;
   }
-  if (!obj || typeof obj !== 'object') return { draftId: null, bodyRecipients: null };
+  if (!obj || typeof obj !== 'object') return none;
   const draft = obj as { id?: unknown; message?: { raw?: unknown } };
   const draftId = typeof draft.id === 'string' && draft.id.length > 0 ? draft.id : null;
+  const hasInlineMessage = draft.message !== undefined && draft.message !== null;
   const raw = draft.message && typeof draft.message === 'object' ? draft.message.raw : undefined;
   const bodyRecipients = typeof raw === 'string' ? extractSendRecipients({ raw }) : null;
-  return { draftId, bodyRecipients };
+  return { draftId, bodyRecipients, hasInlineMessage };
+}
+
+/**
+ * Recipients a drafts/send delivers to: the stored draft's (`draftRaw`, the
+ * fetched draft's message.raw) ∪ the inline message's. Every address from
+ * either source must pass the send whitelist, so neither a stale draft nor an
+ * inline rewrite can smuggle a recipient past it — and either side being
+ * unparseable makes the whole send undeterminable (null). Before 2026-10-03
+ * the union read each side `?? []`, so one unparseable side was ignored.
+ */
+export function draftSendRecipients(
+  draftRaw: unknown,
+  info: { bodyRecipients: string[] | null; hasInlineMessage: boolean },
+): string[] | null {
+  const draftRecipients = typeof draftRaw === 'string' ? extractSendRecipients({ raw: draftRaw }) : null;
+  if (!draftRecipients) return null;
+  if (info.hasInlineMessage && !info.bodyRecipients) return null;
+  return [...new Set([...draftRecipients, ...(info.bodyRecipients ?? [])])];
 }
 
 /**

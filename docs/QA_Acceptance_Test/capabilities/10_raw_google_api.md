@@ -294,3 +294,24 @@
   not write through Sheets) must not reappear in the opposite direction.
 - **Cleanup**: trash all five (reversible; leave them trashed).
 
+
+### A17: Recipients the parser cannot account for refuse the send, never ride along
+- Profile with a send whitelist that includes `USER_B_EMAIL`. Via
+  `google_api_modify` POST `gmail/v1/users/me/messages/send`, send three
+  base64url `raw` messages, each with `To: <USER_B_EMAIL>` plus ONE extra
+  recipient the address regex cannot parse: (a) `Bcc: "qa hidden"@example.com`
+  (quoted local part), (b) `Cc: qa@[192.0.2.1]` (domain literal),
+  (c) `Bcc : qa-hidden@example.com` (obsolete space-before-colon header).
+- **Expected**: (a) and (b) are DENIED with the could-not-determine-recipients
+  message and `denial_code: 'recipients_undetermined'`; (c) is DENIED as
+  unauthorized-recipient naming `qa-hidden@example.com` (the header is now
+  scanned). Nothing is sent in any case — confirm in USER_B's inbox that no
+  message arrived. Before 2026-10-03 all three were SENT: the unparsed
+  recipient was dropped and the whitelisted `To` carried the call.
+- Then create a draft whose raw message is (a), and call
+  `gmail/v1/users/me/drafts/send` with `{"id":"<draftId>"}` — DENIED, no
+  approval link, nothing sent (drafts/send fails closed on either side of
+  its stored-draft ∪ inline-message union).
+- The parser forms (UTF-8/IDN, encoded-words, bare-CR, Resent-*, duplicate
+  JSON `raw` keys) are unit-tested in `scripts/test-google-api-policy.ts`;
+  this assertion proves the route maps the parser's null to a refusal.
