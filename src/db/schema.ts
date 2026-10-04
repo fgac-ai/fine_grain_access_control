@@ -499,6 +499,8 @@ export const resumableUploads = pgTable('resumable_uploads', {
   // Whose Google token forwards the chunks (a delegated mailbox's owner for Gmail).
   tokenOwnerClerkUserId: text('token_owner_clerk_user_id').notNull(),
   targetEmail: text('target_email'),                // Gmail: the sending mailbox
+  // Drive update: the existing file, whose rule is re-checked on every chunk.
+  fileId: text('file_id'),
   // Gmail: null = first chunk not seen yet, 'allowed' / 'denied' after it.
   recipientVerdict: text('recipient_verdict'),
   expiresAt: timestamp('expires_at').notNull(),

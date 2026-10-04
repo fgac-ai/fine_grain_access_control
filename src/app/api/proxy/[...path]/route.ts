@@ -271,25 +271,45 @@ function uploadTypeOf(request: NextRequest): string | undefined {
 }
 
 /**
+ * Response headers a resumable upload may hand back. Everything else is
+ * dropped: Google's upload responses carry `X-GUploader-UploadID`, which is
+ * Google's session id — returning it would let a caller rebuild Google's own
+ * session URL and send bytes straight to Google, past every FGAC check.
+ */
+const UPLOAD_RESPONSE_HEADERS = ['content-type', 'range'];
+
+function uploadResponseHeaders(source: Headers): Headers {
+  const headers = new Headers();
+  for (const name of UPLOAD_RESPONSE_HEADERS) {
+    const value = source.get(name);
+    if (value !== null) headers.set(name, value);
+  }
+  return headers;
+}
+
+/**
  * A resumable upload was just opened through FGAC: bind Google's session to
- * this profile and hand the caller a session URL on FGAC's own host, so
- * every chunk comes back through the proxy. Without the rewrite Google's own
- * URL would reach the client and the bytes would bypass FGAC entirely.
+ * this profile and hand the caller a session URL on FGAC's own host with
+ * FGAC's own opaque id, so every chunk comes back through the proxy. Fails
+ * closed: a 200 whose session URL cannot be adopted becomes a 502, and Google's
+ * session URL (or id) never reaches the caller on any path.
  */
 async function adoptResumableSession(
   request: NextRequest,
   response: NextResponse,
-  session: { parentKeyId: string; kind: string; tokenOwnerClerkUserId: string; targetEmail?: string },
+  session: { parentKeyId: string; kind: string; tokenOwnerClerkUserId: string; targetEmail?: string; fileId?: string },
   telemetry: ProxyTelemetry,
 ): Promise<NextResponse> {
+  if (response.status !== 200) {
+    return new NextResponse(response.body, { status: response.status, headers: uploadResponseHeaders(response.headers) });
+  }
   const location = response.headers.get('location');
-  if (response.status !== 200 || !location) return response;
-  let googleUrl: URL;
-  try { googleUrl = new URL(location); } catch { return response; }
-  if (!googleUrl.searchParams.get('upload_id') || googleUrl.hostname !== 'www.googleapis.com') return response;
-  // FGAC's own opaque id — Google's session URL (whose upload_id would let a
-  // client send chunks to Google directly, past the Gmail recipient check)
-  // stays on the server.
+  let googleUrl: URL | null = null;
+  try { googleUrl = location ? new URL(location) : null; } catch { googleUrl = null; }
+  if (!googleUrl || googleUrl.hostname !== 'www.googleapis.com' || !googleUrl.searchParams.get('upload_id')) {
+    telemetry.errorStatus = 'upload_session_unadoptable';
+    return NextResponse.json({ error: 'Google opened the upload but did not return a usable session; nothing was uploaded. Retry the initiation once.' }, { status: 502 });
+  }
   const fgacUploadId = randomBytes(24).toString('base64url');
   const uploadIdHash = hashUploadId(fgacUploadId);
   telemetry.uploadIdHash = uploadIdHash.slice(0, 16);
@@ -300,16 +320,17 @@ async function adoptResumableSession(
     kind: session.kind,
     tokenOwnerClerkUserId: session.tokenOwnerClerkUserId,
     targetEmail: session.targetEmail,
+    fileId: session.fileId,
     // Google keeps a resumable session for about a week.
     expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-  }).onConflictDoNothing();
-  const headers = new Headers(response.headers);
+  });
+  const headers = uploadResponseHeaders(response.headers);
   // On the gmail.fgac.ai proxy host the middleware already maps every path
   // onto /api/proxy, so the prefix there would be applied twice.
   const origin = requestOrigin(request);
   const prefix = new URL(origin).hostname.startsWith('gmail.') ? '' : '/api/proxy';
   headers.set('location', `${origin}${prefix}${googleUrl.pathname}?uploadType=resumable&upload_id=${fgacUploadId}`);
-  return new NextResponse(response.body, { status: response.status, headers });
+  return new NextResponse(response.body, { status: 200, headers });
 }
 
 async function trackedProxyRequest(request: NextRequest, params: { path: string[] }) {
@@ -440,6 +461,8 @@ async function forwardDriveCall(
   request: NextRequest, fullPath: string, owner: { clerkUserId: string; email: string }, telemetry: ProxyTelemetry,
   profileKeyId: string,
   driveTree: ProxyDriveTree | null = null,
+  /** The existing file a resumable update targets (re-checked on every chunk). */
+  fileId?: string,
 ): Promise<NextResponse> {
   telemetry.targetEmail = owner.email;
   telemetry.accountDelegated = false;
@@ -486,7 +509,7 @@ async function forwardDriveCall(
   const response = await streamFromGoogle(url, { method: request.method, headers, body }, telemetry);
   if (telemetry.uploadType === 'resumable_init') {
     return adoptResumableSession(request, response, {
-      parentKeyId: profileKeyId, kind: 'drive', tokenOwnerClerkUserId: owner.clerkUserId,
+      parentKeyId: profileKeyId, kind: 'drive', tokenOwnerClerkUserId: owner.clerkUserId, fileId,
     }, telemetry);
   }
   return response;
@@ -595,6 +618,82 @@ async function proxyFilterDriveListing(engine: ProxyDriveTree, body: string): Pr
   return JSON.stringify({ ...data, files: kept, withheld });
 }
 
+/**
+ * Per-file access for an id-addressed Drive call: the tree engine when it is
+ * on for this owner, else the per-file rule table (a Sheet/Doc/Slides rule
+ * of any kind authorizes the file; a block on any kind denies it). Shared by
+ * the request guard and by every resumable chunk of a Drive update, so a file
+ * switched to Blocked or Read Only mid-upload stops receiving bytes.
+ */
+async function driveFileDenial(
+  dbUser: { id: string; email: string; clerkUserId: string },
+  profileKeyId: string,
+  fileId: string,
+  isMutating: boolean,
+  driveTree: ProxyDriveTree | null,
+  telemetry: ProxyTelemetry,
+): Promise<NextResponse | null> {
+  if (driveTree) return proxyDriveTreeDenial(driveTree, fileId, isMutating, telemetry);
+  const allUserRules = await db
+    .select()
+    .from(accessRules)
+    .where(eq(accessRules.userId, dbUser.id));
+
+  const keyAssignments = await db
+    .select()
+    .from(keyRuleAssignments)
+    .where(eq(keyRuleAssignments.proxyKeyId, profileKeyId));
+
+  const assignedRuleIds = new Set(keyAssignments.map(a => a.accessRuleId));
+  const allAssignments = await db.select().from(keyRuleAssignments);
+  const rulesWithAssignments = new Set(allAssignments.map(a => a.accessRuleId));
+
+  const fileRules = ACTIVE_DRIVE_FILE_KINDS.flatMap(k =>
+    applicableFileRules(allUserRules, rulesWithAssignments, assignedRuleIds, DRIVE_FILE_KINDS[k].service, fileId),
+  );
+  const blockTypes = new Set(ACTIVE_DRIVE_FILE_KINDS.map(k => DRIVE_FILE_KINDS[k].actionTypes.block));
+  const readWriteTypes = new Set(ACTIVE_DRIVE_FILE_KINDS.map(k => DRIVE_FILE_KINDS[k].actionTypes.readWrite));
+
+  if (fileRules.length === 0) {
+    return NextResponse.json({
+      error: `Access Denied: File '${fileId}' is not exposed in FGAC rules for this API key.`
+    }, { status: 403 });
+  }
+  if (fileRules.some(r => blockTypes.has(r.actionType))) {
+    return NextResponse.json({
+      error: `Access Denied: Access to file '${fileId}' has been explicitly blocked.`
+    }, { status: 403 });
+  }
+  if (isMutating && !fileRules.some(r => readWriteTypes.has(r.actionType))) {
+    return NextResponse.json({
+      error: `Access Denied: Write operations on file '${fileId}' are restricted to Read-Only.`
+    }, { status: 403 });
+  }
+  return null;
+}
+
+/**
+ * The key ↔ mailbox grant behind a Gmail call, re-checked on every resumable
+ * chunk (a delegation revoked or a mailbox unticked mid-upload stops it).
+ * Mirror of the Gmail handler's steps 3 + 3b.
+ */
+async function gmailMailboxDenial(profileKeyId: string, targetEmail: string): Promise<NextResponse | null> {
+  const access = await db.select().from(keyEmailAccess)
+    .where(eq(keyEmailAccess.proxyKeyId, profileKeyId))
+    .then(rows => rows.find(r => r.targetEmail.toLowerCase() === targetEmail.toLowerCase()));
+  if (!access) {
+    return NextResponse.json({ error: `This API key no longer has access to '${targetEmail}'.` }, { status: 403 });
+  }
+  if (access.delegationId) {
+    const delegation = await db.select().from(emailDelegations)
+      .where(eq(emailDelegations.id, access.delegationId)).limit(1).then(res => res[0]);
+    if (!delegation || delegation.status !== 'active') {
+      return NextResponse.json({ error: `Access to '${targetEmail}' has been revoked by its owner.` }, { status: 403 });
+    }
+  }
+  return null;
+}
+
 /** End of the RFC 822 header block (index of the blank line), or -1. */
 function headerBlockEnd(text: string): number {
   const crlf = text.indexOf('\r\n\r\n');
@@ -604,14 +703,32 @@ function headerBlockEnd(text: string): number {
   return Math.min(crlf, lf);
 }
 
+/** Google persists resumable bytes in 256 KiB units: the first non-zero offset it can ever hold. */
+const RESUMABLE_UNIT = 256 * 1024;
+
+/** `Content-Range` of a chunk: a byte range, a status query, or unparseable. */
+function parseContentRange(range: string, bodyBytes: number): { kind: 'chunk'; start: number } | { kind: 'status' } | null {
+  if (!range) return bodyBytes > 0 ? { kind: 'chunk', start: 0 } : null; // one-shot PUT of the whole upload
+  if (/^bytes \*\/\d+$/i.test(range)) return { kind: 'status' };
+  const m = range.match(/^bytes (\d+)-(\d+)\/(\d+|\*)$/i);
+  if (!m) return null;
+  const start = Number(m[1]);
+  return Number.isSafeInteger(start) ? { kind: 'chunk', start } : null;
+}
+
 /**
  * One chunk (or status query) of a resumable upload FGAC opened. Authorized
- * by the session row: the upload must have been initiated through FGAC by
- * the SAME profile (a temporary key resolves to its parent, so a fresh key
- * can resume an upload an expired one started). Gmail sends are checked on
- * the chunk that starts at byte 0 — RFC 822 headers come first, so every
- * To/Cc/Bcc address must be in that chunk — and a session whose recipients
- * were refused (or never seen) accepts no further bytes.
+ * by the session row — opened through FGAC by the SAME profile (a temporary
+ * key resolves to its parent, so a fresh key can resume an upload an expired
+ * one started) — and by the access the initiation needed, re-checked now:
+ * the Drive file's rule for an update, the key ↔ mailbox grant for Gmail.
+ *
+ * Gmail sends: the recipients live in the RFC 822 headers. Google persists
+ * resumable bytes in 256 KiB units, so every byte before offset 256 KiB can
+ * only ever come from a chunk that starts at 0. FGAC therefore requires the
+ * whole header block inside the first 256 KiB, checks every To/Cc/Bcc in any
+ * chunk that starts at 0, and accepts no other offset below 256 KiB — nor any
+ * later chunk or status query until a byte-0 chunk has passed.
  */
 async function handleResumableChunk(
   request: NextRequest,
@@ -636,25 +753,38 @@ async function handleResumableChunk(
     return denied(telemetry, 'resumable_session_expired', 'This upload session is more than a week old and Google has discarded it. Start the upload again.');
   }
 
-  const range = request.headers.get('content-range') ?? '';
-  const isStatusQuery = /^bytes \*\//i.test(range);
-  const body = isStatusQuery ? undefined : await request.arrayBuffer();
-  if (body) telemetry.requestBytes = body.byteLength;
+  // Access the initiation needed, re-checked on every chunk.
+  if (session.kind === 'drive' && session.fileId) {
+    const engine = await proxyDriveTreeEngine(dbUser, profileKeyId, `drive/v3/files/${session.fileId}`, telemetry);
+    const fileDenial = await driveFileDenial(dbUser, profileKeyId, session.fileId, true, engine, telemetry);
+    if (fileDenial) return fileDenial;
+  }
+  if (session.kind === 'gmail_send') {
+    const mailboxDenial = await gmailMailboxDenial(profileKeyId, session.targetEmail ?? dbUser.email);
+    if (mailboxDenial) return mailboxDenial;
+  }
 
-  if (session.kind === 'gmail_send' && !isStatusQuery) {
+  const range = request.headers.get('content-range') ?? '';
+  const body = await request.arrayBuffer();
+  telemetry.requestBytes = body.byteLength;
+  const parsed = parseContentRange(range, body.byteLength);
+
+  if (session.kind === 'gmail_send') {
     if (session.recipientVerdict === 'denied') {
       return denied(telemetry, 'recipient_not_whitelisted', 'This message\'s recipients were refused on its first chunk, so the rest of the upload is refused too. Nothing was sent.');
     }
-    const startsAtZero = /^bytes 0-/i.test(range) || (!range && !!body);
-    if (startsAtZero) {
+    if (!parsed) {
+      return denied(telemetry, 'resumable_range_invalid', 'Send each chunk with a "Content-Range: bytes START-END/TOTAL" header (or "bytes */TOTAL" for a status query). Nothing was sent.');
+    }
+    if (parsed.kind === 'chunk' && parsed.start === 0) {
       // Latin-1 keeps one char per byte, so a split UTF-8 sequence later in
       // the chunk cannot shift or hide the header block.
-      const text = Buffer.from(body!).toString('latin1');
+      const text = Buffer.from(body).toString('latin1');
       const end = headerBlockEnd(text);
-      if (end === -1) {
+      if (end === -1 || end >= RESUMABLE_UNIT - 4) {
         return denied(telemetry, 'recipients_undetermined',
           'The first chunk of a Gmail send must contain the complete message header block (every To/Cc/Bcc header and the blank ' +
-          'line after them) so FGAC can check the recipients. Resend byte 0 onward in a larger first chunk. Nothing was sent.');
+          'line after them), and the header block must end within the first 256 KB of the message. Resend from byte 0. Nothing was sent.');
       }
       const recipients = extractRfc822Recipients(text.slice(0, end));
       const rules = await loadApplicableRules(dbUser.id, profileKeyId, session.targetEmail ?? dbUser.email);
@@ -666,6 +796,9 @@ async function handleResumableChunk(
     } else if (session.recipientVerdict !== 'allowed') {
       return denied(telemetry, 'recipients_undetermined',
         'Send the chunk that starts at byte 0 first: FGAC checks a Gmail send\'s recipients in the message headers there. Nothing was sent.');
+    } else if (parsed.kind === 'chunk' && parsed.start < RESUMABLE_UNIT) {
+      return denied(telemetry, 'resumable_range_invalid',
+        `Chunks after the first must start at a multiple of 256 KB (Google's resumable unit); resend from byte 0 instead. Nothing was sent.`);
     }
   }
 
@@ -678,10 +811,14 @@ async function handleResumableChunk(
   if (range) headers.set('Content-Range', range);
   const contentType = request.headers.get('content-type');
   if (contentType) headers.set('Content-Type', contentType);
-  const forward = await forwardToGoogle(session.googleSessionUrl, { method: 'PUT', headers, body }, telemetry);
+  const forward = await forwardToGoogle(session.googleSessionUrl, {
+    method: 'PUT', headers, body: parsed?.kind === 'status' ? undefined : body,
+  }, telemetry);
   if (!forward.ok) return forward.response;
   if (forward.status === 200 || forward.status === 201) telemetry.uploadComplete = true;
-  return passthroughResponse(forward, telemetry);
+  telemetry.responseBytes = Buffer.byteLength(forward.body);
+  // Allow-listed headers only (see UPLOAD_RESPONSE_HEADERS): never Google's upload id.
+  return new NextResponse(forward.body, { status: forward.status, headers: uploadResponseHeaders(forward.headers) });
 }
 
 async function handleProxyRequest(request: NextRequest, params: { path: string[] }, telemetry: ProxyTelemetry) {
@@ -814,6 +951,24 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
         `Sheets, Docs, and Slides files exposed in FGAC rules, and Drive calls on those files (drive/v3/files/{id}).`);
     }
 
+    // Resumable uploads are relayed only where FGAC can keep enforcing on the
+    // chunks: a Drive create, a Drive update (per-file rule re-checked per
+    // chunk), and a Gmail send (recipients checked on byte 0). Anything else
+    // — drafts/send, insert/import, Sheets — would let chunk bytes change
+    // what the initiation was authorized for.
+    if (telemetry.uploadType === 'resumable_init') {
+      const relayable = cls.kind === 'drive_create' || (cls.kind === 'drive_file' && cls.isMutating) || cls.kind === 'gmail_send';
+      if (!relayable) {
+        return denied(telemetry, 'resumable_unsupported',
+          'Resumable uploads through FGAC are supported for Drive file uploads (create or update) and Gmail messages/send. ' +
+          'Use uploadType=media or multipart (up to 4 MB) for this endpoint.');
+      }
+      if (cls.kind === 'gmail_send' && /"raw"\s*:/.test(await request.clone().text())) {
+        return denied(telemetry, 'recipients_undetermined',
+          'A resumable Gmail send carries the message in the uploaded bytes, not in the initiation metadata: remove "raw" from the initiation body.');
+      }
+    }
+
     // Drive tree engine (null unless the flag is on for this owner, the path
     // is a Drive/Sheets/Docs/Slides path, and the live token carries `drive`).
     // `upload/` media variants address the same files as their twins.
@@ -827,55 +982,14 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     // (metadata, media get/update incl. `upload/`, export, comments, copy)
     // must respect the same per-file rules as the Sheets/Docs/Slides APIs, or
     // Drive would be a bypass around them.
-    if ((cls.kind === 'drive_file' || cls.kind === 'file_comments' || cls.kind === 'drive_copy') && driveTree) {
-      const isMutating = cls.kind === 'drive_copy' || cls.isMutating;
-      const treeDenial = await proxyDriveTreeDenial(driveTree, cls.fileId, isMutating, telemetry);
-      if (treeDenial) return treeDenial;
-      return forwardDriveCall(request, fullPath, dbUser, telemetry, dbKey.id, driveTree);
-    }
     if (cls.kind === 'drive_file' || cls.kind === 'file_comments' || cls.kind === 'drive_copy') {
-      const fileId = cls.fileId;
-      const allUserRules = await db
-        .select()
-        .from(accessRules)
-        .where(eq(accessRules.userId, dbUser.id));
-
-      const keyAssignments = await db
-        .select()
-        .from(keyRuleAssignments)
-        .where(eq(keyRuleAssignments.proxyKeyId, dbKey.id));
-
-      const assignedRuleIds = new Set(keyAssignments.map(a => a.accessRuleId));
-      const allAssignments = await db.select().from(keyRuleAssignments);
-      const rulesWithAssignments = new Set(allAssignments.map(a => a.accessRuleId));
-
-      // A Drive file may be exposed as a spreadsheet, a document, or a
-      // presentation — any kind's rule authorizes it; a block on any denies it.
-      const fileRules = ACTIVE_DRIVE_FILE_KINDS.flatMap(k =>
-        applicableFileRules(allUserRules, rulesWithAssignments, assignedRuleIds, DRIVE_FILE_KINDS[k].service, fileId),
-      );
-      const blockTypes = new Set(ACTIVE_DRIVE_FILE_KINDS.map(k => DRIVE_FILE_KINDS[k].actionTypes.block));
-      const readWriteTypes = new Set(ACTIVE_DRIVE_FILE_KINDS.map(k => DRIVE_FILE_KINDS[k].actionTypes.readWrite));
-
-      if (fileRules.length === 0) {
-        return NextResponse.json({
-          error: `Access Denied: File '${fileId}' is not exposed in FGAC rules for this API key.`
-        }, { status: 403 });
-      }
-      if (fileRules.some(r => blockTypes.has(r.actionType))) {
-        return NextResponse.json({
-          error: `Access Denied: Access to file '${fileId}' has been explicitly blocked.`
-        }, { status: 403 });
-      }
       // A copy creates a file from this one; the REST proxy has always
       // required Read & Write for it (it was a mutating POST to the file).
       const isMutating = cls.kind === 'drive_copy' || cls.isMutating;
-      if (isMutating && !fileRules.some(r => readWriteTypes.has(r.actionType))) {
-        return NextResponse.json({
-          error: `Access Denied: Write operations on file '${fileId}' are restricted to Read-Only.`
-        }, { status: 403 });
-      }
-      return forwardDriveCall(request, fullPath, dbUser, telemetry, dbKey.id);
+      const fileDenial = await driveFileDenial(dbUser, dbKey.id, cls.fileId, isMutating, driveTree, telemetry);
+      if (fileDenial) return fileDenial;
+      return forwardDriveCall(request, fullPath, dbUser, telemetry, dbKey.id, driveTree,
+        cls.kind === 'drive_file' ? cls.fileId : undefined);
     }
 
     // Drive discovery reads and Drive-side creates (POST drive/v3/files, incl.

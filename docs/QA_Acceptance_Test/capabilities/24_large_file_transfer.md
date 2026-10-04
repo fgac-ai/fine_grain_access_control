@@ -50,6 +50,12 @@ attachment whose PARENT message matches the read-blacklist fixture → 403 with 
   session, or fabricated) → refused, nothing forwarded;
 - a chunk `PUT` using a key belonging to a **different** profile than the one that initiated
   → refused.
+- no response from the proxy on any upload call (initiation, chunk, status) carries Google's
+  session id: no `X-GUploader-UploadID` header, no `googleapis.com` URL;
+- a Drive update whose file rule is switched to Read Only (dashboard) between two chunks →
+  the next chunk is refused;
+- resumable initiation on anything but a Drive create/update or Gmail `messages/send` (e.g.
+  `upload/gmail/v1/users/me/drafts/send?uploadType=resumable`) → refused with guidance.
 
 ### A4: Expiry mid-upload is recoverable
 
@@ -70,7 +76,9 @@ Same as A5 but with a non-whitelisted `Cc` (an `@example.com` address) → the *
 refused with the send-whitelist text plus the approval link, and no message is sent (USER_B's
 mailbox has nothing new). A later chunk for that `upload_id` is refused too. Repeat with `Bcc`.
 Then a first chunk that ends before the header block is complete → refused, and the text says
-the headers must fit in chunk 1.
+the headers must fit in chunk 1; a header block padded past 256 KB → refused; a status query
+before any byte-0 chunk → refused; after an allowed byte-0 chunk, a chunk starting below
+256 KB (e.g. `bytes 100000-…`) → refused.
 
 ### A7: Size limits answer with guidance
 

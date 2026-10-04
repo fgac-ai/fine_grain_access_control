@@ -49,6 +49,7 @@ let tempKeyRow: Row = {};
 let parentKeyRow: Row = {};
 let rules: Row[] = [];
 let sessions: Row[] = [];
+let mailboxRows: Row[] = [];
 let googleCalls: Array<{ url: string; method: string; headers: Headers; bodyBytes: number }> = [];
 const MEDIA = Buffer.from(Array.from({ length: 300_000 }, (_, i) => (i * 7) % 256)); // binary, not UTF-8 safe
 
@@ -67,14 +68,15 @@ function installFetch() {
     googleCalls.push({ url, method, headers: new Headers(init?.headers), bodyBytes: body ? body.byteLength : 0 });
     const u = new URL(url);
     if (u.searchParams.get('uploadType') === 'resumable' && !u.searchParams.get('upload_id')) {
+      if (u.searchParams.get('fixture') === 'nolocation') return new Response(null, { status: 200, headers: { 'x-guploader-uploadid': GOOGLE_UPLOAD_ID } });
       const loc = `https://www.googleapis.com${u.pathname}?uploadType=resumable&upload_id=${GOOGLE_UPLOAD_ID}`;
-      return new Response(null, { status: 200, headers: { location: loc } });
+      return new Response(null, { status: 200, headers: { location: loc, 'x-guploader-uploadid': GOOGLE_UPLOAD_ID } });
     }
     if (u.searchParams.get('upload_id')) {
       const range = new Headers(init?.headers).get('content-range') ?? '';
       const m = range.match(/bytes (\d+)-(\d+)\/(\d+)/);
-      if (m && Number(m[2]) + 1 < Number(m[3])) return new Response(null, { status: 308, headers: { range: `bytes=0-${m[2]}` } });
-      return new Response(JSON.stringify({ id: 'new-file-id' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      if (m && Number(m[2]) + 1 < Number(m[3])) return new Response(null, { status: 308, headers: { range: `bytes=0-${m[2]}`, 'x-guploader-uploadid': GOOGLE_UPLOAD_ID } });
+      return new Response(JSON.stringify({ id: 'new-file-id' }), { status: 200, headers: { 'content-type': 'application/json', 'x-guploader-uploadid': GOOGLE_UPLOAD_ID } });
     }
     if (/\/messages\/m1\?format=full/.test(url)) {
       return new Response(JSON.stringify({ id: 'm1', labelIds: ['INBOX', 'SECRET'], payload: { headers: [] } }), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -119,7 +121,7 @@ async function main() {
     if (table === schema.temporaryApiKeys) return Object.keys(tempKeyRow).length ? [tempKeyRow] : [];
     if (table === schema.proxyKeys) return [parentKeyRow];
     if (table === schema.users) return [owner];
-    if (table === schema.keyEmailAccess) return [{ id: 'kea1', proxyKeyId: 'k1', targetEmail: OWNER_EMAIL, delegationId: null }];
+    if (table === schema.keyEmailAccess) return mailboxRows;
     if (table === schema.accessRules) return rules;
     if (table === schema.keyRuleAssignments) return [];
     if (table === schema.emailDelegations) return [];
@@ -168,6 +170,7 @@ async function main() {
     tempKeyRow = { id: 't1', keyHash: TEMP.hash, parentKeyId: 'k1', expiresAt: minutesFromNow(15), revokedAt: null };
     parentKeyRow = { id: 'k1', userId: owner.id, key: 'sk_proxy_parent', revokedAt: null, expiresAt: null, driveDefault: null };
     rules = [];
+    mailboxRows = [{ id: 'kea1', proxyKeyId: 'k1', targetEmail: OWNER_EMAIL, delegationId: null }];
   };
 
   console.log('temporary-api-keys — authentication:');
@@ -201,7 +204,8 @@ async function main() {
   r = await call('POST', 'upload/drive/v3/files?uploadType=resumable', { body: JSON.stringify({ name: 'big.bin' }), contentType: 'application/json', headers: { 'x-upload-content-length': '600000' } });
   const loc = r.headers.get('location') ?? '';
   check('initiation returns a session URL on FGAC\'s host', r.status === 200 && loc.startsWith('http://localhost:3000/api/proxy/upload/drive/v3/files?'), loc);
-  check('Google\'s upload_id never reaches the caller', !loc.includes(GOOGLE_UPLOAD_ID) && !r.text.includes(GOOGLE_UPLOAD_ID), loc);
+  const leaks = (res: { headers: Headers; text: string }) => [...res.headers.entries()].some(([, v]) => v.includes(GOOGLE_UPLOAD_ID)) || res.text.includes(GOOGLE_UPLOAD_ID);
+  check('Google\'s upload id never reaches the caller (Location, X-GUploader-UploadID, body)', !leaks(r), [...r.headers.entries()]);
   check('the session is bound to the opening profile and Google\'s URL kept server-side',
     sessions.length === 1 && sessions[0].parentKeyId === 'k1' && String(sessions[0].googleSessionUrl).includes(GOOGLE_UPLOAD_ID)
     && sessions[0].uploadIdHash === hashUploadId(new URL(loc).searchParams.get('upload_id') ?? ''), sessions);
@@ -211,6 +215,7 @@ async function main() {
     gmailHostLoc.startsWith('https://gmail.fgac.ai/upload/drive/v3/files?'), gmailHostLoc);
   sessions = sessions.slice(0, 1);
   r = await call('PUT', loc, { body: Buffer.alloc(262_144), headers: { 'content-range': 'bytes 0-262143/600000' } });
+  check('chunk responses carry no Google upload id either', !leaks(r), [...r.headers.entries()]);
   check('a chunk is relayed to Google\'s session URL with its Content-Range (308 = continue)',
     r.status === 308 && r.google.length === 1 && r.google[0].url.includes(GOOGLE_UPLOAD_ID)
     && r.google[0].headers.get('content-range') === 'bytes 0-262143/600000' && r.google[0].bodyBytes === 262_144, r);
@@ -228,6 +233,19 @@ async function main() {
   check('a chunk from a different profile is refused before Google', refusedBeforeGoogle(r), r);
   r = await call('PATCH', `upload/drive/v3/files/${FILE_ID}?uploadType=resumable`, { body: '{}', contentType: 'application/json' });
   check('resumable update of an unexposed file is refused at initiation', refusedBeforeGoogle(r), r);
+  r = await call('POST', 'upload/drive/v3/files?uploadType=resumable&fixture=nolocation', { body: '{}', contentType: 'application/json' });
+  check('an initiation Google answers without a usable session URL fails closed (502, no Google id)', r.status === 502 && !leaks(r), r);
+
+  const rwRule = { id: 'r_rw', userId: owner.id, service: 'sheets', actionType: 'sheet_read_write', targetResourceId: FILE_ID, regexPattern: null, targetEmail: null, ruleName: 'rw' };
+  reset(); sessions = []; rules = [rwRule];
+  r = await call('PATCH', `upload/drive/v3/files/${FILE_ID}?uploadType=resumable`, { body: '{}', contentType: 'application/json' });
+  const updLoc = r.headers.get('location') ?? '';
+  check('resumable update of a Read & Write file opens a session bound to the file', r.status === 200 && sessions[0]?.fileId === FILE_ID, sessions);
+  r = await call('PUT', updLoc, { body: Buffer.alloc(262_144), headers: { 'content-range': 'bytes 0-262143/600000' } });
+  check('its chunks are relayed while the rule allows writes', r.status === 308, r);
+  rules = [{ ...rwRule, actionType: 'sheet_read' }];
+  r = await call('PUT', updLoc, { body: Buffer.alloc(262_144), headers: { 'content-range': 'bytes 262144-524287/600000' } });
+  check('a file switched to Read Only mid-upload stops receiving chunks', refusedBeforeGoogle(r), r);
 
   console.log('temporary-api-keys — Gmail resumable send:');
   const sendRule = { id: 'r_send', userId: owner.id, service: 'gmail', actionType: 'send_whitelist', regexPattern: ALLOWED, targetEmail: null, targetResourceId: null, ruleName: 'allowed' };
@@ -261,6 +279,35 @@ async function main() {
   check('a whitelisted first chunk is relayed to Google', r.status === 308 && r.google.length === 1 && r.google[0].url.includes(GOOGLE_UPLOAD_ID) && sessions[0].recipientVerdict === 'allowed', r);
   r = await call('PUT', g.loc, { body: msg.subarray(262_144), headers: { 'content-range': `bytes 262144-${msg.length - 1}/${msg.length}` } });
   check('the rest of an allowed send is relayed and completes', r.status === 200 && r.google.length === 1, r);
+
+  g = await openGmailSession();
+  r = await call('PUT', g.loc, { headers: { 'content-range': `bytes */${msg.length}` } });
+  check('a status query before the recipients were checked is refused', refusedBeforeGoogle(r), r);
+  r = await call('PUT', g.loc, { body: msg.subarray(0, 262_144), headers: { 'content-range': 'bytes zero-262143/x' } });
+  check('an unparseable Content-Range on a send is refused', refusedBeforeGoogle(r), r);
+  r = await call('PUT', g.loc, { body: msg.subarray(0, 262_144), headers: { 'content-range': `bytes 0-262143/${msg.length}` } });
+  check('(allowed byte-0 chunk)', r.status === 308, r);
+  r = await call('PUT', g.loc, { body: msg.subarray(100_000, 362_144), headers: { 'content-range': `bytes 100000-362143/${msg.length}` } });
+  check('after the check, a chunk at an offset below 256 KB is refused (header region is byte-0 only)', refusedBeforeGoogle(r), r);
+  r = await call('PUT', g.loc, { headers: { 'content-range': `bytes */${msg.length}` } });
+  check('after the check, a status query is relayed', r.google.length === 1, r);
+  mailboxRows = [];
+  r = await call('PUT', g.loc, { body: msg.subarray(262_144), headers: { 'content-range': `bytes 262144-${msg.length - 1}/${msg.length}` } });
+  check('a mailbox unticked for the profile mid-upload stops the send', refusedBeforeGoogle(r), r);
+  reset(); rules = [sendRule];
+
+  g = await openGmailSession();
+  const padded = Buffer.from(`To: ${ALLOWED}\r\nX-Pad: ${'p'.repeat(270_000)}\r\nSubject: s\r\n\r\nbody`, 'latin1');
+  r = await call('PUT', g.loc, { body: padded, headers: { 'content-range': `bytes 0-${padded.length - 1}/${padded.length}` } });
+  check('a header block that runs past the first 256 KB is refused', refusedBeforeGoogle(r), r);
+
+  sessions = [];
+  r = await call('POST', 'upload/gmail/v1/users/me/messages/send?uploadType=resumable', { body: JSON.stringify({ raw: 'eA' }), contentType: 'application/json' });
+  check('a resumable send initiation carrying "raw" metadata is refused', refusedBeforeGoogle(r), r);
+  r = await call('POST', 'upload/gmail/v1/users/me/drafts/send?uploadType=resumable', { body: JSON.stringify({ id: 'd1' }), contentType: 'application/json' });
+  check('resumable drafts/send is refused (chunk bytes would replace the checked draft)', refusedBeforeGoogle(r) && /resumable/i.test(r.text), r);
+  r = await call('POST', 'upload/gmail/v1/users/me/messages?uploadType=resumable', { body: '{}', contentType: 'application/json' });
+  check('resumable Gmail insert is refused (not a relayed kind)', refusedBeforeGoogle(r), r);
 
   console.log('temporary-api-keys — streamed downloads:');
   reset(); rules = [{ id: 'r_lbl', userId: owner.id, service: 'gmail', actionType: 'label_blacklist', regexPattern: 'SECRET', targetEmail: null, targetResourceId: null, ruleName: 'secret label' }];
