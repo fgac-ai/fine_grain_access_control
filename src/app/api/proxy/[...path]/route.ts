@@ -205,6 +205,23 @@ async function forwardToGoogle(
   }
 }
 
+/**
+ * The caller's request headers, minus the ones that describe the caller's
+ * own connection to FGAC rather than the request to Google. `fetch` refuses
+ * `expect` outright ("expect header not supported") — and curl and many SDKs
+ * send `Expect: 100-continue` on every body over 1 MB, which turned each such
+ * upload into a 502 — and computes framing (`content-length`,
+ * `transfer-encoding`) from the body it is actually given. The caller's
+ * Authorization is replaced with the owner's Google token by every caller.
+ */
+const CONNECTION_HEADERS = ['host', 'expect', 'connection', 'keep-alive', 'transfer-encoding', 'te', 'upgrade', 'content-length', 'proxy-connection'];
+
+function forwardableHeaders(request: NextRequest): Headers {
+  const headers = new Headers(request.headers);
+  for (const name of CONNECTION_HEADERS) headers.delete(name);
+  return headers;
+}
+
 /** Google's response passed through with hop-by-hop encoding stripped. */
 function passthroughResponse(forward: { status: number; body: string; headers: Headers }, telemetry?: ProxyTelemetry): NextResponse {
   const responseHeaders = new Headers(forward.headers);
@@ -251,6 +268,7 @@ async function streamFromGoogle(
   } catch (err) {
     telemetry.googleMs = Date.now() - started;
     telemetry.errorStatus = isUpstreamTimeout(err) ? 'timeout' : 'network';
+    console.error('[PROXY] streamed Google call failed:', err instanceof Error ? `${err.message} (${String((err as { cause?: unknown }).cause)})` : err);
     return isUpstreamTimeout(err)
       ? NextResponse.json({ error: `Google did not start answering within ${STREAM_TIMEOUT_MS / 1000}s. Retry once after a short pause.` }, { status: 504 })
       : NextResponse.json({ error: `Could not reach the Google API: ${err instanceof Error ? err.message : 'network error'}.` }, { status: 502 });
@@ -502,9 +520,8 @@ async function forwardDriveCall(
       error: `Could not fetch Google access token for user '${owner.email}'. Please reconnect your Google account.`
     }, { status: 403 });
   }
-  const headers = new Headers(request.headers);
+  const headers = forwardableHeaders(request);
   headers.set('Authorization', `Bearer ${realGoogleToken.token}`);
-  headers.delete('host');
   const isMutating = request.method !== 'GET' && request.method !== 'HEAD';
   const canonicalPath = canonicalizeGoogleApiPath(fullPath);
   // Drive tree engine: a Drive listing is forwarded with a fields mask wide
@@ -1116,9 +1133,8 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
       // the version segment Google expects.
       const cleanPath = rest.startsWith(`${d.apiVersion}/`) ? rest : `${d.apiVersion}/${rest}`;
       const googleUrl = `https://${d.apiHost}/${cleanPath}${request.nextUrl.search}`;
-      const headers = new Headers(request.headers);
+      const headers = forwardableHeaders(request);
       headers.set('Authorization', `Bearer ${realGoogleToken.token}`);
-      headers.delete('host');
 
       let requestBody: ArrayBuffer | undefined = undefined;
       if (isMutatingRequest) {
@@ -1343,9 +1359,8 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     }
 
     const googleUrl = `https://www.googleapis.com/${fullPath}${finalQueryString}`;
-    const headers = new Headers(request.headers);
+    const headers = forwardableHeaders(request);
     headers.set('Authorization', `Bearer ${realGoogleToken.token}`);
-    headers.delete('host');
 
     let requestBody: ArrayBuffer | undefined = undefined;
     if (request.method !== 'GET' && request.method !== 'HEAD') {

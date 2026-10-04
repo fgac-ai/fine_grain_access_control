@@ -65,6 +65,10 @@ function installFetch() {
       }] }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
     const body = init?.body as ArrayBuffer | undefined;
+    // Node's fetch (undici) refuses these outright — mirror it so a forwarded
+    // client connection header fails the test the way it fails in production.
+    const fwd = new Headers(init?.headers);
+    if (fwd.has('expect')) throw new TypeError('fetch failed', { cause: new Error('expect header not supported') });
     googleCalls.push({ url, method, headers: new Headers(init?.headers), bodyBytes: body ? body.byteLength : 0 });
     const u = new URL(url);
     if (u.searchParams.get('uploadType') === 'resumable' && !u.searchParams.get('upload_id')) {
@@ -198,6 +202,10 @@ async function main() {
   // Real clients send Content-Length; NextRequest does not derive it from a buffer body.
   r = await call('POST', 'upload/drive/v3/files?uploadType=media', { body: Buffer.alloc(PROXY_MAX_REQUEST_BYTES + 1), contentType: 'application/octet-stream', headers: { 'content-length': String(PROXY_MAX_REQUEST_BYTES + 1) } });
   check('a body over the FGAC cap is refused with resumable guidance, before Google', r.status === 413 && r.google.length === 0 && r.text.includes('uploadType=resumable'), r);
+
+  r = await call('POST', 'upload/drive/v3/files?uploadType=media', { body: Buffer.alloc(2_000_000), contentType: 'application/octet-stream', headers: { expect: '100-continue', connection: 'keep-alive' } });
+  check('a client\'s Expect: 100-continue (curl, > 1 MB bodies) is not forwarded to Google', r.status === 200 && r.google.length === 1
+    && !r.google[0].headers.has('expect') && !r.google[0].headers.has('connection'), r);
 
   console.log('temporary-api-keys — Drive resumable relay:');
   reset(); sessions = [];
