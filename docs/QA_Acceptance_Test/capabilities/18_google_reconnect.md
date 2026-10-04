@@ -496,3 +496,25 @@
   `list_accounts`, or in `next_steps`); never a 📧 "do not re-ask" line on an
   undeliverable mailbox; never any new outbound email — this is a suppression
   feature
+
+### A17: FGAC's reconnect legs never narrow a wider Google grant (incremental authorization)
+- **Fixture:** a QA user on the Drive tree flag (`fgac-dev-drive-tree` launch
+  config) who holds the full `drive` scope — the token bridge
+  `/api/auth/google-picker-token` lists `https://www.googleapis.com/auth/drive`
+  in `scopes`. Then run a reconnect leg that requests only `drive.file`: the
+  Accounts page "Reconnect Google" button, the Picker's scope detour, or the
+  access card's post-sign-in auto-repair (`select_account`)
+- **Expected**: the Google authorization URL FGAC navigates to carries
+  `include_granted_scopes=true` (stash `location.href` before the navigation,
+  or read it on the Google page). A `select_account` pass shows the one-account
+  chooser only; a `consent` pass shows Google's "already has some access"
+  summary (no checkboxes) that lists the full Drive line. After the return the
+  token bridge's `scopes` AND the Clerk record (`approved_scopes`) both still
+  carry `drive` alongside `drive.file` and `gmail.modify`, the profile page
+  shows no "Enable full Drive access" card, and the Drive tree card still
+  renders. Control, for the record: the same request without the parameter
+  drops `drive` from both the token and the record (measured 2026-10-04,
+  `docs/implementation_plans/claude_wizardly-shamir-8304cf_v1.md`).
+  `npx tsx scripts/test-google-reconnect-url.ts` pins the URL rewrite on both
+  reconnect branches; `npx tsx scripts/google-scope-probe.ts USER_A` prints the
+  record and tokeninfo side by side for the before/after comparison

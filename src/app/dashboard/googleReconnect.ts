@@ -86,5 +86,29 @@ export async function startGoogleReconnect(
   if (!verificationUrl) {
     throw new Error('Clerk returned no verification redirect URL for the Google reconnect.');
   }
-  return verificationUrl;
+  return withGrantedScopes(verificationUrl);
+}
+
+/**
+ * Google's incremental-authorization switch on the URL Clerk hands back.
+ *
+ * Clerk builds the Google authorization URL from the request alone, so a pass
+ * that asks for fewer scopes than the user already granted — every plain
+ * sign-in, and every drive.file reconnect for a user on the full `drive` scope
+ * — comes back with a token, and a Clerk record, missing the rest. With
+ * `include_granted_scopes=true` Google returns a token for the union of this
+ * request and everything the user previously granted this OAuth client, and
+ * Clerk stores that union as `approved_scopes` (measured 2026-10-04 on the dev
+ * instance, chooser-only pass, plan claude_wizardly-shamir-8304cf_v1). Nothing
+ * new is ever requested: the union holds only scopes the user already approved.
+ * A URL that cannot be parsed is returned unchanged.
+ */
+export function withGrantedScopes(url: string): string {
+  try {
+    const u = new URL(url);
+    u.searchParams.set('include_granted_scopes', 'true');
+    return u.toString();
+  } catch {
+    return url;
+  }
 }
