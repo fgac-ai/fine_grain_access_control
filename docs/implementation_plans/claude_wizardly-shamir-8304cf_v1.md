@@ -281,7 +281,33 @@ gmail.modify + drive.file, `prompt=consent`).
 | profile page | Drive tree card ("Read everything · 0 overrides"), no "Enable full Drive access" card |
 
 So a reconnect that asks for `drive.file` no longer strips `drive`; it restores it.
-Capability 18 A17 passes locally. (Preview result recorded below when available.)
+Capability 18 A17 passes locally.
+
+### Preview (PR #182, commit 6609986, `fine-grain-access-control-gy5w8onzt-…vercel.app`), 03:36Z–03:50Z
+
+The preview had no USER_A session, so the run began with the sign-in the preview
+needs — which is itself the production narrowing path and gave the control for
+free:
+
+| beat | Google request | screens | record / token after |
+|---|---|---|---|
+| plain sign-in through Clerk's **hosted** page (`accounts.dev/sign-in` → Continue with Google) | sign-in set, **`prompt=consent select_account`**, no parameter | chooser (both QA accounts) → unverified-app warning → "signing back in" → consent "already has some access — **5 services**", no checkboxes | **`drive` gone** from record and token (03:38:14Z) |
+| Accounts "Reconnect Google" on the preview (twice; the second time with the authorization request captured at the click) | gmail.modify + drive.file, `prompt=consent`, **`include_granted_scopes=true` present** | warning → "signing back in" → consent "already has some access — **6 services**", the extra line being "See, edit, create, and delete **all** of your Google Drive files", no checkboxes | **`drive` back** on record and token (03:45:00Z and again 03:49:50Z); "✓ Google reconnected — gmail.modify and drive.file confirmed."; Drive tree card renders, no "Enable full Drive access" card |
+
+Two things this adds to the picture:
+
+- **Clerk's hosted sign-in page uses `prompt=consent select_account`**, unlike the
+  in-app modal (`select_account` only, arm 1). Every sign-in through the hosted
+  page — the Account Portal, previews, and the OAuth-server authorize flow MCP
+  connector connects go through — is therefore a consent pass: it narrows the
+  record and the token AND issues a new refresh token scoped to the sign-in set.
+  This is the hosted-route residual named in Part 3, now measured on the dev
+  instance rather than inferred from `_v4.md`.
+- The visible Google-side effect of the parameter on a consent pass is the "6
+  services" summary (the union) instead of "5 services" (the request). Nothing
+  is asked of the user that they have not already granted.
+
+Capability 18 A17 passes on the preview.
 
 ### Post-expiry readings (first refreshed token after each mint) — NOT OBTAINED
 
