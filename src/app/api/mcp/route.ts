@@ -77,6 +77,7 @@ import { driveTreeFlagOn } from '@/lib/featureFlags';
 import {
   resolveDriveTreeAccess, effectiveDriveAccess, settingsFromRules, normalizeDriveDefault, driveDefaultLabel,
   driveDenialText, widenListFields, DRIVE_SERVICE, type DriveDefault, type DriveSetting,
+  driveScopeUnconfined, isDriveApiPath, unconfinedDriveDenialText,
 } from '@/lib/driveTreeAccess';
 import {
   resolveDriveLineage, resolveLineageFrom, parseDriveFileMeta, driveMetaUrl, LineageError, MAX_LINEAGE_HOPS,
@@ -1855,8 +1856,22 @@ async function checkDriveFileAccess(
     // Unreachable in practice (no rule ⇒ not_exposed), but keep the executor total.
     return { gate: 'rule', kind: check.kind, perm: check.perm };
   }
+  if (driveScopeUnconfined(getDriveEngine())) {
+    // A full-`drive` token outside the tree engine: Google no longer gates
+    // this file per pick, so "rides the per-file grant" would mean any file
+    // in the Drive. Fail closed (see driveScopeUnconfined).
+    return { denial: unconfinedDriveDenial(conn, resolved, 'file', fileId) };
+  }
   addToolCallProps({ drive_file_gate: 'mime_other', raw_api_passthrough: true });
   return { gate: 'mime_other' };
+}
+
+/** Refusal for Drive listings / `mime_other` files on a full-scope token the tree engine does not confine. */
+function unconfinedDriveDenial(conn: ConnectionApproved, resolved: ResolvedAccount, what: 'listing' | 'file', fileId?: string) {
+  const delegated = resolved.targetEmail.toLowerCase() !== conn.user.email.toLowerCase();
+  addToolCallProps({ denial_code: 'drive_full_scope_unconfined', drive_scope_unconfined: true, ...(what === 'file' ? { drive_file_gate: 'unconfined' } : {}) });
+  console.warn(`[MCP] Drive ${what} refused: full drive scope outside the tree engine (delegated=${delegated})`);
+  return textResult(unconfinedDriveDenialText({ targetEmail: resolved.targetEmail, delegated, what, fileId }));
 }
 
 const COMMENT_LIST_FIELDS = 'nextPageToken,comments(id,content,resolved,createdTime,modifiedTime,author(displayName),quotedFileContent(value),replies(id,content,action,createdTime,author(displayName)))';
@@ -2779,6 +2794,12 @@ async function executeRawGoogleCall(
     const engine = getDriveEngine();
     if (engine?.active && method === 'GET' && /^drive\/v3\/files(\?|$)/.test(cleanPath)) {
       return filteredDriveListing(engine, cleanPath, rawUrl, resolved);
+    }
+    // A full-`drive` token the engine does not confine (delegated mailbox,
+    // or flag off): every Drive passthrough — files.list, changes, drives —
+    // would enumerate the whole Drive. Refuse rather than forward.
+    if (isDriveApiPath(cleanPath) && driveScopeUnconfined(engine)) {
+      return unconfinedDriveDenial(conn, resolved, 'listing');
     }
     // Classify-don't-block: unknown Google API families are forwarded with
     // the account's token (Google's scopes are the enforcement backstop) and

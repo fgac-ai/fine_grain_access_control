@@ -14,7 +14,7 @@ import { driveTreeFlagOn } from '@/lib/featureFlags';
 import { liveTokenScopes, DRIVE_FULL_SCOPE } from '@/lib/googleTokenScopes';
 import {
   resolveDriveTreeAccess, effectiveDriveAccess, settingsFromRules, normalizeDriveDefault, driveDenialText, widenListFields,
-  type DriveDefault, type DriveSetting,
+  isDriveApiPath, unconfinedDriveDenialText, type DriveDefault, type DriveSetting,
 } from '@/lib/driveTreeAccess';
 import { resolveDriveLineage, resolveLineageFrom, parseDriveFileMeta, driveMetaUrl, LineageError, MAX_LINEAGE_HOPS, type MetaFetcher } from '@/lib/driveLineage';
 
@@ -336,6 +336,38 @@ async function proxyDriveTreeDenial(engine: ProxyDriveTree, fileId: string, isMu
   return NextResponse.json({ error: text }, { status: 403 });
 }
 
+/**
+ * Drive discovery (files.list, changes, drives, …) on the owner's token when
+ * the tree engine is off: the legacy policy passes it through because under
+ * `drive.file` Google itself shows only picked files. A token that still
+ * carries the full `drive` scope (flag switched off after the grant) would
+ * list the whole Drive — refuse it. Id-addressed `files/{id}` calls are not
+ * discovery; the per-file guard below already denies any file no rule names.
+ */
+async function proxyUnconfinedDriveDiscovery(
+  dbUser: { email: string; clerkUserId: string },
+  fullPath: string,
+  telemetry: ProxyTelemetry,
+): Promise<NextResponse | null> {
+  if (!isDriveApiPath(fullPath)) return null;
+  const fileMatch = fullPath.match(/^drive\/v[23]\/files\/([^/?]+)/);
+  if (fileMatch && fileMatch[1] !== 'generateIds') return null;
+  const token = await fetchClerkGoogleToken(dbUser.clerkUserId, dbUser.clerkUserId, telemetry);
+  if (!token) return null;
+  const scopes = await liveTokenScopes(token.token);
+  if (!scopes) {
+    // tokeninfo unavailable: the scope is unknown, so whether Google would
+    // confine this listing is unknown too. Fail closed, retryably.
+    telemetry.errorStatus = 'drive_scope_unknown';
+    return NextResponse.json({ error: 'Could not confirm which Google Drive permission this account holds, so FGAC fails closed on the Drive listing. Retry once.' }, { status: 503 });
+  }
+  if (!scopes.includes(DRIVE_FULL_SCOPE)) return null;
+  telemetry.errorStatus = 'drive_full_scope_unconfined';
+  console.warn('[Proxy] Drive discovery refused: full drive scope outside the tree engine');
+  const text = unconfinedDriveDenialText({ targetEmail: dbUser.email, delegated: false, what: 'listing' }).replace(/^🚫 /u, '');
+  return NextResponse.json({ error: text }, { status: 403 });
+}
+
 /** Filter a files.list body: Blocked files are withheld and counted (fail closed per file). */
 async function proxyFilterDriveListing(engine: ProxyDriveTree, body: string): Promise<string> {
   let data: { files?: unknown[] } | null = null;
@@ -412,6 +444,10 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     // Drive tree engine (null unless the flag is on for this owner, the path
     // is a Drive/Sheets/Docs/Slides path, and the live token carries `drive`).
     const driveTree = await proxyDriveTreeEngine(dbUser, dbKey.id, fullPath, telemetry);
+    if (!driveTree) {
+      const refused = await proxyUnconfinedDriveDiscovery(dbUser, fullPath, telemetry);
+      if (refused) return refused;
+    }
 
     // ─── GOOGLE DRIVE PER-FILE ACCESS GUARD ──────────────────────────────────
     // Policy: never override Google's native API behavior for discovery —
