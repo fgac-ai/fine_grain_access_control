@@ -1,12 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { randomBytes } from 'crypto';
 import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS } from '@/lib/driveFileKinds';
 import {
   driveFileKindForPath, extractDriveFileKindId, hasDotSegment, classifyGoogleApiCall, canonicalizeGoogleApiPath,
   extractSendRecipients, extractRfc822Recipients, extractDraftSendInfo,
 } from '@/app/api/mcp/googleApiPolicy';
 import { db } from '@/db';
-import { users, proxyKeys, emailDelegations, keyEmailAccess, accessRules, keyRuleAssignments } from '@/db/schema';
+import { users, proxyKeys, emailDelegations, keyEmailAccess, accessRules, keyRuleAssignments, temporaryApiKeys, resumableUploads } from '@/db/schema';
 import { eq, and } from 'drizzle-orm';
+import {
+  isTemporaryKey, hashTemporaryKey, hashUploadId, requestOrigin, PROXY_MAX_REQUEST_BYTES, RECOMMENDED_CHUNK_BYTES,
+} from '@/lib/temporaryApiKeys';
 import { clerkClient } from '@clerk/nextjs/server';
 import { checkReadRestrictions, checkSendWhitelist, loadApplicableRules, type SendDenial } from '@/lib/gmailRules';
 import { captureServerEvent } from '@/lib/posthogServer';
@@ -77,6 +81,24 @@ type ProxyTelemetry = {
   errorStatus?: string;
   /** Machine-readable reason when FGAC refused the call before Google (classifier code). */
   denialCode?: string;
+  /** 'standing' (a profile key) or 'temporary' (create_temporary_api_key). */
+  keyKind?: 'standing' | 'temporary';
+  /** temporary_api_keys.id — joins to temp_api_key_created.temp_key_id. */
+  tempKeyId?: string;
+  /** Why a 401 happened: 'invalid' | 'revoked' | 'expired' | 'parent_revoked' | 'parent_expired' | 'missing'. */
+  authFailureReason?: string;
+  requestBytes?: number;
+  /** Known only when Google sent Content-Length (streamed) or the body was buffered. */
+  responseBytes?: number;
+  /** The response body was piped through, never buffered. */
+  streamed?: boolean;
+  /** 'media' | 'multipart' | 'resumable_init' | 'resumable_chunk' | 'resumable_status'. */
+  uploadType?: string;
+  uploadIdHash?: string;
+  /** Final chunk of a resumable upload was accepted (Google 200/201). */
+  uploadComplete?: boolean;
+  /** FGAC refused the body as too large (413) before Vercel's own cap could. */
+  oversizeRefused?: boolean;
 };
 
 /**
@@ -184,10 +206,106 @@ async function forwardToGoogle(
 }
 
 /** Google's response passed through with hop-by-hop encoding stripped. */
-function passthroughResponse(forward: { status: number; body: string; headers: Headers }): NextResponse {
+function passthroughResponse(forward: { status: number; body: string; headers: Headers }, telemetry?: ProxyTelemetry): NextResponse {
   const responseHeaders = new Headers(forward.headers);
   responseHeaders.delete('content-encoding');
+  // fetch() already decoded the body, so Google's encoded length is wrong now.
+  responseHeaders.delete('content-length');
+  if (telemetry) telemetry.responseBytes = Buffer.byteLength(forward.body);
   return new NextResponse(forward.body, { status: forward.status, headers: responseHeaders });
+}
+
+/**
+ * Streamed upstream budget: the whole response must arrive before the 60 s
+ * function kill, so the stream gets the function's remaining headroom rather
+ * than the 50 s buffered bound. Downloads larger than this window can use
+ * HTTP Range requests (the temporary-key recipe says so).
+ */
+const STREAM_TIMEOUT_MS = 55_000;
+
+/**
+ * Forward and PIPE Google's response body instead of buffering it. Vercel's
+ * 4.5 MB cap applies to buffered response bodies only, so this is what lets
+ * a Drive download or a large attachment through. Only for responses FGAC
+ * never needs to inspect (every Gmail read rule runs on a buffered body).
+ */
+async function streamFromGoogle(
+  url: string,
+  init: { method: string; headers: Headers; body?: ArrayBuffer },
+  telemetry: ProxyTelemetry,
+): Promise<NextResponse> {
+  const started = Date.now();
+  try {
+    const googleResponse = await fetch(url, { ...init, signal: AbortSignal.timeout(STREAM_TIMEOUT_MS) });
+    telemetry.googleMs = Date.now() - started;
+    const responseHeaders = new Headers(googleResponse.headers);
+    if (responseHeaders.has('content-encoding')) {
+      // fetch() decodes on the fly; the encoded length no longer describes the body.
+      responseHeaders.delete('content-encoding');
+      responseHeaders.delete('content-length');
+    }
+    const length = Number(responseHeaders.get('content-length'));
+    if (Number.isFinite(length) && length > 0) telemetry.responseBytes = length;
+    telemetry.streamed = true;
+    return new NextResponse(googleResponse.body, { status: googleResponse.status, headers: responseHeaders });
+  } catch (err) {
+    telemetry.googleMs = Date.now() - started;
+    telemetry.errorStatus = isUpstreamTimeout(err) ? 'timeout' : 'network';
+    return isUpstreamTimeout(err)
+      ? NextResponse.json({ error: `Google did not start answering within ${STREAM_TIMEOUT_MS / 1000}s. Retry once after a short pause.` }, { status: 504 })
+      : NextResponse.json({ error: `Could not reach the Google API: ${err instanceof Error ? err.message : 'network error'}.` }, { status: 502 });
+  }
+}
+
+/** How a request uses Google's upload protocol, for telemetry and routing. */
+function uploadTypeOf(request: NextRequest): string | undefined {
+  const params = request.nextUrl.searchParams;
+  if (params.get('upload_id')) {
+    const range = request.headers.get('content-range') ?? '';
+    return /^bytes \*\//i.test(range) ? 'resumable_status' : 'resumable_chunk';
+  }
+  const type = params.get('uploadType');
+  if (type === 'resumable') return 'resumable_init';
+  if (type === 'media' || type === 'multipart') return type;
+  return undefined;
+}
+
+/**
+ * A resumable upload was just opened through FGAC: bind Google's session to
+ * this profile and hand the caller a session URL on FGAC's own host, so
+ * every chunk comes back through the proxy. Without the rewrite Google's own
+ * URL would reach the client and the bytes would bypass FGAC entirely.
+ */
+async function adoptResumableSession(
+  request: NextRequest,
+  response: NextResponse,
+  session: { parentKeyId: string; kind: string; tokenOwnerClerkUserId: string; targetEmail?: string },
+  telemetry: ProxyTelemetry,
+): Promise<NextResponse> {
+  const location = response.headers.get('location');
+  if (response.status !== 200 || !location) return response;
+  let googleUrl: URL;
+  try { googleUrl = new URL(location); } catch { return response; }
+  if (!googleUrl.searchParams.get('upload_id') || googleUrl.hostname !== 'www.googleapis.com') return response;
+  // FGAC's own opaque id — Google's session URL (whose upload_id would let a
+  // client send chunks to Google directly, past the Gmail recipient check)
+  // stays on the server.
+  const fgacUploadId = randomBytes(24).toString('base64url');
+  const uploadIdHash = hashUploadId(fgacUploadId);
+  telemetry.uploadIdHash = uploadIdHash.slice(0, 16);
+  await db.insert(resumableUploads).values({
+    uploadIdHash,
+    googleSessionUrl: googleUrl.toString(),
+    parentKeyId: session.parentKeyId,
+    kind: session.kind,
+    tokenOwnerClerkUserId: session.tokenOwnerClerkUserId,
+    targetEmail: session.targetEmail,
+    // Google keeps a resumable session for about a week.
+    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+  }).onConflictDoNothing();
+  const headers = new Headers(response.headers);
+  headers.set('location', `${requestOrigin(request)}/api/proxy${googleUrl.pathname}?uploadType=resumable&upload_id=${fgacUploadId}`);
+  return new NextResponse(response.body, { status: response.status, headers });
 }
 
 async function trackedProxyRequest(request: NextRequest, params: { path: string[] }) {
@@ -223,6 +341,17 @@ async function trackedProxyRequest(request: NextRequest, params: { path: string[
     token_ms: telemetry.tokenMs,
     error_status: telemetry.errorStatus,
     denial_code: telemetry.denialCode,
+    // Temporary keys + large transfers (docs/monitoring.md §7.34).
+    key_kind: telemetry.keyKind,
+    temp_key_id: telemetry.tempKeyId,
+    auth_failure_reason: telemetry.authFailureReason,
+    request_bytes: telemetry.requestBytes,
+    response_bytes: telemetry.responseBytes,
+    streamed: telemetry.streamed,
+    upload_type: telemetry.uploadType,
+    upload_id_hash: telemetry.uploadIdHash,
+    upload_complete: telemetry.uploadComplete,
+    oversize_refused: telemetry.oversizeRefused,
   });
 
   return response;
@@ -304,6 +433,7 @@ async function sendRecipientsFromRequest(request: NextRequest): Promise<string[]
  */
 async function forwardDriveCall(
   request: NextRequest, fullPath: string, owner: { clerkUserId: string; email: string }, telemetry: ProxyTelemetry,
+  profileKeyId: string,
   driveTree: ProxyDriveTree | null = null,
 ): Promise<NextResponse> {
   telemetry.targetEmail = owner.email;
@@ -330,20 +460,31 @@ async function forwardDriveCall(
     if (widened !== undefined) urlParams.set('fields', widened);
     search = urlParams.toString() ? `?${urlParams.toString()}` : '';
   }
-  const forward = await forwardToGoogle(
-    `https://www.googleapis.com/${canonicalPath}${search}`,
-    { method: request.method, headers, body: isMutating ? await request.clone().arrayBuffer() : undefined },
-    telemetry,
-  );
-  if (!forward.ok) return forward.response;
-  if (filterListing && driveTree && forward.status === 200 && forward.headers.get('content-type')?.includes('application/json')) {
-    const filtered = await proxyFilterDriveListing(driveTree, forward.body);
-    const responseHeaders = new Headers(forward.headers);
-    responseHeaders.delete('content-encoding');
-    responseHeaders.delete('content-length');
-    return new NextResponse(filtered, { status: 200, headers: responseHeaders });
+  const url = `https://www.googleapis.com/${canonicalPath}${search}`;
+  const body = isMutating ? await request.clone().arrayBuffer() : undefined;
+  if (filterListing && driveTree) {
+    // The tree engine must read the listing to filter it: buffered.
+    const forward = await forwardToGoogle(url, { method: request.method, headers, body }, telemetry);
+    if (!forward.ok) return forward.response;
+    if (forward.status === 200 && forward.headers.get('content-type')?.includes('application/json')) {
+      const filtered = await proxyFilterDriveListing(driveTree, forward.body);
+      const responseHeaders = new Headers(forward.headers);
+      responseHeaders.delete('content-encoding');
+      responseHeaders.delete('content-length');
+      telemetry.responseBytes = Buffer.byteLength(filtered);
+      return new NextResponse(filtered, { status: 200, headers: responseHeaders });
+    }
+    return passthroughResponse(forward, telemetry);
   }
-  return passthroughResponse(forward);
+  // Everything else is piped: Drive media downloads and exports can be far
+  // over Vercel's 4.5 MB buffered-response cap, and FGAC never inspects them.
+  const response = await streamFromGoogle(url, { method: request.method, headers, body }, telemetry);
+  if (telemetry.uploadType === 'resumable_init') {
+    return adoptResumableSession(request, response, {
+      parentKeyId: profileKeyId, kind: 'drive', tokenOwnerClerkUserId: owner.clerkUserId,
+    }, telemetry);
+  }
+  return response;
 }
 
 // ─── DRIVE TREE ENGINE (feature-flagged folder-inherited access) ─────────────
@@ -449,10 +590,101 @@ async function proxyFilterDriveListing(engine: ProxyDriveTree, body: string): Pr
   return JSON.stringify({ ...data, files: kept, withheld });
 }
 
+/** End of the RFC 822 header block (index of the blank line), or -1. */
+function headerBlockEnd(text: string): number {
+  const crlf = text.indexOf('\r\n\r\n');
+  const lf = text.indexOf('\n\n');
+  if (crlf === -1) return lf;
+  if (lf === -1) return crlf;
+  return Math.min(crlf, lf);
+}
+
+/**
+ * One chunk (or status query) of a resumable upload FGAC opened. Authorized
+ * by the session row: the upload must have been initiated through FGAC by
+ * the SAME profile (a temporary key resolves to its parent, so a fresh key
+ * can resume an upload an expired one started). Gmail sends are checked on
+ * the chunk that starts at byte 0 — RFC 822 headers come first, so every
+ * To/Cc/Bcc address must be in that chunk — and a session whose recipients
+ * were refused (or never seen) accepts no further bytes.
+ */
+async function handleResumableChunk(
+  request: NextRequest,
+  fullPath: string,
+  uploadId: string,
+  profileKeyId: string,
+  dbUser: { id: string; email: string; clerkUserId: string },
+  telemetry: ProxyTelemetry,
+): Promise<NextResponse> {
+  const uploadIdHash = hashUploadId(uploadId);
+  telemetry.uploadIdHash = uploadIdHash.slice(0, 16);
+  if (request.method !== 'PUT') {
+    return denied(telemetry, 'resumable_method', 'Resumable upload chunks must be sent with PUT to the session URL returned at initiation.');
+  }
+  const session = await db.select().from(resumableUploads)
+    .where(eq(resumableUploads.uploadIdHash, uploadIdHash)).limit(1).then(res => res[0]);
+  if (!session || session.parentKeyId !== profileKeyId) {
+    return denied(telemetry, 'resumable_session_unknown',
+      'This upload session was not opened through FGAC with this agent profile. Start the upload with ' +
+      'uploadType=resumable through the FGAC proxy and send every chunk to the session URL it returns.');
+  }
+  if (session.expiresAt < new Date()) {
+    return denied(telemetry, 'resumable_session_expired', 'This upload session is more than a week old and Google has discarded it. Start the upload again.');
+  }
+
+  const range = request.headers.get('content-range') ?? '';
+  const isStatusQuery = /^bytes \*\//i.test(range);
+  const body = isStatusQuery ? undefined : await request.arrayBuffer();
+  if (body) telemetry.requestBytes = body.byteLength;
+
+  if (session.kind === 'gmail_send' && !isStatusQuery) {
+    if (session.recipientVerdict === 'denied') {
+      return denied(telemetry, 'recipient_not_whitelisted', 'This message\'s recipients were refused on its first chunk, so the rest of the upload is refused too. Nothing was sent.');
+    }
+    const startsAtZero = /^bytes 0-/i.test(range) || (!range && !!body);
+    if (startsAtZero) {
+      // Latin-1 keeps one char per byte, so a split UTF-8 sequence later in
+      // the chunk cannot shift or hide the header block.
+      const text = Buffer.from(body!).toString('latin1');
+      const end = headerBlockEnd(text);
+      if (end === -1) {
+        return denied(telemetry, 'recipients_undetermined',
+          'The first chunk of a Gmail send must contain the complete message header block (every To/Cc/Bcc header and the blank ' +
+          'line after them) so FGAC can check the recipients. Resend byte 0 onward in a larger first chunk. Nothing was sent.');
+      }
+      const recipients = extractRfc822Recipients(text.slice(0, end));
+      const rules = await loadApplicableRules(dbUser.id, profileKeyId, session.targetEmail ?? dbUser.email);
+      const denial = checkSendWhitelist(rules, recipients);
+      await db.update(resumableUploads)
+        .set({ recipientVerdict: denial ? 'denied' : 'allowed' })
+        .where(eq(resumableUploads.id, session.id));
+      if (denial) return sendDenied(telemetry, denial);
+    } else if (session.recipientVerdict !== 'allowed') {
+      return denied(telemetry, 'recipients_undetermined',
+        'Send the chunk that starts at byte 0 first: FGAC checks a Gmail send\'s recipients in the message headers there. Nothing was sent.');
+    }
+  }
+
+  const token = await fetchClerkGoogleToken(session.tokenOwnerClerkUserId, dbUser.clerkUserId, telemetry);
+  if (!token) {
+    return NextResponse.json({ error: 'Could not fetch the Google access token for this upload. The account owner may need to reconnect their Google account.' }, { status: 403 });
+  }
+  const headers = new Headers();
+  headers.set('Authorization', `Bearer ${token.token}`);
+  if (range) headers.set('Content-Range', range);
+  const contentType = request.headers.get('content-type');
+  if (contentType) headers.set('Content-Type', contentType);
+  const forward = await forwardToGoogle(session.googleSessionUrl, { method: 'PUT', headers, body }, telemetry);
+  if (!forward.ok) return forward.response;
+  if (forward.status === 200 || forward.status === 201) telemetry.uploadComplete = true;
+  return passthroughResponse(forward, telemetry);
+}
+
 async function handleProxyRequest(request: NextRequest, params: { path: string[] }, telemetry: ProxyTelemetry) {
   try {
     const authHeader = request.headers.get('authorization');
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      telemetry.authFailureReason = 'missing';
       return NextResponse.json({ error: 'Missing or invalid Authorization header' }, { status: 401 });
     }
 
@@ -465,25 +697,57 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     }
 
     // ─── 1. Authenticate Proxy Key ──────────────────────────────────────────
-    const dbKey = await db
-      .select()
-      .from(proxyKeys)
-      .where(eq(proxyKeys.key, keyValue))
-      .limit(1)
-      .then(res => res[0]);
+    // A temporary key (create_temporary_api_key) is a pointer to its parent
+    // profile key: from here on `dbKey` IS the parent, so every rule,
+    // mailbox, and delegation check below runs exactly as for the profile.
+    const authFailed = (reason: string, error: string) => {
+      telemetry.authFailureReason = reason;
+      return NextResponse.json({ error }, { status: 401 });
+    };
+    let dbKey: typeof proxyKeys.$inferSelect | undefined;
+    if (isTemporaryKey(keyValue)) {
+      telemetry.keyKind = 'temporary';
+      const tempKey = await db
+        .select()
+        .from(temporaryApiKeys)
+        .where(eq(temporaryApiKeys.keyHash, hashTemporaryKey(keyValue)))
+        .limit(1)
+        .then(res => res[0]);
+      if (!tempKey) return authFailed('invalid', 'Invalid API Key');
+      telemetry.tempKeyId = tempKey.id;
+      if (tempKey.revokedAt) {
+        return authFailed('revoked', 'This temporary API key was revoked in the FGAC dashboard. Ask the user before creating another one.');
+      }
+      if (tempKey.expiresAt < new Date()) {
+        return authFailed('expired',
+          'This temporary API key has expired. Call create_temporary_api_key for a new one and continue — ' +
+          'an unfinished resumable upload is not lost: PUT an empty body with "Content-Range: bytes */TOTAL" to the ' +
+          'same session URL (with the new key) to learn how many bytes arrived, then resume from there.');
+      }
+      dbKey = await db.select().from(proxyKeys).where(eq(proxyKeys.id, tempKey.parentKeyId)).limit(1).then(res => res[0]);
+      if (!dbKey) return authFailed('invalid', 'Invalid API Key');
+      if (dbKey.revokedAt) {
+        return authFailed('parent_revoked', 'The agent profile this temporary key belongs to has been revoked, so the key no longer works.');
+      }
+      if (dbKey.expiresAt && dbKey.expiresAt < new Date()) {
+        return authFailed('parent_expired', 'The agent profile this temporary key belongs to has expired, so the key no longer works.');
+      }
+    } else {
+      telemetry.keyKind = 'standing';
+      dbKey = await db
+        .select()
+        .from(proxyKeys)
+        .where(eq(proxyKeys.key, keyValue))
+        .limit(1)
+        .then(res => res[0]);
 
-    if (!dbKey) {
-      return NextResponse.json({ error: 'Invalid API Key' }, { status: 401 });
-    }
+      if (!dbKey) return authFailed('invalid', 'Invalid API Key');
 
-    // Check revocation
-    if (dbKey.revokedAt) {
-      return NextResponse.json({ error: 'This API key has been revoked.' }, { status: 401 });
-    }
+      // Check revocation
+      if (dbKey.revokedAt) return authFailed('revoked', 'This API key has been revoked.');
 
-    // Check expiration
-    if (dbKey.expiresAt && dbKey.expiresAt < new Date()) {
-      return NextResponse.json({ error: 'This API key has expired.' }, { status: 401 });
+      // Check expiration
+      if (dbKey.expiresAt && dbKey.expiresAt < new Date()) return authFailed('expired', 'This API key has expired.');
     }
 
     // Fetch the owning user (the delegate / key creator)
@@ -500,6 +764,31 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
 
     telemetry.proxyKeyId = dbKey.id;
     telemetry.clerkUserId = dbUser.clerkUserId;
+
+    // ─── Size guard ─────────────────────────────────────────────────────────
+    // Vercel rejects request bodies over 4.5 MB before this code runs — with
+    // no guidance and no telemetry. Refuse a little below that ourselves, with
+    // the fix in the text, so the refusal is both explained and counted.
+    telemetry.uploadType = uploadTypeOf(request);
+    const declaredLength = Number(request.headers.get('content-length'));
+    if (Number.isFinite(declaredLength) && declaredLength > 0) telemetry.requestBytes = declaredLength;
+    if (Number.isFinite(declaredLength) && declaredLength > PROXY_MAX_REQUEST_BYTES) {
+      telemetry.oversizeRefused = true;
+      return NextResponse.json({
+        error: `Request body is ${Math.round(declaredLength / 1024)} KB; the FGAC proxy accepts at most ${PROXY_MAX_REQUEST_BYTES / 1024} KB per request. ` +
+          `Upload large files with Google's resumable protocol (uploadType=resumable) in chunks of ${RECOMMENDED_CHUNK_BYTES / (1024 * 1024)} MB ` +
+          '(a multiple of 256 KB, except the last chunk). create_temporary_api_key returns a step-by-step recipe.',
+      }, { status: 413 });
+    }
+
+    // ─── Resumable upload chunks ───────────────────────────────────────────
+    // A PUT carrying `upload_id` continues a session FGAC opened (the session
+    // URL was rewritten to this host at initiation). It is authorized by the
+    // session binding, not by re-classifying the path.
+    const uploadId = request.nextUrl.searchParams.get('upload_id');
+    if (uploadId) {
+      return handleResumableChunk(request, fullPath, uploadId, dbKey.id, dbUser, telemetry);
+    }
 
     // ─── CLASSIFY (shared policy with the MCP raw tools) ──────────────────────
     // One classifier for both surfaces (googleApiPolicy.ts), so the REST proxy
@@ -538,7 +827,7 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
       const isMutating = cls.kind === 'drive_copy' || cls.isMutating;
       const treeDenial = await proxyDriveTreeDenial(driveTree, cls.fileId, isMutating, telemetry);
       if (treeDenial) return treeDenial;
-      return forwardDriveCall(request, fullPath, dbUser, telemetry, driveTree);
+      return forwardDriveCall(request, fullPath, dbUser, telemetry, dbKey.id, driveTree);
     }
     if (cls.kind === 'drive_file' || cls.kind === 'file_comments' || cls.kind === 'drive_copy') {
       const fileId = cls.fileId;
@@ -582,14 +871,14 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
           error: `Access Denied: Write operations on file '${fileId}' are restricted to Read-Only.`
         }, { status: 403 });
       }
-      return forwardDriveCall(request, fullPath, dbUser, telemetry);
+      return forwardDriveCall(request, fullPath, dbUser, telemetry, dbKey.id);
     }
 
     // Drive discovery reads and Drive-side creates (POST drive/v3/files, incl.
     // the `upload/` variant): the new file is app-owned, so no existing file
     // is reachable through them.
     if (cls.kind === 'passthrough' || cls.kind === 'drive_create') {
-      return forwardDriveCall(request, fullPath, dbUser, telemetry, driveTree);
+      return forwardDriveCall(request, fullPath, dbUser, telemetry, dbKey.id, driveTree);
     }
 
     // ─── PER-FILE PROXY HANDLER (Sheets / Docs / Slides) ─────────────────────
@@ -681,13 +970,13 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
         requestBody = await request.clone().arrayBuffer();
       }
 
-      const forward = await forwardToGoogle(googleUrl, {
+      // Piped, not buffered: a large spreadsheet read can exceed Vercel's
+      // 4.5 MB buffered-response cap, and FGAC never inspects these bodies.
+      return streamFromGoogle(googleUrl, {
         method: request.method,
         headers,
         body: requestBody,
       }, telemetry);
-      if (!forward.ok) return forward.response;
-      return passthroughResponse(forward);
     }
 
     // ─── 2. Resolve Target Email (Gmail Proxy Handler) ───────────────────────────
@@ -768,7 +1057,10 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     // To/Cc/Bcc address must be whitelisted, and a message whose recipients
     // cannot be determined is refused — never forwarded blind. The body may be
     // a JSON `{raw}` or, on `upload/…?uploadType=media`, the RFC 822 message.
-    if (cls.kind === 'gmail_send') {
+    // A resumable initiation carries no message yet (only upload metadata):
+    // the recipients are checked on the session's first chunk instead
+    // (handleResumableChunk), and no byte reaches Google before they pass.
+    if (cls.kind === 'gmail_send' && telemetry.uploadType !== 'resumable_init') {
       const denial = checkSendWhitelist(applicableRules, await sendRecipientsFromRequest(request));
       if (denial) return sendDenied(telemetry, denial);
     }
@@ -905,6 +1197,40 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
       requestBody = await request.clone().arrayBuffer();
     }
 
+    // ─── 8b. Attachments: rules on the parent message, then stream ──────────
+    // An attachment is only as readable as the email that carries it (same
+    // rule as MCP gmail_get_attachment). Its own body is never inspected, so
+    // it is piped: Gmail attachments run to 25 MB (≈ 33 MB as JSON), far
+    // over Vercel's 4.5 MB buffered-response cap.
+    const attachmentMatch = request.method === 'GET'
+      && fullPath.match(/^(gmail\/v1\/users\/[^/]+\/messages\/[^/]+)\/attachments\/[^/]+$/);
+    if (attachmentMatch) {
+      const parent = await forwardToGoogle(`https://www.googleapis.com/${attachmentMatch[1]}?format=full`, {
+        method: 'GET', headers: new Headers({ Authorization: `Bearer ${realGoogleToken.token}` }),
+      }, telemetry);
+      if (!parent.ok) return parent.response;
+      if (parent.status >= 400) return passthroughResponse(parent, telemetry);
+      let parsedParent: unknown = null;
+      try { parsedParent = JSON.parse(parent.body); } catch { /* not JSON */ }
+      const restriction = checkReadRestrictions(applicableRules, parsedParent ?? parent.body);
+      if (restriction) {
+        captureServerEvent(dbUser.clerkUserId, 'read_restriction_enforced', { via: 'rest_proxy', restriction });
+        return NextResponse.json({ error: restriction.replace(/^🚫 /u, '') }, { status: 403 });
+      }
+      return streamFromGoogle(googleUrl, { method: 'GET', headers }, telemetry);
+    }
+
+    // ─── 8c. Resumable initiation: hand back an FGAC session URL ────────────
+    if (telemetry.uploadType === 'resumable_init') {
+      const response = await streamFromGoogle(googleUrl, { method: request.method, headers, body: requestBody }, telemetry);
+      return adoptResumableSession(request, response, {
+        parentKeyId: dbKey.id,
+        kind: cls.kind === 'gmail_send' ? 'gmail_send' : 'gmail',
+        tokenOwnerClerkUserId: tokenOwnerClerkUserId,
+        targetEmail,
+      }, telemetry);
+    }
+
     const forward = await forwardToGoogle(googleUrl, {
       method: request.method,
       headers,
@@ -933,7 +1259,7 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
       }
     }
 
-    return passthroughResponse(forward);
+    return passthroughResponse(forward, telemetry);
 
   } catch (error) {
     console.error('Proxy Error:', error);

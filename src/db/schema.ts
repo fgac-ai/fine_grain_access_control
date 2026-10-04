@@ -451,3 +451,56 @@ export const shortLinks = pgTable('short_links', {
   lastScannedAt: timestamp('last_scanned_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
+
+// ─── Temporary API Keys (large-payload scripts) ─────────────────────────────
+// Short-lived keys an MCP connection mints (`create_temporary_api_key`) so a
+// script the agent runs can call the REST proxy directly — payloads too large
+// for tool calls. A temporary key is NOT a profile: it carries no rule
+// assignments or mailbox rows of its own and resolves to `parentKeyId` (the
+// connection's profile) on every request, so rule edits apply live and
+// revoking the profile kills its temporary keys. Kept out of `proxy_keys` on
+// purpose: ~18 readers treat every proxy_keys row as a profile (dashboard,
+// token routes, notifications, partner provisioning). Only a SHA-256 of the
+// key is stored; the plaintext is shown to the agent once.
+// Plan: docs/implementation_plans/large-api-payload-options_v5.md
+export const temporaryApiKeys = pgTable('temporary_api_keys', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  keyHash: text('key_hash').notNull().unique(),     // sha256 hex of "sk_proxy_tmp_…"
+  keyLast4: text('key_last4').notNull(),            // for the dashboard row / evidence masking
+  parentKeyId: uuid('parent_key_id').references(() => proxyKeys.id, { onDelete: 'cascade' }).notNull(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  connectionId: uuid('connection_id').references(() => agentConnections.id, { onDelete: 'cascade' }).notNull(),
+  purpose: text('purpose').notNull(),               // upload | download | send_attachment | bulk_calls | other
+  expiresAt: timestamp('expires_at').notNull(),
+  revokedAt: timestamp('revoked_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => [
+  index('temporary_api_keys_connection_idx').on(table.connectionId),
+  index('temporary_api_keys_parent_idx').on(table.parentKeyId),
+]);
+
+// ─── Resumable Upload Sessions (REST proxy relay) ───────────────────────────
+// One row per Google resumable upload FGAC initiated. The caller gets a
+// session URL on FGAC's host carrying FGAC's OWN opaque upload_id — Google's
+// session URL never leaves the server, so chunks cannot be sent to Google
+// directly (which would skip the Gmail first-chunk recipient check). This row
+// maps that id to Google's session, binds it to the profile that opened it (a
+// chunk from any other profile is refused), and for Gmail sends records the
+// first-chunk recipient verdict (later chunks of a refused or unverified
+// session are refused). Only a SHA-256 of FGAC's id is stored. Rows are
+// useless after Google's ~7-day session lifetime (`expiresAt`).
+export const resumableUploads = pgTable('resumable_uploads', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  uploadIdHash: text('upload_id_hash').notNull().unique(),
+  // Google's session URI (a write capability for this one upload).
+  googleSessionUrl: text('google_session_url').notNull(),
+  parentKeyId: uuid('parent_key_id').references(() => proxyKeys.id, { onDelete: 'cascade' }).notNull(),
+  kind: text('kind').notNull(),                     // 'drive' | 'gmail_send'
+  // Whose Google token forwards the chunks (a delegated mailbox's owner for Gmail).
+  tokenOwnerClerkUserId: text('token_owner_clerk_user_id').notNull(),
+  targetEmail: text('target_email'),                // Gmail: the sending mailbox
+  // Gmail: null = first chunk not seen yet, 'allowed' / 'denied' after it.
+  recipientVerdict: text('recipient_verdict'),
+  expiresAt: timestamp('expires_at').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
