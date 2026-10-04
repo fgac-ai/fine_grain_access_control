@@ -72,8 +72,17 @@ comments, and an `@` inside a quoted display name (still parsed and checked).
   signature). Take this branch's body; swap proxy drafts/send union for
   `draftSendRecipients`.
 
+## Docs
+
+- capability 10 **A17** (hidden recipients refuse the send; drafts/send too) —
+  A16 is taken by PR #176.
+- user guide: "every recipient must be readable".
+- Main's REST proxy still parses only `To` with its own code; PR #176 replaces it
+  with the shared parser, so this fix reaches the proxy when #176 lands.
+
 ## Validation
 
-- [ ] `npm run mcp:lint` green
+- [x] 47 new unit cases written first (39 failing on main's parser), all green after the fix
+- [x] `npm run mcp:lint`, `tsc --noEmit`, eslint green
 - [ ] local MCP: send with a hidden quoted-local-part Bcc → `recipients_undetermined`
 - [ ] preview via `/deploy-pr-preview`
