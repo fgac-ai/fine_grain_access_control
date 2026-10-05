@@ -59,5 +59,16 @@ flag-off `drive` token as tree-engine-or-deny.
 
 - [x] `npx tsx scripts/test-drive-tree-access.ts` — all pass.
 - [x] `tsc --noEmit` (only pre-existing missing-module errors), eslint clean.
-- [ ] Local: A16 against a dev server as a flag-off user.
+- [x] Local (2026-10-05, USER_B, flag off, `drive.file` token, Path B Chrome —
+  the built-in pane refused localhost): A16 11/11 steps PASS. Rule rows
+  confirmed read-only: "Agent-created: QA rest sheet" and "…copy of R" are
+  `sheet_read_write` on the Default Profile; no row for the text note; no copy
+  of B or of the other-key sheet N was created. Telemetry props
+  (`drive_file_gate`, `drive_file_auto_granted.drive_tree`) not yet checked.
+- [ ] Local A22: BLOCKED — USER_A (flag on) holds `drive.file` only (dashboard
+  "needs re-enabling"); a concurrent session was mid drive-scope flow on the
+  shared Chrome. Run on the preview once USER_A has the full scope.
+- Note: the REST proxy cannot create a sheet via `POST v4/spreadsheets`
+  (400 "Invalid Google Sheets API path" — the per-file handler requires an
+  id). Pre-existing; creating through `POST drive/v3/files` works.
 - [ ] Preview: A16 + A22 via `/deploy-pr-preview`.
