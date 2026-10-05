@@ -32,7 +32,7 @@ check('drive.file-only token → Google confines it', !driveScopeUnconfined({ ac
 check('no engine context (non-Google call) → not unconfined', !driveScopeUnconfined(undefined));
 
 console.log('isDriveApiPath:');
-for (const p of ['drive/v3/files', 'drive/v3/files?q=trashed%3Dfalse', 'drive/v3/changes?pageToken=1', 'drive/v3/drives', 'drive/v2/files', 'drive/v3/files/abc?alt=media']) {
+for (const p of ['drive/v3/files', 'drive/v3/files?q=trashed%3Dfalse', 'drive/v3/changes?pageToken=1', 'drive/v3/drives', 'drive/v2/files', 'drive/v3/files/abc?alt=media', 'upload/drive/v3/files', '/drive/v3/files', 'Drive/V3/files']) {
   check(`${p} is Drive`, isDriveApiPath(p));
 }
 for (const p of ['gmail/v1/users/me/messages', 'v4/spreadsheets/abc', 'docs/v1/documents/abc', 'drivex/v3/files', 'calendar/v3/calendars']) {

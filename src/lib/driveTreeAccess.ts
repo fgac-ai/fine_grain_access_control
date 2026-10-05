@@ -239,9 +239,9 @@ export function driveScopeUnconfined(ctx: { active: boolean; hasDriveFullScope: 
   return !!ctx && !ctx.active && ctx.hasDriveFullScope;
 }
 
-/** A Drive API path (`drive/v2/…`, `drive/v3/…`), any resource. */
+/** A Drive API path (`drive/v2/…`, `drive/v3/…`, their `upload/` twins), any resource. */
 export function isDriveApiPath(path: string): boolean {
-  return /^drive\/v[23](\/|\?|$)/.test(path);
+  return /^(upload\/)?drive\/v[23](\/|\?|#|$)/i.test(path.replace(/^\/+/, ''));
 }
 
 /** Denial for a Drive listing or a non-Sheets/Docs/Slides file on an unconfined full-scope token. */
