@@ -41,7 +41,10 @@ This runs each test case via `claude -p` (non-interactive mode) with:
 - `--output-format json` — structured results with tool calls, cost, turns
 - `--allowedTools "Bash(node:*)"` — restricted to skill scripts
 - `--max-turns 5` — prevents runaway execution
-- `--dangerously-skip-permissions` — unattended execution
+- `--permission-mode auto` — unattended execution with the auto-mode classifier
+  reviewing each action (replaced `--permission-mode auto` on 2026-10-05:
+  it predates auto mode and nested bypass sessions are denied by the
+  orchestrator's classifier)
 
 > **Key insight**: Slash commands (`/fgac`) are interactive-only. In `-p` mode,
 > prompts reference the skill by its trigger description in natural language
@@ -62,14 +65,14 @@ This runs each test case via `claude -p` (non-interactive mode) with:
 ### A1: Send to whitelisted address
 ```bash
 claude -p "Using the fgac skill, send an email to \$USER_B_EMAIL with subject 'QA CC CLI - Send Whitelist A1' and body 'Test'" \
-  --allowedTools "Bash(node:*)" --output-format json --max-turns 5 --dangerously-skip-permissions
+  --allowedTools "Bash(node:*)" --output-format json --max-turns 5 --permission-mode auto
 ```
 - [ ] Result contains "sent successfully" or "Message ID"
 
 ### A2: Send to blocked address
 ```bash
 claude -p "Using the fgac skill, send an email to blocked@untrusted.com with subject 'Should Block' and body 'Test'" \
-  --allowedTools "Bash(node:*)" --output-format json --max-turns 5 --dangerously-skip-permissions
+  --allowedTools "Bash(node:*)" --output-format json --max-turns 5 --permission-mode auto
 ```
 - [ ] Result contains "blocked", "403", "Unauthorized", or "whitelist"
 
@@ -80,7 +83,7 @@ claude -p "Using the fgac skill, send an email to blocked@untrusted.com with sub
 ### A3: Read normal email
 ```bash
 claude -p "Using the fgac skill, list my 5 most recent emails" \
-  --allowedTools "Bash(node:*)" --output-format json --max-turns 5 --dangerously-skip-permissions
+  --allowedTools "Bash(node:*)" --output-format json --max-turns 5 --permission-mode auto
 ```
 - [ ] Result contains email subjects/senders or appropriate rule-based block message
 
@@ -91,7 +94,7 @@ claude -p "Using the fgac skill, list my 5 most recent emails" \
 ### A4: List accounts
 ```bash
 claude -p "Using the fgac skill, what email accounts can I access?" \
-  --allowedTools "Bash(node:*)" --output-format json --max-turns 5 --dangerously-skip-permissions
+  --allowedTools "Bash(node:*)" --output-format json --max-turns 5 --permission-mode auto
 ```
 - [ ] Result shows mapped email addresses
 

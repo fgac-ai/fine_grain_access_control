@@ -12,8 +12,16 @@
    ```
 3. Launch Claude Code IN the workspace:
    ```bash
-   tmux new-session -d -s fgac-qa -x 200 -y 50 "cd test/qa-envs/cc-mcp && claude --dangerously-skip-permissions"
+   tmux new-session -d -s fgac-qa -x 200 -y 50 "cd test/qa-envs/cc-mcp && claude --permission-mode auto"
    ```
+   Auto mode, not `--dangerously-skip-permissions` (Ken, 2026-10-05): the
+   bypass flag predates auto mode, and the orchestrator's permission
+   classifier denies launching a nested bypass session. Auto mode keeps the
+   nested agent unattended while its own classifier still reviews each
+   action — which is also closer to how real users run Claude Code. If the
+   nested agent stops on a prompt auto mode will not resolve, record the
+   prompt text as evidence (it is a real-user friction point), answer it in
+   the pane, and continue.
 4. Verify Discovery: Enter `/mcp` in Claude Code and confirm `fgac` is listed.
 
 ## Auth Setup
