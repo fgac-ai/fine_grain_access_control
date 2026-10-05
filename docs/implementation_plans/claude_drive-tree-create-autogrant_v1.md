@@ -58,3 +58,16 @@ decision; tree rule in tree mode; folder node) while the three native kinds pass
 ## Validation
 Unit: `npm run mcp:lint` green (includes `test-drive-tree-access.ts`). Typecheck clean.
 Local + preview: capability 22 A21 (new) and A14/A15 — results recorded below.
+
+### Local results (2026-10-05, dev server with FGAC_DRIVE_TREE=1, USER_A full `drive` scope)
+- First run BLOCKED: USER_A's dev grant had narrowed to `drive.file` (engine inactive) — re-enabled via A3.
+- A3 pass. A21 pass — MCP media + metadata creates and renames 200; REST metadata, media
+  and resumable creates and renames 200; each new id has a `drive` / `drive_read_write` /
+  `file` rule assigned to the key; the never-created control is still denied "Read-only …
+  by the profile's default" on both surfaces. A14 pass (Sheet created inside a Blocked
+  folder is writable; the folder itself stays invisible). A15 pass (identical denial text).
+- A proxy batch run while another session's sign-in had narrowed the grant was discarded and re-run.
+- Not verified locally: the `rule_match_level` / `drive_tree_auto_granted` /
+  `drive_file_auto_granted` analytics props (dev logs do not carry them; no PostHog query path).
+- Observation: the tree card's override count includes the agent-created files' auto-grants
+  (5 after the run). Visible by design (the user can see what the agent made), but it grows.
