@@ -91,6 +91,8 @@ export function injectCreateId(body: string, generatedId: string): string | null
  *              Blocked source denies), then the copy is auto-granted. Until
  *              2026-10-05 the REST guard counted it as a write on the source.
  *   - `create` POST (upload/)drive/v3/files — no source to gate; auto-granted.
+ *   - `comments` files/{id}/comments… — content on the file; follows its rule
+ *              (writes need Read & Write), like MCP's file_comments.
  *   - `file`   any other call addressed to one file by id, including the
  *              `upload/` media update of an existing file (which the REST
  *              guard's old `^drive/` regex skipped entirely).
@@ -100,6 +102,7 @@ export function injectCreateId(body: string, generatedId: string): string | null
 export type ProxyDriveCall =
   | { kind: 'copy'; fileId: string }
   | { kind: 'create' }
+  | { kind: 'comments'; fileId: string; isMutating: boolean }
   | { kind: 'file'; fileId: string; isMutating: boolean };
 
 export function classifyProxyDriveCall(method: string, path: string): ProxyDriveCall | null {
@@ -108,6 +111,8 @@ export function classifyProxyDriveCall(method: string, path: string): ProxyDrive
   const copy = bare.match(/^drive\/v3\/files\/([^/?#]+)\/copy$/i);
   if (copy && method === 'POST') return { kind: 'copy', fileId: decodeURIComponent(copy[1]) };
   if (method === 'POST' && isDriveCreatePath(bare)) return { kind: 'create' };
+  const comments = bare.match(/^drive\/v3\/files\/([^/?#]+)\/comments(\/|$)/i);
+  if (comments) return { kind: 'comments', fileId: decodeURIComponent(comments[1]), isMutating };
   const file = bare.replace(/^upload\//i, '').match(/^drive\/v[23]\/files\/([^/?#]+)(\/|$)/i);
   if (file && file[1].toLowerCase() !== 'generateids') {
     return { kind: 'file', fileId: decodeURIComponent(file[1]), isMutating };
@@ -123,11 +128,11 @@ export function classifyProxyDriveCall(method: string, path: string): ProxyDrive
  * route's checkDriveFileAccess: ask Google what the file is, then
  *   - a Sheets/Docs/Slides mimeType → not exposed (the rule decides);
  *   - any other kind → forward; Google's per-file drive.file grant is the gate;
- *   - a copy's source → not exposed whatever it is (MCP drive_copy parity:
- *     copying needs a rule on the source).
+ *   - a copy's source, or a file's comments → not exposed whatever it is
+ *     (MCP drive_copy / file_comments parity: both need a rule on the file).
  */
 export function legacyUnruledDriveDecision(call: ProxyDriveCall, mimeType: string | null): 'not_exposed' | 'passthrough' {
-  if (call.kind === 'copy') return 'not_exposed';
+  if (call.kind === 'copy' || call.kind === 'comments') return 'not_exposed';
   return kindForMimeType(mimeType) ? 'not_exposed' : 'passthrough';
 }
 

@@ -17,6 +17,7 @@ Drive calls:
 | `POST files/{id}/copy` | Read on the source suffices (a copy is a read) | counted as a WRITE on the source → Read Only sources refused; same bug in tree mode |
 | id-addressed call on a file no rule names | asks Google the mimeType: Sheets/Docs/Slides → not exposed, anything else → forwarded under drive.file (`checkDriveFileAccess`) | flat "not exposed" → the agent's own text/PDF creations stranded |
 | `upload/drive/v3/files/{id}` (media update of an existing file) | gated like any `drive_file` call | never matched the guard's `^drive/` regex → **ungated in both modes** |
+| `files/{id}/comments` on a file no rule names | not exposed (`file_comments`) | not exposed (kept; classified as `comments` so the new mimeType passthrough never applies) |
 
 ## Decision: parity with MCP
 

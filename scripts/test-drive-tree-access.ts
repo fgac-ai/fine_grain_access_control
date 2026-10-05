@@ -151,7 +151,7 @@ check('a rename is a mutating file call', cc('PATCH', 'drive/v3/files/f1') === J
 check('a metadata read is a non-mutating file call', cc('GET', 'drive/v3/files/f1?fields=name') === JSON.stringify({ kind: 'file', fileId: 'f1', isMutating: false }));
 check('the upload/ media update of an existing file is gated (was skipped)', cc('PATCH', 'upload/drive/v3/files/f1?uploadType=media') === JSON.stringify({ kind: 'file', fileId: 'f1', isMutating: true }));
 check('v2 id-addressed calls stay gated', cc('DELETE', 'drive/v2/files/f1') === JSON.stringify({ kind: 'file', fileId: 'f1', isMutating: true }));
-check('comments on a file are a file call', cc('POST', 'drive/v3/files/f1/comments') === JSON.stringify({ kind: 'file', fileId: 'f1', isMutating: true }));
+check('comments on a file are their own kind', cc('POST', 'drive/v3/files/f1/comments') === JSON.stringify({ kind: 'comments', fileId: 'f1', isMutating: true }) && cc('GET', 'drive/v3/files/f1/comments/c1/replies') === JSON.stringify({ kind: 'comments', fileId: 'f1', isMutating: false }));
 check('an encoded id is decoded', cc('GET', 'drive/v3/files/a%2Db') === JSON.stringify({ kind: 'file', fileId: 'a-b', isMutating: false }));
 // No rule names the file: what it is decides (MCP checkDriveFileAccess).
 const fileCall = classifyProxyDriveCall('PATCH', 'drive/v3/files/f1')!;
@@ -160,6 +160,7 @@ check('unruled Sheet → not exposed', legacyUnruledDriveDecision(fileCall, 'app
 check('unruled Doc → not exposed', legacyUnruledDriveDecision(fileCall, doc) === 'not_exposed');
 check("unruled text file (the agent's own create) → drive.file passthrough", legacyUnruledDriveDecision(fileCall, 'text/plain') === 'passthrough');
 check('unruled PDF → drive.file passthrough', legacyUnruledDriveDecision(fileCall, 'application/pdf') === 'passthrough');
+check('comments on an unruled file are not exposed, whatever it is (MCP file_comments parity)', legacyUnruledDriveDecision(classifyProxyDriveCall('GET', 'drive/v3/files/f1/comments')!, 'application/pdf') === 'not_exposed');
 check('a copy of an unruled source is not exposed, whatever it is', legacyUnruledDriveDecision(copyCall, 'text/plain') === 'not_exposed' && legacyUnruledDriveDecision(copyCall, 'application/vnd.google-apps.spreadsheet') === 'not_exposed');
 check('create metadata mimeType is read', createMetadataMimeType('{"name":"x","mimeType":"application/vnd.google-apps.spreadsheet"}') === 'application/vnd.google-apps.spreadsheet' && createMetadataMimeType('') === null && createMetadataMimeType('nope') === null && createMetadataMimeType('{"name":"x"}') === null);
 

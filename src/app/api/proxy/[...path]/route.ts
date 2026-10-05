@@ -521,7 +521,7 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     const driveCall = classifyProxyDriveCall(request.method, fullPath);
     if (driveCall && driveCall.kind !== 'create') {
       const fileId = driveCall.fileId;
-      const isMutating = driveCall.kind === 'file' && driveCall.isMutating;
+      const isMutating = driveCall.kind !== 'copy' && driveCall.isMutating;
       if (driveTree) {
         telemetry.driveFileGate = 'tree';
         const denied = await proxyDriveTreeDenial(driveTree, fileId, isMutating, telemetry);
@@ -556,8 +556,9 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
         if (fileRules.length === 0) {
           // No rule names the file: what it IS decides (legacyUnruledDriveDecision,
           // same policy as the MCP route's checkDriveFileAccess). A copy's
-          // source needs a rule whatever it is, so it skips the lookup.
-          if (driveCall.kind === 'copy') return notExposed();
+          // source and a file's comments need a rule whatever it is, so they
+          // skip the lookup.
+          if (driveCall.kind !== 'file') return notExposed();
           const token = await getOwnGoogleToken();
           if (!token) {
             return NextResponse.json({
