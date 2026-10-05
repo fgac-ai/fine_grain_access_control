@@ -90,7 +90,22 @@ discovery branch and apply to every `drive/` path when the engine is off.
 
 - [x] `scripts/test-drive-unconfined-scope.ts` fails before (missing helpers),
       passes after; full `npm run mcp:lint` and `tsc --noEmit` clean.
-- [ ] Local: A21 via qa-env-runner (needs a USER_A → USER_B delegation and a
-      USER_B key; USER_A flagged with full scope).
+- [x] Local phase 1 (2026-10-05, `fgac-dev-drive-tree`, flag on for all),
+      qa-setup-driver via Path B. Roles swapped: USER_B owner (full `drive`
+      granted via the enable card, in-place reauthorize), USER_A key through
+      the existing USER_B → USER_A delegation, because a USER_A → USER_B
+      delegation reads `delegation_inactive` (pre-existing duplicate-`users`
+      row lookup in getGoogleToken — separate task). Delegated: files.list,
+      changes, drives → unconfined refusal; PDF/PNG by id (media + metadata)
+      → unconfined refusal; exposed Sheet reads after approval; unexposed
+      Sheet gets the normal not-exposed + link. Own mailbox under the engine:
+      filtered listing (`withheld`), PDF bytes per default read. 6 refusal log
+      lines, all `delegated=true`.
+- [x] Local phase 2 (`fgac-dev-drive-tree-off`, flag forced off): USER_B own
+      mailbox with full scope → listing and PDF metadata refused
+      (`delegated=false` copy); delegated listing still refused; exposed
+      Sheet still reads; USER_A own mailbox (grant had narrowed back to
+      drive.file after a re-sign-in) → legacy listing passes through
+      unchanged (the drive.file regression case).
 - [ ] Preview (`/deploy-pr-preview`) with the `drive_tree` flag on: A21 plus
       A1–A16 regression on the owner's own mailbox.
