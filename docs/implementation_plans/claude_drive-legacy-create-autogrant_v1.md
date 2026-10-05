@@ -65,10 +65,20 @@ flag-off `drive` token as tree-engine-or-deny.
   `sheet_read_write` on the Default Profile; no row for the text note; no copy
   of B or of the other-key sheet N was created. Telemetry props
   (`drive_file_gate`, `drive_file_auto_granted.drive_tree`) not yet checked.
-- [ ] Local A22: BLOCKED — USER_A (flag on) holds `drive.file` only (dashboard
+- [x] Local A22: BLOCKED locally (passed on the preview below) — USER_A (flag on) holds `drive.file` only (dashboard
   "needs re-enabling"); a concurrent session was mid drive-scope flow on the
   shared Chrome. Run on the preview once USER_A has the full scope.
 - Note: the REST proxy cannot create a sheet via `POST v4/spreadsheets`
   (400 "Invalid Google Sheets API path" — the per-file handler requires an
   id). Pre-existing; creating through `POST drive/v3/files` works.
-- [ ] Preview: A16 + A22 via `/deploy-pr-preview`.
+- [x] Preview (2026-10-05, PR #185 preview 45fx5vmkm, commit ff16996, Path B
+  Chrome): A16 12/12 PASS as USER_B (flag off) — dashboard shows Read & Write
+  rows for the created sheet and the copy of R, none for the text note; no
+  copy of B or N created. A22 6/6 PASS as USER_A (flag on, full `drive`
+  re-granted via the verified reauthorize branch): copy of a Read-default file
+  200, rename of the copy 200, copy of a Blocked source 403 with no file
+  created, source restored to Inherit. USER_A left with the full scope.
+  Telemetry props not checked (no PostHog connector in this session).
+- Findings outside this change (filed as follow-ups): the Drive card's
+  "N overrides" counter excludes auto-granted file settings; the new-profile
+  form can create a key with no mailbox and no way to add one later.

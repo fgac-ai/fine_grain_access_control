@@ -317,8 +317,9 @@ rule) and sheet B (Blocked rule) as in A14.
      (any body).
 - **Expected**:
   - 1: create 200; rename and values write 200 with no dashboard action; an
-    "Agent-created: QA rest sheet" Read & Write rule (`sheet_read_write`)
-    assigned to the key appears in the dashboard / `get_my_permissions`;
+    Read & Write rule (`sheet_read_write`, rule name "Agent-created: QA rest
+    sheet") assigned to the key appears — the dashboard lists it under the
+    file's title, not the rule name;
     `drive_file_auto_granted{via:'rest_proxy', service:'sheets', drive_tree:false}`
     fires; the rename's `proxy_request` carries `drive_file_gate: 'rule'`.
   - 2: the copy SUCCEEDS (a copy is a READ of R) and the copy is Read & Write
