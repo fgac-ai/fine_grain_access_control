@@ -81,3 +81,62 @@ export function injectCreateId(body: string, generatedId: string): string | null
   if ('id' in meta) return null;
   return JSON.stringify({ ...meta, id: generatedId });
 }
+
+/**
+ * How the REST proxy's Drive guard treats a call, mirroring the MCP
+ * classifier's drive_copy / drive_create / drive_file kinds
+ * (src/app/api/mcp/googleApiPolicy.ts) so the two surfaces gate the same
+ * call the same way:
+ *   - `copy`   POST files/{id}/copy — a READ of the source (Read suffices; a
+ *              Blocked source denies), then the copy is auto-granted. Until
+ *              2026-10-05 the REST guard counted it as a write on the source.
+ *   - `create` POST (upload/)drive/v3/files — no source to gate; auto-granted.
+ *   - `file`   any other call addressed to one file by id, including the
+ *              `upload/` media update of an existing file (which the REST
+ *              guard's old `^drive/` regex skipped entirely).
+ * `generateIds` sits in the id slot but is an id-less discovery verb, and the
+ * listing (`GET drive/v3/files`) is discovery — both are never gated (null).
+ */
+export type ProxyDriveCall =
+  | { kind: 'copy'; fileId: string }
+  | { kind: 'create' }
+  | { kind: 'file'; fileId: string; isMutating: boolean };
+
+export function classifyProxyDriveCall(method: string, path: string): ProxyDriveCall | null {
+  const bare = path.split('?')[0];
+  const isMutating = method !== 'GET' && method !== 'HEAD';
+  const copy = bare.match(/^drive\/v3\/files\/([^/?#]+)\/copy$/i);
+  if (copy && method === 'POST') return { kind: 'copy', fileId: decodeURIComponent(copy[1]) };
+  if (method === 'POST' && isDriveCreatePath(bare)) return { kind: 'create' };
+  const file = bare.replace(/^upload\//i, '').match(/^drive\/v[23]\/files\/([^/?#]+)(\/|$)/i);
+  if (file && file[1].toLowerCase() !== 'generateids') {
+    return { kind: 'file', fileId: decodeURIComponent(file[1]), isMutating };
+  }
+  return null;
+}
+
+/**
+ * Per-file (legacy, drive.file) model, a Drive file NO rule names. FGAC has
+ * rule types only for Sheets / Docs / Slides, so a flat denial would strand
+ * every other kind — including the agent's own text/PDF/binary creations,
+ * which agentCreatedGrant(…, false) cannot grant. Same policy as the MCP
+ * route's checkDriveFileAccess: ask Google what the file is, then
+ *   - a Sheets/Docs/Slides mimeType → not exposed (the rule decides);
+ *   - any other kind → forward; Google's per-file drive.file grant is the gate;
+ *   - a copy's source → not exposed whatever it is (MCP drive_copy parity:
+ *     copying needs a rule on the source).
+ */
+export function legacyUnruledDriveDecision(call: ProxyDriveCall, mimeType: string | null): 'not_exposed' | 'passthrough' {
+  if (call.kind === 'copy') return 'not_exposed';
+  return kindForMimeType(mimeType) ? 'not_exposed' : 'passthrough';
+}
+
+/** The `mimeType` a create's metadata body names (JSON metadata / resumable initiation), or null. */
+export function createMetadataMimeType(body: string): string | null {
+  try {
+    const meta = JSON.parse(body) as { mimeType?: unknown };
+    return meta && typeof meta === 'object' && typeof meta.mimeType === 'string' ? meta.mimeType : null;
+  } catch {
+    return null;
+  }
+}

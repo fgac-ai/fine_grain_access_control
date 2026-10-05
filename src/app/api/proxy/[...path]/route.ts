@@ -16,7 +16,10 @@ import {
   resolveDriveTreeAccess, effectiveDriveAccess, settingsFromRules, normalizeDriveDefault, driveDenialText, widenListFields,
   type DriveDefault, type DriveSetting,
 } from '@/lib/driveTreeAccess';
-import { agentCreatedGrant, createdDriveFileFromBody, isDriveCreatePath, isResumableInitiation, injectCreateId } from '@/lib/agentCreatedFiles';
+import {
+  agentCreatedGrant, createdDriveFileFromBody, isResumableInitiation, injectCreateId,
+  classifyProxyDriveCall, legacyUnruledDriveDecision, createMetadataMimeType,
+} from '@/lib/agentCreatedFiles';
 import { resolveDriveLineage, resolveLineageFrom, parseDriveFileMeta, driveMetaUrl, LineageError, MAX_LINEAGE_HOPS, type MetaFetcher } from '@/lib/driveLineage';
 
 export const dynamic = 'force-dynamic';
@@ -74,6 +77,12 @@ type ProxyTelemetry = {
   tokenMs?: number;
   /** Set when the upstream exchange failed before Google answered: 'timeout' | 'network'. */
   errorStatus?: string;
+  /**
+   * Which branch of the Drive guard decided an id-addressed call (same values
+   * as the MCP `drive_file_gate` prop): `rule` / `tree` / `mime_gated` /
+   * `mime_other` / `invisible`.
+   */
+  driveFileGate?: string;
 };
 
 /**
@@ -219,6 +228,7 @@ async function trackedProxyRequest(request: NextRequest, params: { path: string[
     google_ms: telemetry.googleMs,
     token_ms: telemetry.tokenMs,
     error_status: telemetry.errorStatus,
+    drive_file_gate: telemetry.driveFileGate,
   });
 
   return response;
@@ -358,16 +368,30 @@ async function proxyFilterDriveListing(engine: ProxyDriveTree, body: string): Pr
   return JSON.stringify({ ...data, files: kept, withheld });
 }
 
+/** One Drive metadata GET (mimeType + name) with the owner's token; the raw Google answer on failure. */
+async function fetchDriveMimeType(googleToken: string, fileId: string): Promise<
+  | { ok: true; mimeType: string | null; name: string | null }
+  | { ok: false; status: number; body: string }
+> {
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=mimeType,name&supportsAllDrives=true`, {
+    headers: { Authorization: `Bearer ${googleToken}` },
+    signal: AbortSignal.timeout(GOOGLE_FETCH_TIMEOUT_MS),
+  });
+  if (!res.ok) return { ok: false, status: res.status, body: await res.text() };
+  const meta = (await res.json()) as { mimeType?: unknown; name?: unknown };
+  return { ok: true, mimeType: typeof meta.mimeType === 'string' ? meta.mimeType : null, name: typeof meta.name === 'string' ? meta.name : null };
+}
+
 /**
  * Pre-name a resumable upload (see isResumableInitiation): one
  * files.generateIds call, injected into the initiation metadata. Null when
  * the id cannot be injected — the upload then proceeds unchanged and the
  * file simply goes ungranted, as before.
  */
-async function prepareResumableCreate(engine: ProxyDriveTree, body: ArrayBuffer | undefined): Promise<{ body: string; id: string; name: string | null; mimeType: string | null } | null> {
+async function prepareResumableCreate(googleToken: string, body: ArrayBuffer | undefined): Promise<{ body: string; id: string; name: string | null; mimeType: string | null } | null> {
   try {
     const res = await fetch('https://www.googleapis.com/drive/v3/files/generateIds?count=1&space=drive&type=files', {
-      headers: { Authorization: `Bearer ${engine.token.token}` },
+      headers: { Authorization: `Bearer ${googleToken}` },
       signal: AbortSignal.timeout(GOOGLE_FETCH_TIMEOUT_MS),
     });
     if (!res.ok) return null;
@@ -384,19 +408,27 @@ async function prepareResumableCreate(engine: ProxyDriveTree, body: ArrayBuffer 
 }
 
 /**
- * Drive tree engine: a file the agent just created is its own output — a
- * Read & Write setting for this key, the same auto-grant the MCP route
- * writes (src/lib/agentCreatedFiles.ts). Without it the profile default
- * (often Read) refused the agent's next rename or update of its own file.
+ * A file the agent just created is its own output — a Read & Write rule for
+ * this key, the same auto-grant the MCP route writes
+ * (src/lib/agentCreatedFiles.ts). Under the Drive tree engine every kind is
+ * granted (without it the profile default, often Read, refused the agent's
+ * next rename or update of its own file). Under the per-file model only
+ * Sheets / Docs / Slides are, exactly as MCP's grantDriveCreatedFile does —
+ * before 2026-10-05 the REST proxy granted nothing there, so the legacy
+ * guard denied the agent's own spreadsheet as "not exposed".
  */
-async function grantProxyCreatedFile(engine: ProxyDriveTree, userId: string, proxyKeyId: string, file: { id: string; name: string | null; mimeType: string | null }): Promise<void> {
+async function grantProxyCreatedFile(
+  googleToken: string, treeActive: boolean, clerkUserId: string, userId: string, proxyKeyId: string,
+  file: { id: string; name: string | null; mimeType: string | null },
+): Promise<void> {
   try {
     let { name, mimeType } = file;
     if (!mimeType) {
-      const meta = await engine.fetchMeta(file.id);
-      if (meta.ok) { mimeType = meta.meta.mimeType ?? null; name = name ?? meta.meta.name ?? null; }
+      // A `fields` mask can strip mimeType from the create response.
+      const meta = await fetchDriveMimeType(googleToken, file.id);
+      if (meta.ok) { mimeType = meta.mimeType; name = name ?? meta.name; }
     }
-    const grant = agentCreatedGrant(mimeType, true);
+    const grant = agentCreatedGrant(mimeType, treeActive);
     if (!grant) return;
     const [rule] = await db.insert(accessRules).values({
       userId,
@@ -408,7 +440,7 @@ async function grantProxyCreatedFile(engine: ProxyDriveTree, userId: string, pro
       resourceName: name,
     }).returning();
     await db.insert(keyRuleAssignments).values({ proxyKeyId, accessRuleId: rule.id });
-    captureServerEvent(engine.clerkUserId, 'drive_file_auto_granted', { via: 'rest_proxy', node_kind: grant.targetKind ?? 'file', service: grant.service });
+    captureServerEvent(clerkUserId, 'drive_file_auto_granted', { via: 'rest_proxy', node_kind: grant.targetKind ?? 'file', service: grant.service, drive_tree: treeActive });
   } catch (err) {
     console.error('[Proxy] Failed to auto-grant agent-created Drive file:', err);
   }
@@ -476,18 +508,26 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     // naturally shows only app-granted files; agents discover FGAC-exposed
     // sheet ids via get_my_permissions). But ACCESS to a specific file must
     // respect the same sheets rules as the Sheets API, or drive get/export
-    // would be a bypass around them.
-    {
-      const driveFileMatch = fullPath.match(/^drive\/v[23]\/files\/([^/?]+)/);
-      if (driveFileMatch && driveFileMatch[1] !== 'generateIds' && driveTree) {
-        const fileId = decodeURIComponent(driveFileMatch[1]);
-        const isMutating = request.method !== 'GET' && request.method !== 'HEAD';
+    // would be a bypass around them. Calls are classified exactly as the MCP
+    // route classifies them (classifyProxyDriveCall): a copy is a READ of its
+    // source, and the `upload/` media update of an existing file is gated too.
+    // The owner's Google token, fetched at most once per request (the guard's
+    // mimeType lookup, the create auto-grant, and the forward share it).
+    let ownGoogleToken: ProxyGoogleToken | null | undefined = driveTree?.token;
+    const getOwnGoogleToken = async () => {
+      if (ownGoogleToken === undefined) ownGoogleToken = await fetchClerkGoogleToken(dbUser.clerkUserId, dbUser.clerkUserId, telemetry);
+      return ownGoogleToken;
+    };
+    const driveCall = classifyProxyDriveCall(request.method, fullPath);
+    if (driveCall && driveCall.kind !== 'create') {
+      const fileId = driveCall.fileId;
+      const isMutating = driveCall.kind === 'file' && driveCall.isMutating;
+      if (driveTree) {
+        telemetry.driveFileGate = 'tree';
         const denied = await proxyDriveTreeDenial(driveTree, fileId, isMutating, telemetry);
         if (denied) return denied;
         // Permitted — falls through to the generic Google passthrough below.
-      } else if (driveFileMatch && driveFileMatch[1] !== 'generateIds') {
-        const fileId = decodeURIComponent(driveFileMatch[1]);
-
+      } else {
         const allUserRules = await db
           .select()
           .from(accessRules)
@@ -509,24 +549,48 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
         );
         const blockTypes = new Set(ACTIVE_DRIVE_FILE_KINDS.map(k => DRIVE_FILE_KINDS[k].actionTypes.block));
         const readWriteTypes = new Set(ACTIVE_DRIVE_FILE_KINDS.map(k => DRIVE_FILE_KINDS[k].actionTypes.readWrite));
+        const notExposed = () => NextResponse.json({
+          error: `Access Denied: File '${fileId}' is not exposed in FGAC rules for this API key.`
+        }, { status: 403 });
 
         if (fileRules.length === 0) {
-          return NextResponse.json({
-            error: `Access Denied: File '${fileId}' is not exposed in FGAC rules for this API key.`
-          }, { status: 403 });
+          // No rule names the file: what it IS decides (legacyUnruledDriveDecision,
+          // same policy as the MCP route's checkDriveFileAccess). A copy's
+          // source needs a rule whatever it is, so it skips the lookup.
+          if (driveCall.kind === 'copy') return notExposed();
+          const token = await getOwnGoogleToken();
+          if (!token) {
+            return NextResponse.json({
+              error: `Could not fetch Google access token for '${dbUser.email}'. The account owner may need to reconnect their Google account.`
+            }, { status: 403 });
+          }
+          const meta = await fetchDriveMimeType(token.token, fileId);
+          if (!meta.ok) {
+            // Invisible to this token (never picked, not app-created) or a
+            // Google failure: Google's own answer, and nothing is forwarded.
+            telemetry.driveFileGate = 'invisible';
+            return new NextResponse(meta.body, { status: meta.status, headers: { 'content-type': 'application/json; charset=UTF-8' } });
+          }
+          if (legacyUnruledDriveDecision(driveCall, meta.mimeType) === 'not_exposed') {
+            telemetry.driveFileGate = 'mime_gated';
+            return notExposed();
+          }
+          telemetry.driveFileGate = 'mime_other';
+          // Permitted — Google's per-file drive.file grant is the gate.
+        } else {
+          telemetry.driveFileGate = 'rule';
+          if (fileRules.some(r => blockTypes.has(r.actionType))) {
+            return NextResponse.json({
+              error: `Access Denied: Access to file '${fileId}' has been explicitly blocked.`
+            }, { status: 403 });
+          }
+          if (isMutating && !fileRules.some(r => readWriteTypes.has(r.actionType))) {
+            return NextResponse.json({
+              error: `Access Denied: Write operations on file '${fileId}' are restricted to Read-Only.`
+            }, { status: 403 });
+          }
+          // Permitted — falls through to the generic Google passthrough below.
         }
-        if (fileRules.some(r => blockTypes.has(r.actionType))) {
-          return NextResponse.json({
-            error: `Access Denied: Access to file '${fileId}' has been explicitly blocked.`
-          }, { status: 403 });
-        }
-        const isMutating = request.method !== 'GET' && request.method !== 'HEAD';
-        if (isMutating && !fileRules.some(r => readWriteTypes.has(r.actionType))) {
-          return NextResponse.json({
-            error: `Access Denied: Write operations on file '${fileId}' are restricted to Read-Only.`
-          }, { status: 403 });
-        }
-        // Permitted — falls through to the generic Google passthrough below.
       }
     }
 
@@ -814,7 +878,9 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     }
 
     // ─── 8. Fetch Real Google Token from Clerk ──────────────────────────────
-    const realGoogleToken = await fetchClerkGoogleToken(tokenOwnerClerkUserId, dbUser.clerkUserId, telemetry);
+    const realGoogleToken = tokenOwnerClerkUserId === dbUser.clerkUserId
+      ? await getOwnGoogleToken()
+      : await fetchClerkGoogleToken(tokenOwnerClerkUserId, dbUser.clerkUserId, telemetry);
 
     if (!realGoogleToken) {
       return NextResponse.json({
@@ -885,11 +951,18 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
       requestBody = await request.clone().arrayBuffer();
     }
 
-    // Drive tree engine: creates are auto-granted to this key. A resumable
-    // upload is named up front (its file never comes back through here).
-    const driveCreate = !!driveTree && request.method === 'POST' && (isDriveCreatePath(fullPath) || /^drive\/v3\/files\/[^/?]+\/copy$/i.test(fullPath));
-    const resumable = driveCreate && driveTree && isResumableInitiation(request.method, fullPath, request.nextUrl.searchParams)
-      ? await prepareResumableCreate(driveTree, requestBody as ArrayBuffer | undefined)
+    // Creates and copies are auto-granted to this key — every kind under the
+    // Drive tree engine, Sheets/Docs/Slides under the per-file model (MCP
+    // parity). A resumable upload is named up front (its file never comes
+    // back through here); under the per-file model only when its metadata
+    // names a kind that would be granted, so other uploads are untouched.
+    // Drive calls never reach a delegated mailbox (the path names no user),
+    // so realGoogleToken is the key owner's own.
+    const driveCreate = driveCall?.kind === 'create' || driveCall?.kind === 'copy';
+    const resumableWanted = driveCreate && isResumableInitiation(request.method, fullPath, request.nextUrl.searchParams)
+      && (!!driveTree || agentCreatedGrant(createMetadataMimeType(requestBody ? new TextDecoder().decode(requestBody as ArrayBuffer) : ''), false) !== null);
+    const resumable = resumableWanted
+      ? await prepareResumableCreate(realGoogleToken.token, requestBody as ArrayBuffer | undefined)
       : null;
     if (resumable) {
       requestBody = resumable.body;
@@ -904,14 +977,14 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     }, telemetry);
     if (!forward.ok) return forward.response;
 
-    if (driveCreate && driveTree && forward.status >= 200 && forward.status < 300) {
+    if (driveCreate && forward.status >= 200 && forward.status < 300) {
       let created = null;
       if (resumable) {
         created = { id: resumable.id, name: resumable.name, mimeType: resumable.mimeType ?? request.headers.get('x-upload-content-type') };
       } else {
         try { created = createdDriveFileFromBody(JSON.parse(forward.body)); } catch { /* not JSON */ }
       }
-      if (created) await grantProxyCreatedFile(driveTree, dbUser.id, dbKey.id, created);
+      if (created) await grantProxyCreatedFile(realGoogleToken.token, !!driveTree, dbUser.clerkUserId, dbUser.id, dbKey.id, created);
     }
 
     const returnBody = forward.body;

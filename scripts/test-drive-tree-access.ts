@@ -12,7 +12,10 @@ import {
 import {
   resolveDriveLineage, resolveLineageFrom, parseDriveFileMeta, _resetLineageCache, LineageError, type MetaFetcher, type DriveFileMeta,
 } from '../src/lib/driveLineage';
-import { agentCreatedGrant, createdDriveFileFromBody, isDriveCreatePath, isResumableInitiation, injectCreateId } from '../src/lib/agentCreatedFiles';
+import {
+  agentCreatedGrant, createdDriveFileFromBody, isDriveCreatePath, isResumableInitiation, injectCreateId,
+  classifyProxyDriveCall, legacyUnruledDriveDecision, createMetadataMimeType,
+} from '../src/lib/agentCreatedFiles';
 
 let failures = 0;
 function check(name: string, cond: boolean) {
@@ -128,6 +131,37 @@ check('a resumable initiation body gets the pre-generated id', inj !== null && J
 check('an empty initiation body gets one too', JSON.parse(injectCreateId('', 'gen1')!).id === 'gen1');
 check('a caller-chosen id is never adopted (could name an existing file)', injectCreateId('{"id":"theirs"}', 'gen1') === null);
 check('a non-JSON body is left alone', injectCreateId('not json', 'gen1') === null);
+
+console.log('per-file (flag off) model — REST/MCP parity:');
+// The legacy create auto-grant: Sheets/Docs/Slides get their per-kind Read &
+// Write rule (what MCP's grantDriveCreatedFile writes); other kinds get none.
+check('legacy: a created Sheet gets a sheets read_write rule', agentCreatedGrant('application/vnd.google-apps.spreadsheet', false)?.service === 'sheets' && agentCreatedGrant('application/vnd.google-apps.spreadsheet', false)?.actionType === 'sheet_read_write');
+check('legacy: a created Doc gets a docs rule', agentCreatedGrant(doc, false)?.service === 'docs');
+check('legacy: a created Slides deck gets a slides rule', agentCreatedGrant('application/vnd.google-apps.presentation', false)?.service === 'slides');
+check('legacy: a create with an unknown mimeType writes nothing', agentCreatedGrant(null, false) === null);
+// Classification mirrors the MCP drive_copy / drive_create / drive_file kinds.
+const cc = (m: string, p: string) => JSON.stringify(classifyProxyDriveCall(m, p));
+check('copy is its own kind (gated as a READ of the source)', cc('POST', 'drive/v3/files/src1/copy') === JSON.stringify({ kind: 'copy', fileId: 'src1' }));
+check('copy query string is ignored', cc('POST', 'drive/v3/files/src1/copy?fields=id,name') === JSON.stringify({ kind: 'copy', fileId: 'src1' }));
+check('metadata create', cc('POST', 'drive/v3/files') === JSON.stringify({ kind: 'create' }));
+check('upload create', cc('POST', 'upload/drive/v3/files?uploadType=multipart') === JSON.stringify({ kind: 'create' }));
+check('GET listing is discovery, never gated', classifyProxyDriveCall('GET', 'drive/v3/files') === null);
+check('generateIds is never gated', classifyProxyDriveCall('GET', 'drive/v3/files/generateIds') === null);
+check('a rename is a mutating file call', cc('PATCH', 'drive/v3/files/f1') === JSON.stringify({ kind: 'file', fileId: 'f1', isMutating: true }));
+check('a metadata read is a non-mutating file call', cc('GET', 'drive/v3/files/f1?fields=name') === JSON.stringify({ kind: 'file', fileId: 'f1', isMutating: false }));
+check('the upload/ media update of an existing file is gated (was skipped)', cc('PATCH', 'upload/drive/v3/files/f1?uploadType=media') === JSON.stringify({ kind: 'file', fileId: 'f1', isMutating: true }));
+check('v2 id-addressed calls stay gated', cc('DELETE', 'drive/v2/files/f1') === JSON.stringify({ kind: 'file', fileId: 'f1', isMutating: true }));
+check('comments on a file are a file call', cc('POST', 'drive/v3/files/f1/comments') === JSON.stringify({ kind: 'file', fileId: 'f1', isMutating: true }));
+check('an encoded id is decoded', cc('GET', 'drive/v3/files/a%2Db') === JSON.stringify({ kind: 'file', fileId: 'a-b', isMutating: false }));
+// No rule names the file: what it is decides (MCP checkDriveFileAccess).
+const fileCall = classifyProxyDriveCall('PATCH', 'drive/v3/files/f1')!;
+const copyCall = classifyProxyDriveCall('POST', 'drive/v3/files/f1/copy')!;
+check('unruled Sheet → not exposed', legacyUnruledDriveDecision(fileCall, 'application/vnd.google-apps.spreadsheet') === 'not_exposed');
+check('unruled Doc → not exposed', legacyUnruledDriveDecision(fileCall, doc) === 'not_exposed');
+check("unruled text file (the agent's own create) → drive.file passthrough", legacyUnruledDriveDecision(fileCall, 'text/plain') === 'passthrough');
+check('unruled PDF → drive.file passthrough', legacyUnruledDriveDecision(fileCall, 'application/pdf') === 'passthrough');
+check('a copy of an unruled source is not exposed, whatever it is', legacyUnruledDriveDecision(copyCall, 'text/plain') === 'not_exposed' && legacyUnruledDriveDecision(copyCall, 'application/vnd.google-apps.spreadsheet') === 'not_exposed');
+check('create metadata mimeType is read', createMetadataMimeType('{"name":"x","mimeType":"application/vnd.google-apps.spreadsheet"}') === 'application/vnd.google-apps.spreadsheet' && createMetadataMimeType('') === null && createMetadataMimeType('nope') === null && createMetadataMimeType('{"name":"x"}') === null);
 
 console.log('listing fields:');
 check('absent → widened default', widenListFields(undefined) === 'kind,nextPageToken,incompleteSearch,files(kind,id,name,mimeType,parents,driveId,ownedByMe,shortcutDetails)');

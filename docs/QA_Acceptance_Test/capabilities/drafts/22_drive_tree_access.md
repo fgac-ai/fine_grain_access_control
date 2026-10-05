@@ -268,3 +268,17 @@ folder settings.
   `shared_drive` level is covered by `scripts/test-drive-tree-access.ts`).
 * Sharing-requires-send parity and a typed `drive_list_files` tool (plan v7
   §3, later train).
+
+### A22: A REST copy is a read of its source under the engine too
+Regression for 2026-10-05: the REST proxy's tree branch counted
+`POST drive/v3/files/{id}/copy` as a WRITE on the source, so under the
+**Read everything** default every copy was refused as Read-only while the MCP
+`drive_copy` (which needs only Read on the source) succeeded.
+- With the default on **Read everything**: `POST /api/proxy/drive/v3/files/<any
+  readable file>/copy` `{"name":"qa-a22-copy"}`; then `PATCH
+  /api/proxy/drive/v3/files/<copy id>` rename. Then set the source to
+  **Blocked** and copy it again.
+- **Expected**: the first copy 200 and the rename 200 (the copy carries its
+  own file-level Read & write setting, A21); `proxy_request` carries
+  `drive_file_gate: 'tree'`. The Blocked source's copy is 403 and no file is
+  created. Restore the source's setting to inherit; trash the copy.
