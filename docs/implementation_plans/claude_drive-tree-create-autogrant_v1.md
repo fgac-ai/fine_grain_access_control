@@ -71,3 +71,16 @@ Local + preview: capability 22 A21 (new) and A14/A15 — results recorded below.
   `drive_file_auto_granted` analytics props (dev logs do not carry them; no PostHog query path).
 - Observation: the tree card's override count includes the agent-created files' auto-grants
   (5 after the run). Visible by design (the user can see what the agent made), but it grows.
+
+### Preview results (2026-10-05, e36c5b9, PostHog flag, built-in browser)
+- A21 pass: MCP and REST creates (metadata, media, resumable) and renames all 200; tree card
+  shows each created file "Read & write, Set here"; never-created control denied Read-only by
+  the default on both surfaces. PostHog: `drive_tree_auto_granted=true` on the MCP creates,
+  `rule_match_level=file` on the renames, 3× `drive_file_auto_granted{via: rest_proxy}`.
+- A14 pass (Sheet created in a Blocked folder writable, `rule_match_level=file`; native kinds
+  report through `agent_sheet_created`, not `drive_tree_auto_granted` — by design).
+- A15 pass (`proxy_request` `error_status=drive_read_only`).
+- Pre-existing drifts noted, not caused here: MCP `google_api_modify` media uploads land as
+  application/json; A4's expected approval link is absent from tree write denials; A15's
+  "same text minus emoji" ignores the MCP STOP tail.
+- Auto-grant rules outlive trashed files (override count stays at 5 after cleanup).
