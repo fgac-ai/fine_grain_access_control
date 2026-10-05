@@ -107,5 +107,17 @@ discovery branch and apply to every `drive/` path when the engine is off.
       Sheet still reads; USER_A own mailbox (grant had narrowed back to
       drive.file after a re-sign-in) → legacy listing passes through
       unchanged (the drive.file regression case).
-- [ ] Preview (`/deploy-pr-preview`) with the `drive_tree` flag on: A21 plus
-      A1–A16 regression on the owner's own mailbox.
+- [x] Preview (PR #183, commit 4b391ed, PostHog flag: USER_A on, USER_B
+      off), built-in browser + DCR bearers against the preview: delegated
+      (USER_A key → USER_B, full `drive`) files.list / changes / PDF / PNG
+      refused, also after USER_A itself held full Drive; exposed Sheet reads
+      after approval, unexposed Sheet gets the normal link; USER_B own
+      mailbox (unflagged, full scope) listing + PDF refused with the flag-off
+      copy; USER_A own mailbox: scope-lost denial while drive.file-only, then
+      a filtered listing (`withheld`) after Re-enable. The USER_B → USER_A
+      delegation was intact on the preview (no duplicate-row symptom).
+- [ ] REST proxy flag-off refusal (P4) NOT run on the preview: reading a
+      freshly revealed proxy-key secret out of the dashboard is refused by
+      the runner's permission classifier. Covered by the static wiring test
+      only; needs a proxy key supplied by Ken to curl
+      `/api/proxy/drive/v3/files` (expect 403).
