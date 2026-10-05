@@ -12,6 +12,7 @@ import {
 import {
   resolveDriveLineage, resolveLineageFrom, parseDriveFileMeta, _resetLineageCache, LineageError, type MetaFetcher, type DriveFileMeta,
 } from '../src/lib/driveLineage';
+import { agentCreatedGrant, createdDriveFileFromBody, isDriveCreatePath, isResumableInitiation, injectCreateId } from '../src/lib/agentCreatedFiles';
 
 let failures = 0;
 function check(name: string, cond: boolean) {
@@ -97,6 +98,36 @@ const writeDrive = settingsFromRules([{ id: 'x', service: 'drive', actionType: '
 const e4 = effectiveDriveAccess(driveFile, writeDrive, 'read');
 check('a Write on a shared drive reaches its files', e4.access === 'write' && e4.level === 'shared_drive');
 check('the default applies everywhere, shared roots included', effectiveDriveAccess(driveFile, none, 'write').access === 'write');
+
+console.log('agent-created files stay writable for the creating profile:');
+// Write after create, default Read: the created file's grant must be a
+// setting the resolver reads, whatever kind of file the agent made.
+const createdLineage = (mimeType: string): LineageNode[] => [{ id: 'new1', name: 'notes.txt', kind: 'file', mimeType }, node('root', 'My Drive')];
+const afterCreate = (mimeType: string, def: 'read' | 'explicit' = 'read') => {
+  const g = agentCreatedGrant(mimeType, true);
+  const s = settingsFromRules(g ? [{ id: 'auto', service: g.service, actionType: g.actionType, targetResourceId: 'new1', targetKind: g.targetKind }] : []);
+  return resolveDriveTreeAccess(createdLineage(mimeType), s, def, true);
+};
+for (const mime of ['text/plain', 'application/octet-stream', 'application/pdf', 'image/png', 'application/vnd.google-apps.spreadsheet', doc, 'application/vnd.google-apps.presentation']) {
+  check(`created ${mime} is writable under default Read`, afterCreate(mime).allowed);
+}
+check('created text file is writable under "Only files I allow"', afterCreate('text/plain', 'explicit').allowed);
+check('the grant is a file-level setting (decided by the file, not the default)', afterCreate('text/plain').level === 'file');
+check('typed kinds keep the per-file rule (still honoured with the flag off)', agentCreatedGrant(doc, true)?.service === 'docs' && agentCreatedGrant(doc, false)?.service === 'docs');
+check('other kinds get a tree rule only in tree mode', agentCreatedGrant('text/plain', false) === null && agentCreatedGrant('text/plain', true)?.service === 'drive');
+check('an agent-created folder is granted as a folder node', agentCreatedGrant(FOLDER_MIME, true)?.targetKind === 'folder');
+
+console.log('created-file responses and resumable creates:');
+check('a Drive File resource yields the created file', JSON.stringify(createdDriveFileFromBody({ kind: 'drive#file', id: 'f1', name: 'a.txt', mimeType: 'text/plain' })) === JSON.stringify({ id: 'f1', name: 'a.txt', mimeType: 'text/plain' }));
+check('a body without an id yields nothing', createdDriveFileFromBody({}) === null && createdDriveFileFromBody(null) === null && createdDriveFileFromBody('x') === null);
+check('a non-file resource (e.g. an error) yields nothing', createdDriveFileFromBody({ kind: 'drive#permission', id: 'p' }) === null);
+check('isDriveCreatePath: metadata and upload creates', isDriveCreatePath('drive/v3/files') && isDriveCreatePath('upload/drive/v3/files') && !isDriveCreatePath('drive/v3/files/abc') && !isDriveCreatePath('drive/v3/files/abc/copy'));
+check('resumable initiation is recognised', isResumableInitiation('POST', 'upload/drive/v3/files', new URLSearchParams('uploadType=resumable')) && !isResumableInitiation('POST', 'upload/drive/v3/files', new URLSearchParams('uploadType=media')) && !isResumableInitiation('PUT', 'upload/drive/v3/files', new URLSearchParams('uploadType=resumable&upload_id=x')));
+const inj = injectCreateId('{"name":"big.bin"}', 'gen1');
+check('a resumable initiation body gets the pre-generated id', inj !== null && JSON.parse(inj).id === 'gen1' && JSON.parse(inj).name === 'big.bin');
+check('an empty initiation body gets one too', JSON.parse(injectCreateId('', 'gen1')!).id === 'gen1');
+check('a caller-chosen id is never adopted (could name an existing file)', injectCreateId('{"id":"theirs"}', 'gen1') === null);
+check('a non-JSON body is left alone', injectCreateId('not json', 'gen1') === null);
 
 console.log('listing fields:');
 check('absent → widened default', widenListFields(undefined) === 'kind,nextPageToken,incompleteSearch,files(kind,id,name,mimeType,parents,driveId,ownedByMe,shortcutDetails)');

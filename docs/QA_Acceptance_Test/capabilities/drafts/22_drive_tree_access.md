@@ -235,6 +235,33 @@ by the nav UserButton's connect-account scopes (via `/api/drive/flag`).
   the per-kind cards are back; A1's call denies `sheets_not_exposed`. This is
   also the mandatory restore step for the QA baseline.
 
+### A21: Every file the agent creates stays writable for it — non-Google kinds and both surfaces
+Regression for 2026-10-03: agent-created text/PDF/binary files fell to the
+profile default (Read) and a later rename/update was refused as Read-only.
+Run with the Default Profile's Drive default on **Read everything** and no
+folder settings.
+- **MCP**: `google_api_modify` `POST upload/drive/v3/files?uploadType=media`
+  (body: a short string; `Content-Type` text/plain) and `POST drive/v3/files
+  {name: "qa-a21-meta.txt", mimeType: "text/plain"}`; then `PATCH
+  drive/v3/files/<id> {name: "<name>-renamed"}` on each.
+- **REST proxy** (`sk_proxy_` key): `POST /api/proxy/drive/v3/files`
+  (metadata), `POST /api/proxy/upload/drive/v3/files?uploadType=media`, and a
+  resumable upload — `POST /api/proxy/upload/drive/v3/files?uploadType=resumable`
+  with `{name: "qa-a21-resumable.txt"}`, then PUT the bytes to the returned
+  `Location` session URI (direct to Google); then `PATCH
+  /api/proxy/drive/v3/files/<id>` rename on all three. The resumable file's id
+  is the one FGAC injected (read it from the PUT's response body).
+- **Expected**: every create succeeds and every rename returns 200 (not 403
+  "Read-only … by the profile's default"). A `service: 'drive'`,
+  `drive_read_write`, `target_kind: 'file'` rule assigned to the key exists for
+  each new id (read-only DB query or the profile's tree card, where the file
+  shows **Read & write** set on the file itself). MCP renames carry
+  `rule_match_level: 'file'`; the MCP creates carry
+  `drive_tree_auto_granted: true`; each proxy create fires
+  `drive_file_auto_granted{via: 'rest_proxy'}`. A control file the agent did
+  NOT create (any never-picked file) still denies the rename as Read-only.
+  Trash the fixtures via `PATCH {trashed: true}` (allowed by their own rules).
+
 ## Out of scope for this capability
 * Google verification / CASA for the restricted scope (user action).
 * Shared-drive fixtures (the QA accounts cannot create one; the

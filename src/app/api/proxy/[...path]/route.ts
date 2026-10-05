@@ -16,6 +16,7 @@ import {
   resolveDriveTreeAccess, effectiveDriveAccess, settingsFromRules, normalizeDriveDefault, driveDenialText, widenListFields,
   type DriveDefault, type DriveSetting,
 } from '@/lib/driveTreeAccess';
+import { agentCreatedGrant, createdDriveFileFromBody, isDriveCreatePath, isResumableInitiation, injectCreateId } from '@/lib/agentCreatedFiles';
 import { resolveDriveLineage, resolveLineageFrom, parseDriveFileMeta, driveMetaUrl, LineageError, MAX_LINEAGE_HOPS, type MetaFetcher } from '@/lib/driveLineage';
 
 export const dynamic = 'force-dynamic';
@@ -143,7 +144,7 @@ type GoogleForward =
 
 async function forwardToGoogle(
   url: string,
-  init: { method: string; headers: Headers; body?: ArrayBuffer },
+  init: { method: string; headers: Headers; body?: ArrayBuffer | string },
   telemetry: ProxyTelemetry,
 ): Promise<GoogleForward> {
   const started = Date.now();
@@ -278,7 +279,7 @@ async function proxyDriveTreeEngine(
   fullPath: string,
   telemetry: ProxyTelemetry,
 ): Promise<ProxyDriveTree | null> {
-  const drivePath = /^drive\/v[23]\/files/.test(fullPath) || !!driveFileKindForPath(fullPath);
+  const drivePath = /^(upload\/)?drive\/v[23]\/files/.test(fullPath) || !!driveFileKindForPath(fullPath);
   if (!drivePath) return null;
   if (!(await driveTreeFlagOn({ clerkUserId: dbUser.clerkUserId, email: dbUser.email }))) return null;
   const token = await fetchClerkGoogleToken(dbUser.clerkUserId, dbUser.clerkUserId, telemetry);
@@ -355,6 +356,62 @@ async function proxyFilterDriveListing(engine: ProxyDriveTree, body: string): Pr
     if (access === 'block') withheld++; else kept.push(f);
   }
   return JSON.stringify({ ...data, files: kept, withheld });
+}
+
+/**
+ * Pre-name a resumable upload (see isResumableInitiation): one
+ * files.generateIds call, injected into the initiation metadata. Null when
+ * the id cannot be injected — the upload then proceeds unchanged and the
+ * file simply goes ungranted, as before.
+ */
+async function prepareResumableCreate(engine: ProxyDriveTree, body: ArrayBuffer | undefined): Promise<{ body: string; id: string; name: string | null; mimeType: string | null } | null> {
+  try {
+    const res = await fetch('https://www.googleapis.com/drive/v3/files/generateIds?count=1&space=drive&type=files', {
+      headers: { Authorization: `Bearer ${engine.token.token}` },
+      signal: AbortSignal.timeout(GOOGLE_FETCH_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    const id = ((await res.json()) as { ids?: unknown }).ids;
+    if (!Array.isArray(id) || typeof id[0] !== 'string') return null;
+    const injected = injectCreateId(body ? new TextDecoder().decode(body) : '', id[0]);
+    if (!injected) return null;
+    const meta = JSON.parse(injected) as { name?: unknown; mimeType?: unknown };
+    return { body: injected, id: id[0], name: typeof meta.name === 'string' ? meta.name : null, mimeType: typeof meta.mimeType === 'string' ? meta.mimeType : null };
+  } catch (err) {
+    console.error('[Proxy] Could not pre-name a resumable Drive upload:', err);
+    return null;
+  }
+}
+
+/**
+ * Drive tree engine: a file the agent just created is its own output — a
+ * Read & Write setting for this key, the same auto-grant the MCP route
+ * writes (src/lib/agentCreatedFiles.ts). Without it the profile default
+ * (often Read) refused the agent's next rename or update of its own file.
+ */
+async function grantProxyCreatedFile(engine: ProxyDriveTree, userId: string, proxyKeyId: string, file: { id: string; name: string | null; mimeType: string | null }): Promise<void> {
+  try {
+    let { name, mimeType } = file;
+    if (!mimeType) {
+      const meta = await engine.fetchMeta(file.id);
+      if (meta.ok) { mimeType = meta.meta.mimeType ?? null; name = name ?? meta.meta.name ?? null; }
+    }
+    const grant = agentCreatedGrant(mimeType, true);
+    if (!grant) return;
+    const [rule] = await db.insert(accessRules).values({
+      userId,
+      ruleName: `Agent-created: ${name || file.id}`,
+      service: grant.service,
+      actionType: grant.actionType,
+      targetResourceId: file.id,
+      targetKind: grant.targetKind,
+      resourceName: name,
+    }).returning();
+    await db.insert(keyRuleAssignments).values({ proxyKeyId, accessRuleId: rule.id });
+    captureServerEvent(engine.clerkUserId, 'drive_file_auto_granted', { via: 'rest_proxy', node_kind: grant.targetKind ?? 'file', service: grant.service });
+  } catch (err) {
+    console.error('[Proxy] Failed to auto-grant agent-created Drive file:', err);
+  }
 }
 
 async function handleProxyRequest(request: NextRequest, params: { path: string[] }, telemetry: ProxyTelemetry) {
@@ -823,9 +880,21 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     headers.set('Authorization', `Bearer ${realGoogleToken.token}`);
     headers.delete('host');
 
-    let requestBody: ArrayBuffer | undefined = undefined;
+    let requestBody: ArrayBuffer | string | undefined = undefined;
     if (request.method !== 'GET' && request.method !== 'HEAD') {
       requestBody = await request.clone().arrayBuffer();
+    }
+
+    // Drive tree engine: creates are auto-granted to this key. A resumable
+    // upload is named up front (its file never comes back through here).
+    const driveCreate = !!driveTree && request.method === 'POST' && (isDriveCreatePath(fullPath) || /^drive\/v3\/files\/[^/?]+\/copy$/i.test(fullPath));
+    const resumable = driveCreate && driveTree && isResumableInitiation(request.method, fullPath, request.nextUrl.searchParams)
+      ? await prepareResumableCreate(driveTree, requestBody as ArrayBuffer | undefined)
+      : null;
+    if (resumable) {
+      requestBody = resumable.body;
+      headers.delete('content-length');
+      headers.set('content-type', 'application/json; charset=UTF-8');
     }
 
     const forward = await forwardToGoogle(googleUrl, {
@@ -834,6 +903,16 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
       body: requestBody,
     }, telemetry);
     if (!forward.ok) return forward.response;
+
+    if (driveCreate && driveTree && forward.status >= 200 && forward.status < 300) {
+      let created = null;
+      if (resumable) {
+        created = { id: resumable.id, name: resumable.name, mimeType: resumable.mimeType ?? request.headers.get('x-upload-content-type') };
+      } else {
+        try { created = createdDriveFileFromBody(JSON.parse(forward.body)); } catch { /* not JSON */ }
+      }
+      if (created) await grantProxyCreatedFile(driveTree, dbUser.id, dbKey.id, created);
+    }
 
     const returnBody = forward.body;
     const isJson = forward.headers.get('content-type')?.includes('application/json');

@@ -74,6 +74,7 @@ import {
 } from '@/lib/googleTokenFailure';
 import { liveTokenScopes, reconcileScopes } from '@/lib/googleTokenScopes';
 import { driveTreeFlagOn } from '@/lib/featureFlags';
+import { agentCreatedGrant } from '@/lib/agentCreatedFiles';
 import {
   resolveDriveTreeAccess, effectiveDriveAccess, settingsFromRules, normalizeDriveDefault, driveDefaultLabel,
   driveDenialText, widenListFields, DRIVE_SERVICE, type DriveDefault, type DriveSetting,
@@ -2523,8 +2524,9 @@ async function autoGrantAgentCreatedFile(
  * mimeType; a caller's `fields` mask can strip it, so fetch the metadata when
  * it is missing rather than skip the grant. Files FGAC has no per-file rule
  * model for (folders, PDFs, plain uploads) are stamped
- * `file_created_kind: 'other'` and left ungated — the same scope-backstop
- * posture every other Drive call has.
+ * `file_created_kind: 'other'`; under drive.file they stay ungated (the
+ * scope backstop), under the Drive tree engine they get a file-level
+ * Read & Write setting (src/lib/agentCreatedFiles.ts).
  */
 async function grantDriveCreatedFile(
   conn: ConnectionApproved,
@@ -2548,8 +2550,31 @@ async function grantDriveCreatedFile(
   }
   const kind = kindForMimeType(mimeType);
   addToolCallProps({ file_created_kind: kind ?? 'other' });
-  if (!kind) return;
-  await autoGrantAgentCreatedFile(conn, resolved.proxyKeyId, kind, id, name, origin);
+  if (kind) {
+    await autoGrantAgentCreatedFile(conn, resolved.proxyKeyId, kind, id, name, origin);
+    return;
+  }
+  // Drive tree engine: every kind is gated, so a text/PDF/image/folder the
+  // agent made needs its own file-level setting or the profile default
+  // (often Read) refuses the agent's next rename or update.
+  const grant = agentCreatedGrant(mimeType, getDriveEngine()?.active === true);
+  if (!grant) return;
+  try {
+    const [rule] = await db.insert(accessRules).values({
+      userId: conn.user.id,
+      ruleName: `Agent-created: ${name || id}`,
+      service: grant.service,
+      actionType: grant.actionType,
+      targetResourceId: id,
+      targetKind: grant.targetKind,
+      resourceName: name,
+    }).returning();
+    await db.insert(keyRuleAssignments).values({ proxyKeyId: resolved.proxyKeyId, accessRuleId: rule.id });
+    addToolCallProps({ file_created_origin: origin, drive_tree_auto_granted: true });
+  } catch (err) {
+    console.error('[MCP] Failed to auto-grant agent-created Drive file:', err);
+    addToolCallProps({ file_created_origin: origin, drive_tree_auto_granted: false });
+  }
 }
 
 // ─── Raw Google API Execution ───────────────────────────────────────────────
