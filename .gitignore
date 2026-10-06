@@ -78,6 +78,8 @@ dashboard_fetch.html
 verify-ui.ts
 test-clerk-token.ts
 *.png
+# Shipped product images are the exception (public/logo-*.png were force-added before this line existed).
+!public/**/*.png
 
 # one-off QA helper scripts (may contain DB queries or tokens)
 approve-connection.ts
