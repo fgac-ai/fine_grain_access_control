@@ -774,7 +774,10 @@ async function driveFileDenial(
   const blockTypes = new Set(ACTIVE_DRIVE_FILE_KINDS.map(k => DRIVE_FILE_KINDS[k].actionTypes.block));
   const readWriteTypes = new Set(ACTIVE_DRIVE_FILE_KINDS.map(k => DRIVE_FILE_KINDS[k].actionTypes.readWrite));
 
+  // drive_file_gate: which branch decided (same values as the MCP prop, PR #185).
+  telemetry.driveFileGate = fileRules.length > 0 ? 'rule' : undefined;
   if (fileRules.length === 0 && callKind !== 'file') {
+    telemetry.driveFileGate = 'rule';
     telemetry.denialCode = 'file_not_exposed';
     return NextResponse.json({
       error: `Access Denied: File '${fileId}' is not exposed in FGAC rules for this API key.`
@@ -794,6 +797,7 @@ async function driveFileDenial(
       { method: 'GET', headers: new Headers({ Authorization: `Bearer ${token.token}` }) }, telemetry,
     ) : null;
     if (!meta || !meta.ok || meta.status !== 200) {
+      telemetry.driveFileGate = 'invisible';
       telemetry.denialCode = 'file_grant_missing_at_google';
       return NextResponse.json({
         error: `Google Drive reports no file '${fileId}' visible to this account through FGAC — the id is wrong, the file was deleted, ` +
@@ -803,6 +807,7 @@ async function driveFileDenial(
     let mimeType: string | undefined;
     try { mimeType = (JSON.parse(meta.body) as { mimeType?: string }).mimeType; } catch { /* treated as other */ }
     if (kindForMimeType(mimeType)) {
+      telemetry.driveFileGate = 'mime_gated';
       telemetry.denialCode = 'file_not_exposed';
       return NextResponse.json({
         error: `Access Denied: File '${fileId}' is not exposed in FGAC rules for this API key.`
@@ -818,10 +823,12 @@ async function driveFileDenial(
       return NextResponse.json({ error: 'Could not confirm which Google Drive permission this account holds, so FGAC fails closed on this file. Retry once.' }, { status: 503 });
     }
     if (scopes.includes(DRIVE_FULL_SCOPE)) {
+      telemetry.driveFileGate = 'unconfined';
       telemetry.denialCode = 'drive_full_scope_unconfined';
       const text = unconfinedDriveDenialText({ targetEmail: dbUser.email, delegated: false, what: 'file', fileId }).replace(/^🚫 /u, '');
       return NextResponse.json({ error: text }, { status: 403 });
     }
+    telemetry.driveFileGate = 'mime_other';
     return null;
   }
   if (fileRules.some(r => blockTypes.has(r.actionType))) {
