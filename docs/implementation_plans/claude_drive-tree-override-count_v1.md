@@ -69,3 +69,12 @@ removing exactly the counted rules. QA: capability 22 draft **A23**.
 
 ## Validation
 (recorded below as it happens)
+
+- 2026-10-05, static: `scripts/test-drive-tree-access.ts` all pass (new override/clear
+  block included); `tsc --noEmit` clean; eslint clean on touched files.
+- 2026-10-05, local (dev server `fgac-dev-drive-tree`, fresh Neon branch
+  `claude-drive-tree-override-count`): A23 and A18 **BLOCKED**. Nothing was tested. The
+  built-in pane refused localhost. In Path B Chrome, the Google sessions for both QA
+  accounts had lapsed (password prompt; nothing typed). The shared CDP Chrome was also
+  being driven by another session. USER ACTION REQUIRED: re-auth the QA accounts in the
+  Path B profile, then re-dispatch A23 + A18 exclusively.
