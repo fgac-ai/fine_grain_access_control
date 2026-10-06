@@ -48,7 +48,7 @@ export function checkSendWhitelist(rules: ApplicableRules, recipients: string[] 
   const sendRules = rules.filter(r => r.service === 'gmail' && r.actionType === 'send_whitelist');
 
   if (!recipients || recipients.length === 0) {
-    return { message: '🚫 Could not determine the message recipients, so sending was denied. Provide a standard RFC 2822 message with To/Cc/Bcc headers.', code: 'recipients_undetermined' };
+    return { message: '🚫 Could not determine the message recipients, so sending was denied. Provide a standard RFC 2822 message whose To/Cc/Bcc headers hold only plain addresses (name@example.com — no quoted local parts, IP-literal domains, or non-ASCII addresses).', code: 'recipients_undetermined' };
   }
 
   if (sendRules.length === 0) {

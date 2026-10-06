@@ -60,7 +60,7 @@ import {
 } from '@/lib/denialCopy';
 import { TOOL_DEFS, toolAnnotations, type FgacToolDef } from './toolDefs';
 import {
-  classifyGoogleApiCall, canonicalizeGoogleApiPath, extractSendRecipients, extractDraftSendInfo,
+  classifyGoogleApiCall, canonicalizeGoogleApiPath, extractSendRecipients, extractDraftSendInfo, draftSendRecipients,
   fileApprovalAction, parseDriveFileId, driveFileKindForPath,
   templateGoogleApiPath, rawApiFamily, extractGoogleErrorReason,
   RAW_MODIFY_METHODS, isForwardableGoogleMethod, methodDenial,
@@ -2808,7 +2808,8 @@ async function executeRawGoogleCall(
       addToolCallProps({ denial_code: 'recipients_undetermined' });
       return textResult(`🚫 ${detail} Nothing was sent — drafts/send is denied whenever the draft's recipients cannot be determined and verified against the send whitelist.`);
     };
-    const { draftId, bodyRecipients } = extractDraftSendInfo(body);
+    const draftInfo = extractDraftSendInfo(body);
+    const { draftId } = draftInfo;
     if (!draftId) {
       return draftDenial('Could not determine which draft to send. Provide the draft id in the body: {"id": "<draftId>"}.');
     }
@@ -2823,10 +2824,9 @@ async function executeRawGoogleCall(
       return draftDenial(`The draft could not be fetched to verify its recipients (${draftResult.error}). Confirm the draft id via google_api_get gmail/v1/users/me/drafts and retry.`);
     }
     const draftRaw = (draftResult.data as { message?: { raw?: unknown } })?.message?.raw;
-    const draftRecipients = typeof draftRaw === 'string' ? extractSendRecipients({ raw: draftRaw }) : null;
-    const recipients = [...new Set([...(draftRecipients ?? []), ...(bodyRecipients ?? [])])];
-    if (recipients.length === 0) {
-      return draftDenial('The draft has no parseable To/Cc/Bcc recipients. Update the draft with standard recipient headers, then retry drafts/send.');
+    const recipients = draftSendRecipients(draftRaw, draftInfo);
+    if (!recipients) {
+      return draftDenial('The recipients of the draft (or of the message sent with it) could not all be parsed. Use plain To/Cc/Bcc addresses (name@example.com, no quoted local parts, IP-literal domains, or non-ASCII addresses), then retry drafts/send.');
     }
     const denial = checkSendWhitelist(rules, recipients);
     if (denial) return sendDenialWithLinks(conn, resolved.proxyKeyId, denial);

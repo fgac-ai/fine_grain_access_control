@@ -3,7 +3,7 @@ import { randomBytes } from 'crypto';
 import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, kindForMimeType } from '@/lib/driveFileKinds';
 import {
   driveFileKindForPath, extractDriveFileKindId, hasDotSegment, classifyGoogleApiCall, canonicalizeGoogleApiPath,
-  extractSendRecipients, extractRfc822Recipients, extractDraftSendInfo,
+  extractSendRecipients, extractRfc822Recipients, extractDraftSendInfo, draftSendRecipients,
 } from '@/app/api/mcp/googleApiPolicy';
 import { db } from '@/db';
 import { users, proxyKeys, emailDelegations, keyEmailAccess, accessRules, keyRuleAssignments, temporaryApiKeys, resumableUploads } from '@/db/schema';
@@ -1408,7 +1408,8 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     // unresolvable is refused (mirror of the MCP gmail_draft_send branch).
     if (cls.kind === 'gmail_draft_send') {
       const bodyText = await request.clone().text();
-      const { draftId, bodyRecipients } = extractDraftSendInfo(bodyText);
+      const draftInfo = extractDraftSendInfo(bodyText);
+      const { draftId } = draftInfo;
       if (!draftId) {
         return sendDenied(telemetry, { code: 'recipients_undetermined', message: 'Could not determine which draft to send. Provide the draft id in a JSON body: {"id": "<draftId>"}.' });
       }
@@ -1423,8 +1424,9 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
       if (draft.status >= 400 || typeof draftRaw !== 'string') {
         return sendDenied(telemetry, { code: 'recipients_undetermined', message: `The draft could not be fetched to verify its recipients (Google answered ${draft.status}). Nothing was sent.` });
       }
-      const recipients = [...new Set([...(extractSendRecipients({ raw: draftRaw }) ?? []), ...(bodyRecipients ?? [])])];
-      const denial = checkSendWhitelist(applicableRules, recipients.length > 0 ? recipients : null);
+      // Stored draft ∪ inline message; fails closed when either side cannot
+      // be parsed (shared with the MCP drafts/send path, PR #180).
+      const denial = checkSendWhitelist(applicableRules, draftSendRecipients(draftRaw, draftInfo));
       if (denial) return sendDenied(telemetry, denial);
     }
 
