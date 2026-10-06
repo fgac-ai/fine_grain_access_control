@@ -2,7 +2,7 @@
 
 import { db } from "@/db";
 import { users, proxyKeys, emailDelegations, keyEmailAccess, accessRules, keyRuleAssignments } from "@/db/schema";
-import { eq, and, desc, isNull, inArray } from "drizzle-orm";
+import { eq, and, or, desc, isNull, inArray } from "drizzle-orm";
 import { DRIVE_SERVICE, DRIVE_TARGET_KINDS, actionTypeForAccess, accessLabel, type DriveAccess, type DriveDefault, type DriveNodeKind } from "@/lib/driveTreeAccess";
 import { findActiveDelegation } from "@/db/delegationQueries";
 import { syncDefaultProfileDelegatedAccess } from "@/db/defaultProfile";
@@ -13,7 +13,7 @@ import { revalidatePath } from "next/cache";
 import { validateRulePattern, patternKind, assertStorablePattern } from "@/lib/rulePatterns";
 import { slugifyProfileLabel } from "@/lib/profileSlugs";
 import type { ApprovalSearchParams, ApprovalPayload } from "@/lib/approvalLinks";
-import { DRIVE_FILE_KINDS, kindForService, kindForActionType, kindForApprovalAction, type DriveFileKind } from "@/lib/driveFileKinds";
+import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, kindForService, kindForActionType, kindForApprovalAction, type DriveFileKind } from "@/lib/driveFileKinds";
 import { grantActiveForApproval } from "@/lib/approvalGrantState";
 import { maskEmail } from "@/lib/maskEmail";
 import { isDelegateTarget, type DelegationVia } from "@/lib/secondAccount";
@@ -1572,6 +1572,26 @@ export async function setDriveNodeAccess(
   const { captureServerEvent } = await import("@/lib/posthogServer");
 
   if (access === 'inherit') {
+    // A file's legacy per-file rules (Picker, approval links, auto-grant) are
+    // settings on the file too — the card and the guard both read them at
+    // file level — so Inherit clears them with the tree rules. Leaving them
+    // made the file snap back to the legacy access the moment the page
+    // revalidated.
+    if (node.kind === 'file') {
+      const legacy = await db.select().from(accessRules).where(and(
+        eq(accessRules.userId, dbUser.id),
+        inArray(accessRules.service, ACTIVE_DRIVE_FILE_KINDS.map(k => DRIVE_FILE_KINDS[k].service)),
+        or(eq(accessRules.targetResourceId, node.id), and(isNull(accessRules.targetResourceId), eq(accessRules.regexPattern, node.id))),
+      ));
+      if (legacy.length > 0) {
+        const legacyAssignments = await db.select().from(keyRuleAssignments)
+          .where(inArray(keyRuleAssignments.accessRuleId, legacy.map(r => r.id)));
+        candidates.push(...legacy);
+        assignments.push(...legacyAssignments);
+        forThisKey.push(...legacy.filter(r => assignmentsOf(r.id).some(a => a.proxyKeyId === key.id)));
+        globals.push(...legacy.filter(r => assignmentsOf(r.id).length === 0));
+      }
+    }
     for (const r of forThisKey) await detachFromThisKey(r.id);
     if (globals.length > 0) {
       const others = (await db.select({ id: proxyKeys.id }).from(proxyKeys)
