@@ -57,9 +57,13 @@
   to the account it repairs) and a `reconnect_by` that, for a delegated
   mailbox, names the OWNER as the one who must open it signed in as that
   account; a transient token failure, a timed-out probe, a missing owner
-  account (`google_token_failure: 'owner_not_found'` — what every delegated
-  mailbox reports on a Vercel preview, whose database is a copy of production
-  with production Clerk ids), or an inactive delegation carries NO link. `next_steps.sheets`/`next_steps.docs` point at
+  account (`google_token_failure: 'owner_not_found'`), or an inactive
+  delegation carries NO link. Before PR #189 every delegated mailbox on a
+  Vercel preview reported `owner_not_found`: the preview database copies
+  production's prod-Clerk-id `users` rows, and the owner was picked by address
+  rather than from the delegation. A delegation created on the preview now
+  reports `google_token: 'ok'` (measured 2026-10-06); `owner_not_found` there
+  is a FAIL. `next_steps.sheets`/`next_steps.docs` point at
   the link when `drive_file` is `missing`
 
 ### A9: The "+ Add account" link attaches a second account in one click
