@@ -62,6 +62,7 @@ check('offers the do-nothing and reply paths', body.includes('do nothing') && bo
 check('links to the dashboard without a double slash', body.includes('https://fgac.ai/dashboard') && !body.includes('fgac.ai//dashboard'));
 check('signs as FGAC support with the fixed support contact', body.trimEnd().endsWith('— FGAC support (support@fgac.ai)') && signatureLine() === `— FGAC support (${SUPPORT_CONTACT_ADDRESS})`);
 check('is plain text (no markup)', !/<[a-z]+>/i.test(body));
+check('body says this is the only link reminder for 14 days and the chat link still comes', body.includes('only reminder of this kind FGAC will email you for the next 14 days') && body.includes('own approval link in the chat'));
 check('empty agent label falls back', approvalEmailBody({ agentLabel: '', links: [link], times: 2, firstAskedAt: first, dashboardUrl: 'https://fgac.ai', supportAddress: 'support@fgac.ai' }).includes('your AI agent asking 2 times'));
 check('never mentions the user\'s own account as the sender', !/your own gmail/i.test(body));
 // A dev or preview build stands a QA account in for the support mailbox
