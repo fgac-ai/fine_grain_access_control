@@ -1,0 +1,64 @@
+# Delegated-mailbox owner lookup picks the wrong `users` row — v1
+
+Branch: `claude/delegation-owner-lookup` · found 2026-10-05 during local QA on
+`claude/drive-tree-delegated-scope`.
+
+## Bug
+
+Three places resolve a delegated mailbox's owner by picking ONE `users` row by
+address, then checking for an active delegation from that row:
+
+| file | path |
+| --- | --- |
+| `src/app/api/mcp/route.ts` `getGoogleToken` | MCP tools |
+| `src/app/api/proxy/[...path]/route.ts` §7 | REST proxy |
+| `src/lib/partner/provision.ts` | partner key provisioning |
+
+`db.select().from(users).where(eq(users.email, targetEmail)).limit(1)` — no
+ordering, no tombstone filter, case-sensitive. When an address has several
+`users` rows (Clerk re-issued ids; every fresh `db:branch` copies the prod-id rows
+next to the dev-id row), Postgres may return a row that is not the delegation's
+`ownerUserId`, and a live delegation reads as `delegation_inactive` (MCP) /
+"revoked or is not delegated to you" (proxy).
+
+Repro: fresh `db:branch`, delegate USER_A → USER_B on the Accounts page, call any
+tool on USER_A's mailbox with USER_B's key.
+
+## Real-world size (read-only prod query, 2026-10-05, counts only)
+
+- 2 of 343 live addresses have more than one live `users` row (9 rows total).
+- Both are internal/QA accounts.
+- 0 of 94 active delegations are owned by a duplicated address.
+
+So no customer is affected today; the bug is latent (any future Clerk id
+re-issue on a delegation owner would trigger it) and it breaks delegated QA on
+every fresh branch.
+
+## Fix
+
+New helper `findActiveDelegationOwner(targetEmail, delegateUserId)` in
+`src/db/delegationOwner.ts`: one query,
+`email_delegations ⋈ users ON owner_user_id = users.id` filtered by
+`lower(users.email) = lower(target)`, `delegate_user_id = key owner`,
+`status = 'active'`, `users.deleted_at IS NULL`, newest delegation first. All
+three call sites use it. The query builder is split out
+(`activeDelegationOwnerQuery(qb, …)`) so the test can render its SQL with
+drizzle's connection-free `QueryBuilder`.
+
+Out of scope: `src/lib/notifications/gmail.ts` already tries every live row in
+recency order; `dashboard/actions.ts`, `defaultProfile.ts`, `userHelpers.ts`
+already filter tombstones and do not gate on a delegation.
+
+## Test (failing first)
+
+`scripts/test-delegation-owner-lookup.ts` (added to `mcp:lint`):
+- the helper's SQL joins delegations to users on the owner id, filters on the
+  delegate, `active`, `deleted_at is null`, and a lower-cased address;
+- structural: none of the three call sites still contains the
+  `eq(users.email, …)` + `.limit(1)` owner lookup, and each imports the helper.
+
+## Validation
+
+- Local: fresh `db:branch`, delegation USER_A → USER_B, USER_B's key reads
+  USER_A's mailbox over MCP (was `delegation_inactive`).
+- Preview via `/deploy-pr-preview`, hosted-MCP delegation assertions.

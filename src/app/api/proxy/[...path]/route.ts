@@ -6,6 +6,7 @@ import {
   extractSendRecipients, extractRfc822Recipients, extractDraftSendInfo, draftSendRecipients,
 } from '@/app/api/mcp/googleApiPolicy';
 import { db } from '@/db';
+import { findActiveDelegationOwner } from '@/db/delegationOwner';
 import { users, proxyKeys, emailDelegations, keyEmailAccess, accessRules, keyRuleAssignments, temporaryApiKeys, resumableUploads } from '@/db/schema';
 import { eq, and } from 'drizzle-orm';
 import {
@@ -1472,35 +1473,17 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
       // Own email — use the key owner's token
       tokenOwnerClerkUserId = dbUser.clerkUserId;
     } else {
-      // Delegated email — find the email owner
-      const emailOwner = await db.select().from(users)
-        .where(eq(users.email, targetEmail))
-        .limit(1)
-        .then(res => res[0]);
+      // Delegated email — the owner row that actively delegated to the key
+      // owner (an address can have several users rows; see delegationOwner.ts).
+      const delegated = await findActiveDelegationOwner(targetEmail, dbUser.id);
 
-      if (!emailOwner) {
-        return NextResponse.json({
-          error: `Email '${targetEmail}' owner not found in system.`
-        }, { status: 403 });
-      }
-
-      // Verify there's an active delegation
-      const delegation = await db.select().from(emailDelegations)
-        .where(and(
-          eq(emailDelegations.ownerUserId, emailOwner.id),
-          eq(emailDelegations.delegateUserId, dbUser.id),
-          eq(emailDelegations.status, 'active'),
-        ))
-        .limit(1)
-        .then(res => res[0]);
-
-      if (!delegation) {
+      if (!delegated) {
         return NextResponse.json({
           error: `Access to '${targetEmail}' has been revoked or is not delegated to you.`
         }, { status: 403 });
       }
 
-      tokenOwnerClerkUserId = emailOwner.clerkUserId;
+      tokenOwnerClerkUserId = delegated.owner.clerkUserId;
     }
 
     // ─── 8. Fetch Real Google Token from Clerk ──────────────────────────────
