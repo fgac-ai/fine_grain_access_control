@@ -163,6 +163,18 @@ in `src/app/api/mcp/googleApiPolicy.ts`:
   mirroring the Gmail scope pre-flight.
 - Batch endpoints and non-send Gmail writes are denied. DELETE is not exposed
   at all.
+- **Messages FGAC assembles itself** — `gmail_send`, the owner notices
+  (`approvalNotifyCopy.ts`), the sales-lead mail (`salesLead.ts`) — go through
+  `src/lib/mimeText.ts`: `text/plain; charset=utf-8`, the body UTF-8
+  **quoted-printable** (RFC 2045, ≤ 76 columns per encoded line), the Subject
+  RFC 2047 when non-ASCII, CRLF throughout, header values stripped of CR/LF.
+  Quoted-printable is not cosmetic: a `text/plain` body sent with no
+  transfer encoding (or `8bit`) is hard-wrapped by Gmail's relay at ~72
+  columns ON DELIVERY — the Sent copy stays one line, the recipient's copy
+  gains real CRLFs, and on a phone every paragraph renders ragged (measured
+  2026-10-05 between the QA accounts; capability 01 A6 guards it). An agent's
+  own raw MIME via `google_api_modify` is forwarded untouched, so that tool's
+  description tells agents to declare an encoding themselves.
 
 **Discoverability layers** (2026-08-23, after an agent shipped a pipe-character
 text table because nothing at its decision point mentioned the raw fallback):

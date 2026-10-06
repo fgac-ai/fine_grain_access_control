@@ -78,6 +78,16 @@ tmux send-keys -t fgac-qa "Send an email to blocked@untrusted.com with subject '
 ```
 - [ ] Claude Code reports whitelist error from fgac
 
+### A6: Long paragraph delivered unwrapped
+```bash
+tmux send-keys -t fgac-qa "Send an email to $USER_B_EMAIL with subject 'QA CC MCP - Send A6' whose body is a single paragraph of at least 300 characters with no line breaks" Enter
+```
+- [ ] Claude Code invokes `gmail_send`
+- [ ] Read the DELIVERED copy from USER_B's mailbox with `format=raw` (hosted
+  runbook A6 has the decode one-liner): `Content-Transfer-Encoding:
+  quoted-printable`, longest encoded line ≤ 76, and the decoded paragraph is
+  one line equal to what was sent. The sender's Sent copy is not evidence
+
 ---
 
 ## Capability: Read Blacklist (→ capabilities/02_read_blacklist.md)

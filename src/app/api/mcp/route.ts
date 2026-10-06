@@ -43,6 +43,7 @@ import { notifyOwnerOfAccountRefusal, notifyOwnerOfApprovalLinks, notifyOwnerOfD
 import { deadGrantDenialLine, type DeadGrantReason, type ScopeMissingReason } from '@/lib/googleGrantNotifyCopy';
 import { lookupUndeliverable } from '@/lib/emailBounces';
 import { accountRefusalDenialLine, notifyDenialLine } from '@/lib/approvalNotifyCopy';
+import { buildTextMessageRaw } from '@/lib/mimeText';
 import { agentLabel as buildAgentLabel } from '@/lib/agentLabel';
 import { normalizeRequestedEmail } from '@/lib/accountRefusals';
 import { classifyPlaceholderEmail } from '@/lib/placeholderEmail';
@@ -3347,10 +3348,10 @@ function registerFgacTools(server: FgacMcpServer) {
         const denial = checkSendWhitelist(rules, [to]);
         if (denial) return sendDenialWithLinks(conn, resolved.proxyKeyId, denial);
 
-        // Build RFC 2822 message
-        const raw = Buffer.from(
-          `To: ${to}\r\nSubject: ${subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${body}`
-        ).toString('base64url');
+        // RFC 5322 message, body quoted-printable (src/lib/mimeText.ts): an
+        // unencoded text/plain body is hard-wrapped at ~72 columns by Gmail's
+        // relay on delivery, so long paragraphs reached phones ragged.
+        const raw = buildTextMessageRaw({ to, subject, body });
 
         const result = await gmailFetch(resolved.token, resolved.targetEmail, 'messages/send', 'POST', JSON.stringify({ raw }));
         if (!result.ok) return errorResult(result.error);

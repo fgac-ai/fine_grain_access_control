@@ -15,7 +15,8 @@
  * `status: 'disabled'` so the gap is visible.
  */
 import { senderConfig, proxySend, type SenderConfig, type SendResult } from './approvalNotify';
-import { sanitizeLine, encodeHeaderWord } from './approvalNotifyCopy';
+import { sanitizeLine } from './approvalNotifyCopy';
+import { buildTextMessage } from './mimeText';
 import { captureServerEvent } from './posthogServer';
 
 export const SALES_INBOX = 'sales@fgac.ai';
@@ -79,14 +80,14 @@ export function salesLeadBody(lead: SalesLead): string {
  * mailbox does not own, so any override must also be one of its aliases.
  */
 export function salesLeadEmailRaw(opts: { from: string; to: string; cc: string; replyTo: string; subject: string; body: string }): string {
-  return `From: FGAC.ai Sales <${sanitizeLine(opts.from, 254)}>\r\n` +
-    `Reply-To: ${sanitizeLine(opts.replyTo, 254)}\r\n` +
-    `To: ${sanitizeLine(opts.to, 254)}\r\n` +
-    `Cc: ${sanitizeLine(opts.cc, 254)}\r\n` +
-    `Subject: ${encodeHeaderWord(sanitizeLine(opts.subject, 200))}\r\n` +
-    `MIME-Version: 1.0\r\n` +
-    `Content-Type: text/plain; charset=utf-8\r\n` +
-    `Content-Transfer-Encoding: 8bit\r\n\r\n${opts.body}`;
+  return buildTextMessage({
+    from: `FGAC.ai Sales <${sanitizeLine(opts.from, 254)}>`,
+    replyTo: sanitizeLine(opts.replyTo, 254),
+    to: sanitizeLine(opts.to, 254),
+    cc: sanitizeLine(opts.cc, 254),
+    subject: sanitizeLine(opts.subject, 200),
+    body: opts.body,
+  });
 }
 
 export type SalesLeadEmailStatus = 'sent' | 'disabled' | 'failed';

@@ -20,6 +20,7 @@ import {
   ACCOUNT_REFUSAL_EPISODE_GAP_MS, ACCOUNT_REFUSAL_NOTIFY_AFTER, DELEGATION_HOWTO_PATH, NOTIFY_MAX_PER_DAY, NOTIFY_MIN_GAP_MS,
   PRODUCTION_SITE_URL, SUPPORT_CONTACT_ADDRESS, type NotifyLink,
 } from '../src/lib/approvalNotifyCopy';
+import { decodeHeaderWord, decodeQuotedPrintable } from '../src/lib/mimeText';
 import { normalizeRequestedEmail } from '../src/lib/accountRefusals';
 import { agentLabel, looksLikeId } from '../src/lib/agentLabel';
 
@@ -108,9 +109,11 @@ check('repeat gap is minutes, not seconds', NOTIFY_MIN_GAP_MS >= 60_000 && NOTIF
 console.log('raw message');
 const raw = approvalEmailRaw({ from: 'support@fgac.ai', to: 'owner@example.com', subject, body });
 check('From is FGAC at the support mailbox, Reply-To the same', raw.startsWith('From: FGAC <support@fgac.ai>\r\nReply-To: support@fgac.ai\r\nTo: owner@example.com\r\n'));
-check('Subject then MIME headers then a blank line', /\r\nSubject: [^\r\n]+\r\nMIME-Version: 1\.0\r\nContent-Type: text\/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n/.test(raw));
+check('Subject then MIME headers then a blank line, body quoted-printable (Gmail hard-wraps unencoded text on delivery)', /\r\nSubject: [^\r\n]+(\r\n [^\r\n]+)*\r\nMIME-Version: 1\.0\r\nContent-Type: text\/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n/.test(raw));
+check('the body decodes to the plain text it was given', decodeQuotedPrintable(raw.split('\r\n\r\n').slice(1).join('\r\n\r\n')) === body.replace(/\n/g, '\r\n'));
+check('no encoded body line exceeds 76 columns', raw.split('\r\n\r\n').slice(1).join('\r\n\r\n').split('\r\n').every((l) => l.length <= 76));
 check('non-ASCII subject is an RFC 2047 encoded word', /\r\nSubject: =\?UTF-8\?B\?[A-Za-z0-9+/=]+\?=\r\n/.test(raw));
-check('the encoded word decodes back to the subject', Buffer.from(raw.match(/Subject: =\?UTF-8\?B\?([A-Za-z0-9+/=]+)\?=/)![1], 'base64').toString('utf8') === subject);
+check('the encoded word(s) decode back to the subject', decodeHeaderWord(raw.match(/Subject: ((?:=\?UTF-8\?B\?[A-Za-z0-9+/=]+\?=)(?:\r\n =\?UTF-8\?B\?[A-Za-z0-9+/=]+\?=)*)/)![1]) === subject);
 check('pure-ASCII headers are left readable', encodeHeaderWord('FGAC: plain') === 'FGAC: plain');
 check('a CRLF in the recipient cannot add a header', !approvalEmailRaw({ from: 'support@fgac.ai', to: 'a@b.c\r\nBcc: x@y.z', subject: 's', body: '' }).includes('\r\nBcc'));
 check('a CRLF in the sender cannot add a header', !approvalEmailRaw({ from: 's@example.com\r\nBcc: x@y.z', to: 'a@b.c', subject: 's', body: '' }).includes('\r\nBcc'));
