@@ -62,4 +62,27 @@ insert/delete `key_email_access` rows directly (Database Rule 7).
 
 ## Validation log
 
-(filled in as validation runs)
+- **Static**: `tsc --noEmit` and eslint clean on the three changed files.
+- **Local** (dev server, isolated Neon branch, Path B Chrome): A7 PASS — own mailbox pre-ticked,
+  Create Key disabled with none ticked plus the inline note, "Profile created" panel with zero
+  `alert`/`confirm` calls, new key 200 on the ticked mailbox / 403 on the unticked one. A8
+  BLOCKED locally: the Path B Chrome profile hit USER_B's Okta wall and then a Google password
+  challenge for USER_A (no password typed).
+- **Preview** (commit c4b0d65, built-in browser, no Path B): A7 PASS (same evidence). A8 PASS —
+  fixture built through the UI (USER_B-only profile → delegation revoked → re-delegated): the
+  card showed the "no mailbox access" empty state with Add on both reachable mailboxes. Add on
+  each flipped its REST call 403→200 without a reload. Revoking the delegation again after the
+  Add flipped it back to 403 and removed the mailbox from the card, which proves the delegation
+  id is recorded on the added row. QA profiles revoked and the delegation restored afterwards.
+- **PostHog**: two `account_linked` `via: profile_page` events (delegated true/false) at
+  2026-10-06 02:25Z, matching the two preview Add clicks.
+- **Coverage audit**: findings addressed. The `account_linked` clause was confirmed via PostHog
+  above, and the revoke-after-Add attachment came from the Add click. The disabled-Add branch for
+  an own mailbox with an incomplete Google grant was not exercised (conditional, no fixture).
+
+## Sizing (PostHog, 90 days to 2026-10-06)
+
+Excluding internal/QA accounts and localhost, one external person created a non-default profile
+in 90 days, and it had a mailbox. Every mailbox-less `agent_profile_created` in the window came
+from our own accounts (3 profiles, 2 people). The fix is preventive. Keys created before the
+event existed, and profiles whose only delegated mailbox was revoked, are not counted here.
