@@ -13,11 +13,12 @@
  */
 import crypto from 'crypto';
 import { db } from '@/db';
+import { findActiveDelegationOwner } from '@/db/delegationOwner';
 import {
   proxyKeys, keyEmailAccess, accessRules, keyRuleAssignments,
-  agentConnections, emailDelegations, users,
+  agentConnections,
 } from '@/db/schema';
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import type { PartnerManifest } from './manifest';
 import { ensureSubscription } from '@/lib/notifications/subscriptions';
 
@@ -52,17 +53,10 @@ export async function provisionPartnerConnection(input: ProvisionInput): Promise
       emailBindings.push({ email, delegationId: null });
       continue;
     }
-    const owner = await db.select().from(users)
-      .where(eq(users.email, email)).limit(1).then(r => r[0]);
-    if (!owner) throw new Error(`No FGAC account owns ${email}`);
-    const delegation = await db.select().from(emailDelegations)
-      .where(and(
-        eq(emailDelegations.ownerUserId, owner.id),
-        eq(emailDelegations.delegateUserId, user.id),
-        eq(emailDelegations.status, 'active'),
-      )).limit(1).then(r => r[0]);
-    if (!delegation) throw new Error(`No active delegation grants you access to ${email}`);
-    emailBindings.push({ email, delegationId: delegation.id });
+    // An address can have several users rows — start from the delegation.
+    const delegated = await findActiveDelegationOwner(email, user.id);
+    if (!delegated) throw new Error(`No active delegation grants you access to ${email}`);
+    emailBindings.push({ email, delegationId: delegated.delegation.id });
   }
 
   // The neon-http driver has no transaction support, so provisioning runs as

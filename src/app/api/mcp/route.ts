@@ -21,10 +21,11 @@ import { z } from 'zod';
 import { db } from '@/db';
 import {
   agentConnections, users, proxyKeys, keyEmailAccess,
-  accessRules, keyRuleAssignments, emailDelegations,
+  accessRules, keyRuleAssignments,
 } from '@/db/schema';
 import { eq, and, isNull } from 'drizzle-orm';
 import { filterLiveDelegatedAccess } from '@/db/delegationQueries';
+import { findActiveDelegationOwner } from '@/db/delegationOwner';
 import { delegateLinkPath } from '@/lib/secondAccount';
 import { clerkClient } from '@clerk/nextjs/server';
 import { resolveDbUser } from '@/db/userHelpers';
@@ -486,22 +487,11 @@ async function getGoogleToken(
   if (targetEmail.toLowerCase() === keyOwner.email.toLowerCase()) {
     tokenOwnerClerkId = keyOwner.clerkUserId;
   } else {
-    // Delegated email — find the email owner
-    const emailOwner = await db.select().from(users)
-      .where(eq(users.email, targetEmail))
-      .limit(1).then(r => r[0]);
+    // Delegated email — the owner row that actively delegated to the key
+    // owner (an address can have several users rows; see delegationOwner.ts).
+    const emailOwner = (await findActiveDelegationOwner(targetEmail, keyOwner.id))?.owner;
 
-    // Verify active delegation
-    const delegation = emailOwner
-      ? await db.select().from(emailDelegations)
-          .where(and(
-            eq(emailDelegations.ownerUserId, emailOwner.id),
-            eq(emailDelegations.delegateUserId, keyOwner.id),
-            eq(emailDelegations.status, 'active'),
-          )).limit(1).then(r => r[0])
-      : undefined;
-
-    if (emailOwner && delegation) {
+    if (emailOwner) {
       tokenOwnerClerkId = emailOwner.clerkUserId;
       tokenOwner = { id: emailOwner.id, email: emailOwner.email, clerkUserId: emailOwner.clerkUserId };
     } else {
