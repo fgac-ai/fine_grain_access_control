@@ -273,9 +273,50 @@ Added 2026-10-03 after an adversarial review found that only the exact path
   `GET /api/proxy/drive/v3/files` 403 (`error_status`
   `drive_full_scope_unconfined`, `denial_code` the same). The proxy has no delegated-mailbox path; a no-rule non-Sheets/Docs/Slides file read through the proxy with that token is refused the same way (`denial_code: drive_full_scope_unconfined`).
 
+### A23: Every file the agent creates stays writable for it — non-Google kinds and both surfaces
+Regression for 2026-10-03: agent-created text/PDF/binary files fell to the
+profile default (Read) and a later rename/update was refused as Read-only.
+Run with the Default Profile's Drive default on **Read everything** and no
+folder settings.
+- **MCP**: `google_api_modify` `POST upload/drive/v3/files?uploadType=media`
+  (body: a short string; `Content-Type` text/plain) and `POST drive/v3/files
+  {name: "qa-a21-meta.txt", mimeType: "text/plain"}`; then `PATCH
+  drive/v3/files/<id> {name: "<name>-renamed"}` on each.
+- **REST proxy** (`sk_proxy_` key): `POST /api/proxy/drive/v3/files`
+  (metadata), `POST /api/proxy/upload/drive/v3/files?uploadType=media`, and a
+  resumable upload — `POST /api/proxy/upload/drive/v3/files?uploadType=resumable`
+  with `{name: "qa-a21-resumable.txt"}`, then PUT the bytes to the returned
+  `Location` session URI (direct to Google); then `PATCH
+  /api/proxy/drive/v3/files/<id>` rename on all three. The resumable file's id
+  is the one FGAC injected (read it from the PUT's response body).
+- **Expected**: every create succeeds and every rename returns 200 (not 403
+  "Read-only … by the profile's default"). A `service: 'drive'`,
+  `drive_read_write`, `target_kind: 'file'` rule assigned to the key exists for
+  each new id (read-only DB query or the profile's tree card, where the file
+  shows **Read & write** set on the file itself). MCP renames carry
+  `rule_match_level: 'file'`; the MCP creates carry
+  `drive_tree_auto_granted: true`; each proxy create fires
+  `drive_file_auto_granted{via: 'rest_proxy'}`. A control file the agent did
+  NOT create (any never-picked file) still denies the rename as Read-only.
+  Trash the fixtures via `PATCH {trashed: true}` (allowed by their own rules).
+
 ## Out of scope for this capability
 * Google verification / CASA for the restricted scope (user action).
 * Shared-drive fixtures (the QA accounts cannot create one; the
   `shared_drive` level is covered by `scripts/test-drive-tree-access.ts`).
 * Sharing-requires-send parity and a typed `drive_list_files` tool (plan v7
   §3, later train).
+
+### A24: A REST copy is a read of its source under the engine too
+Regression for 2026-10-05: the REST proxy's tree branch counted
+`POST drive/v3/files/{id}/copy` as a WRITE on the source, so under the
+**Read everything** default every copy was refused as Read-only while the MCP
+`drive_copy` (which needs only Read on the source) succeeded.
+- With the default on **Read everything**: `POST /api/proxy/drive/v3/files/<any
+  readable file>/copy` `{"name":"qa-a22-copy"}`; then `PATCH
+  /api/proxy/drive/v3/files/<copy id>` rename. Then set the source to
+  **Blocked** and copy it again.
+- **Expected**: the first copy 200 and the rename 200 (the copy carries its
+  own file-level Read & write setting, A21); `proxy_request` carries
+  `drive_file_gate: 'tree'`. The Blocked source's copy is 403 and no file is
+  created. Restore the source's setting to inherit; trash the copy.

@@ -5,7 +5,9 @@
 > (no single tool may mix safe and unsafe HTTP methods). Classification lives
 > in `src/app/api/mcp/googleApiPolicy.ts`; enforcement must be identical to
 > the dedicated tools. Hosted-MCP interface, except A16, which pins that the
-> REST proxy at `/api/proxy` runs the SAME classifier (since 2026-10-03).
+> REST proxy at `/api/proxy` runs the SAME classifier (since 2026-10-03), and
+> A18, which pins the REST proxy's Drive guard to the same create/copy/no-rule
+> policy as A13–A15.
 >
 > Posture (2026-08-30): Gmail writes are ALLOW-BY-DEFAULT — anything the
 > gmail.modify grant can do is forwarded and stamped for analytics. The gates
@@ -343,3 +345,45 @@
 - The parser forms (UTF-8/IDN, encoded-words, bare-CR, Resent-*, duplicate
   JSON `raw` keys) are unit-tested in `scripts/test-google-api-policy.ts`;
   this assertion proves the route maps the parser's null to a refusal.
+
+### A18: The REST proxy grants and gates Drive creates exactly like A13–A15 (per-file model)
+Regression for 2026-10-05: with the Drive tree flag OFF, the REST proxy wrote
+no rule for files the key created, so its per-file guard then denied every
+id-addressed call on the agent's OWN new spreadsheet as "not exposed", and it
+counted `files/{id}/copy` as a WRITE on the source (a Read Only source could
+not be copied — the MCP route allows it). Run as a user WITHOUT the
+`drive_tree` flag (USER_B, or USER_A with the flag off), with the profile's
+`sk_proxy_` bearer, against sheet S (Read & Write rule), sheet R (Read Only
+rule) and sheet B (Blocked rule) as in A14.
+- Calls (all `/api/proxy/…`):
+  1. `POST drive/v3/files` `{"name":"QA rest sheet","mimeType":"application/vnd.google-apps.spreadsheet"}`;
+     then `PATCH drive/v3/files/<new id>` `{"name":"QA rest sheet renamed"}`
+     and `PUT v4/spreadsheets/<new id>/values/A1?valueInputOption=RAW` `{"values":[["ok"]]}`.
+  2. `POST drive/v3/files/<R>/copy` `{"name":"QA rest copy of R"}`; then
+     `PATCH drive/v3/files/<copy id>` `{"name":"QA rest copy renamed"}`.
+  3. `POST drive/v3/files/<B>/copy` and `POST drive/v3/files/<never-picked sheet>/copy`.
+  4. `POST drive/v3/files` `{"name":"QA rest note","mimeType":"text/plain"}`;
+     then `PATCH drive/v3/files/<new id>` `{"name":"QA rest note renamed"}`.
+  5. `PATCH drive/v3/files/<R>` `{"name":"x"}` and `PATCH upload/drive/v3/files/<R>?uploadType=media`
+     (any body).
+- **Expected**:
+  - 1: create 200; rename and values write 200 with no dashboard action; an
+    Read & Write rule (`sheet_read_write`, rule name "Agent-created: QA rest
+    sheet") assigned to the key appears — the dashboard lists it under the
+    file's title, not the rule name;
+    `drive_file_auto_granted{via:'rest_proxy', service:'sheets', drive_tree:false}`
+    fires; the rename's `proxy_request` carries `drive_file_gate: 'rule'`.
+  - 2: the copy SUCCEEDS (a copy is a READ of R) and the copy is Read & Write
+    for the key (rename 200, its own "Agent-created" rule).
+  - 3: both 403 — B "explicitly blocked", the never-picked source "not
+    exposed" — and Google is not called (no new file in Drive).
+  - 4: create 200 with NO rule written (FGAC has no rule type for text);
+    the rename 200 with `drive_file_gate: 'mime_other'` (forwarded under
+    drive.file, which treats an app-created file as writable).
+  - 5: both 403 "restricted to Read-Only" — the `upload/` media update of an
+    existing file is gated like any other id-addressed write (before
+    2026-10-05 the REST guard never looked at `upload/` paths).
+- **Also expected**: `npx tsx scripts/test-drive-tree-access.ts` passes — the
+  "per-file (flag off) model — REST/MCP parity" block pins the classifier and
+  the no-rule decision.
+- **Cleanup**: `PATCH {"trashed":true}` on the three created files.

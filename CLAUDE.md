@@ -448,6 +448,29 @@ State-modifying, require user approval (but NOT production deployments):
 
 These bans are additionally enforced as `deny` rules in `.claude/settings.json`.
 
+## Bundling Threads Into One Validation/Deployment Cycle
+
+When proposing to bring several open threads (PRs, pushed feature branches, other
+sessions' work) into one integration train (ADR-002), present them as **one
+candidate table** before building anything — Ken asked for this format on
+2026-10-05. One row per thread, these columns:
+
+| PR | What it is | Why it matters | Impact | Validation | Bundle? |
+| --- | --- | --- | --- | --- | --- |
+
+- **What it is / Why it matters / Impact** come from the PR body or plan — impact
+  in user + business terms (who, how many, before → after), noting when a change
+  reaches no external user yet (e.g. flag-gated).
+- **Validation**: what has actually run (unit / local / preview) and what is still
+  pending — never implied.
+- **Bundle?**: yes / no / merged-with-X, with the one-line reason; call out
+  duplicates (two PRs fixing the same thing — pick one implementation and say
+  which and why) and threads to keep out (risky or independently revertable).
+- Below the table: the merge-order risks (shared files, stacked PRs, assertion
+  or runbook number collisions) and the combined QA scope the train will need.
+
+End with the recommendation and ask before building the train.
+
 ## Review-Ready Summary
 
 When work is complete and ready for the user to review (a PR is open and validated,
