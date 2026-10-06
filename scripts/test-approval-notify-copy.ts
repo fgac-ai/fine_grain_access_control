@@ -20,7 +20,7 @@ import {
   ACCOUNT_REFUSAL_EPISODE_GAP_MS, ACCOUNT_REFUSAL_NOTIFY_AFTER, DELEGATION_HOWTO_PATH, NOTIFY_MAX_PER_DAY, NOTIFY_MIN_GAP_MS,
   PRODUCTION_SITE_URL, SUPPORT_CONTACT_ADDRESS, type NotifyLink,
 } from '../src/lib/approvalNotifyCopy';
-import { decodeHeaderWord, decodeQuotedPrintable } from '../src/lib/mimeText';
+import { decodeHeaderWord, parseTextMessage, textToHtml } from '../src/lib/mimeText';
 import { normalizeRequestedEmail } from '../src/lib/accountRefusals';
 import { agentLabel, looksLikeId } from '../src/lib/agentLabel';
 
@@ -109,9 +109,12 @@ check('repeat gap is minutes, not seconds', NOTIFY_MIN_GAP_MS >= 60_000 && NOTIF
 console.log('raw message');
 const raw = approvalEmailRaw({ from: 'support@fgac.ai', to: 'owner@example.com', subject, body });
 check('From is FGAC at the support mailbox, Reply-To the same', raw.startsWith('From: FGAC <support@fgac.ai>\r\nReply-To: support@fgac.ai\r\nTo: owner@example.com\r\n'));
-check('Subject then MIME headers then a blank line, body quoted-printable (Gmail hard-wraps unencoded text on delivery)', /\r\nSubject: [^\r\n]+(\r\n [^\r\n]+)*\r\nMIME-Version: 1\.0\r\nContent-Type: text\/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n/.test(raw));
-check('the body decodes to the plain text it was given', decodeQuotedPrintable(raw.split('\r\n\r\n').slice(1).join('\r\n\r\n')) === body.replace(/\n/g, '\r\n'));
-check('no encoded body line exceeds 76 columns', raw.split('\r\n\r\n').slice(1).join('\r\n\r\n').split('\r\n').every((l) => l.length <= 76));
+check('Subject then MIME-Version then multipart/alternative then a blank line (text + HTML alternative — Gmail re-folds text-only mail on delivery)', /\r\nSubject: [^\r\n]+(\r\n [^\r\n]+)*\r\nMIME-Version: 1\.0\r\nContent-Type: multipart\/alternative; boundary="fgac-[0-9a-f]{20}"\r\n\r\n/.test(raw));
+const rawParts = parseTextMessage(raw).parts;
+check('a quoted-printable text/plain part and a quoted-printable text/html part', rawParts.map((p) => `${p.type}|${p.encoding}`).join(',') === 'text/plain|quoted-printable,text/html|quoted-printable');
+check('the text part decodes to the plain text it was given', rawParts[0].decoded === body.replace(/\n/g, '\r\n'));
+check('the HTML part is the rendering of that text, approval link clickable', rawParts[1].decoded === textToHtml(body) && rawParts[1].decoded.includes(`<a href="${emailLinkUrl(url).replace(/&/g, '&amp;')}">`));
+check('no encoded line in either part exceeds 76 columns', rawParts.every((p) => p.raw.split('\r\n').every((l) => l.length <= 76)));
 check('non-ASCII subject is an RFC 2047 encoded word', /\r\nSubject: =\?UTF-8\?B\?[A-Za-z0-9+/=]+\?=\r\n/.test(raw));
 check('the encoded word(s) decode back to the subject', decodeHeaderWord(raw.match(/Subject: ((?:=\?UTF-8\?B\?[A-Za-z0-9+/=]+\?=)(?:\r\n =\?UTF-8\?B\?[A-Za-z0-9+/=]+\?=)*)/)![1]) === subject);
 check('pure-ASCII headers are left readable', encodeHeaderWord('FGAC: plain') === 'FGAC: plain');

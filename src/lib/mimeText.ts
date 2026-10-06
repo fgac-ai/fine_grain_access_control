@@ -1,25 +1,31 @@
 /**
- * Plain-text RFC 5322 messages FGAC hands to the Gmail API (`messages/send`,
- * field `raw`). Shared by the typed `gmail_send` MCP tool
- * (src/app/api/mcp/route.ts), the owner notices (approvalNotifyCopy.ts) and
- * the sales-lead confirmation (salesLead.ts), so every message FGAC itself
- * assembles leaves with the same headers and the same body encoding.
+ * RFC 5322 messages FGAC hands to the Gmail API (`messages/send`, field
+ * `raw`). Shared by the typed `gmail_send` MCP tool (src/app/api/mcp/route.ts),
+ * the owner notices (approvalNotifyCopy.ts) and the sales-lead confirmation
+ * (salesLead.ts), so every message FGAC itself assembles leaves with the same
+ * shape: `multipart/alternative` — the plain text the caller wrote, plus a
+ * minimal HTML rendering of it — both parts UTF-8 quoted-printable.
  *
- * Why quoted-printable (2026-10-05). A `text/plain` body sent with no
- * Content-Transfer-Encoding — or with `8bit` — reaches Gmail's outbound relay
- * as unencoded text, and the relay folds every line longer than the RFC 5322
- * recommended 78 characters by inserting REAL line breaks. The sender's Sent
- * copy keeps each paragraph as the one line the agent wrote; the delivered copy
- * arrives wrapped at ~72 columns, so on a phone every paragraph renders ragged
- * (a short tail stranded under each wrapped line). Quoted-printable
- * (RFC 2045 §6.7) wraps at the ENCODING layer instead: soft breaks (`=` then
- * CRLF) that the recipient's client removes, so the paragraph arrives intact.
- * Measured between the two QA accounts; the delivered-copy comparison is in
- * docs/implementation_plans/claude-xenodochial-meitner-8b1f5b_v1.md.
+ * Why an HTML alternative (measured 2026-10-05, delivered copies fetched with
+ * `format=raw`). Gmail does not forward a `text/plain` body as submitted: it
+ * decodes the part — whatever its Content-Transfer-Encoding, quoted-printable
+ * included — and re-serialises it with its own folding, inserting REAL line
+ * breaks at word boundaries around 72 columns. The sender's Sent copy keeps
+ * each paragraph as one line; the recipient's copy arrives folded, and on a
+ * phone every paragraph renders ragged (a short tail stranded under each
+ * wrapped line). A `text/html` part is preserved intact, Gmail's clients
+ * render the HTML alternative when one exists, and the phone view reflows
+ * correctly — which is also how the claude.ai Gmail connector's messages
+ * arrive unbroken. So the HTML part is what fixes the user-visible symptom;
+ * quoted-printable on both parts keeps every encoded line within 76 columns
+ * so nothing FGAC emits ever needs folding by anyone.
+ * Measurements and the blocked QA-account experiment are recorded in
+ * docs/implementation_plans/claude-xenodochial-meitner-8b1f5b_v2.md.
  *
  * `google_api_modify` passes an agent's own raw MIME through untouched — its
- * tool description tells agents to declare an encoding themselves.
+ * tool description tells agents to add a text/html alternative themselves.
  */
+import { randomBytes } from 'node:crypto';
 
 /** RFC 2045 §6.7: an encoded line is at most 76 characters, soft break included. */
 export const QP_LINE_MAX = 76;
@@ -110,10 +116,63 @@ export function decodeHeaderWord(value: string): string {
     .join('');
 }
 
+// ─── Plain text → minimal HTML ──────────────────────────────────────────────
+
+export function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+const URL_RE = /https?:\/\/[^\s<>"]+/g;
+
+/** One line of text → escaped HTML with bare URLs wrapped in anchors. Trailing
+ * sentence punctuation stays outside the link; a closing parenthesis stays
+ * out only when the URL has no matching opening one. */
+function linkifyLine(line: string): string {
+  let out = '';
+  let last = 0;
+  for (const m of line.matchAll(URL_RE)) {
+    let url = m[0];
+    let tail = '';
+    const punct = url.match(/[.,;:!?]+$/);
+    if (punct) {
+      url = url.slice(0, -punct[0].length);
+      tail = punct[0];
+    }
+    while (url.endsWith(')') && url.split('(').length < url.split(')').length) {
+      url = url.slice(0, -1);
+      tail = `)${tail}`;
+    }
+    out += `${escapeHtml(line.slice(last, m.index))}<a href="${escapeHtml(url)}">${escapeHtml(url)}</a>${escapeHtml(tail)}`;
+    last = m.index + m[0].length;
+  }
+  return out + escapeHtml(line.slice(last));
+}
+
+/**
+ * The HTML alternative: one `<p>` per paragraph (paragraphs are separated by
+ * blank lines), `<br>` for the line breaks inside a paragraph, leading
+ * indentation kept as non-breaking spaces, bare URLs made clickable, every
+ * other character escaped, CRLF line endings. No styling — the recipient's client renders its
+ * own defaults, which is what a plain message deserves.
+ */
+export function textToHtml(text: string): string {
+  const paragraphs = text.replace(/\r\n|\r/g, '\n').replace(/\n+$/, '').split(/\n{2,}/);
+  const blocks = paragraphs.map((p) => {
+    const lines = p.split('\n').map((line) => {
+      const lead = line.match(/^[ \t]+/)?.[0] ?? '';
+      return '&nbsp;'.repeat(lead.replace(/\t/g, '    ').length) + linkifyLine(line.slice(lead.length));
+    });
+    return `<p>${lines.join('<br>\r\n')}</p>`;
+  });
+  return `<div>\r\n${blocks.join('\r\n')}\r\n</div>`;
+}
+
+// ─── The message ────────────────────────────────────────────────────────────
+
 export interface TextMessage {
   to: string;
   subject: string;
-  /** Plain text; any line endings. Sent as UTF-8 quoted-printable. */
+  /** Plain text; any line endings. Sent as UTF-8 quoted-printable, with an HTML alternative generated from it. */
   body: string;
   /** Omitted by gmail_send: Gmail stamps the authenticated mailbox as From. */
   from?: string;
@@ -125,13 +184,19 @@ export interface TextMessage {
 
 const HEADER_NAME = /^[!-9;-~]+$/; // RFC 5322 field-name: printable ASCII except ':'
 
+/** A MIME boundary that cannot occur in quoted-printable output (20 random hex digits; keeps the Content-Type header under 78 columns). */
+export function newBoundary(): string {
+  return `fgac-${randomBytes(10).toString('hex')}`;
+}
+
 /**
  * The RFC 5322 message: addressing headers, Subject (RFC 2047 when needed),
- * extras, then `MIME-Version`, `Content-Type: text/plain; charset=utf-8` and
- * `Content-Transfer-Encoding: quoted-printable`, a blank line and the encoded
- * body. CRLF throughout.
+ * extras, `MIME-Version: 1.0`, `Content-Type: multipart/alternative`, then
+ * the `text/plain` part and the `text/html` part, each
+ * `charset=utf-8` and `Content-Transfer-Encoding: quoted-printable`. CRLF
+ * throughout. `boundary` is injectable for deterministic tests.
  */
-export function buildTextMessage(msg: TextMessage): string {
+export function buildTextMessage(msg: TextMessage, boundary: string = newBoundary()): string {
   const h: string[] = [];
   if (msg.from) h.push(`From: ${headerValue(msg.from)}`);
   if (msg.replyTo) h.push(`Reply-To: ${headerValue(msg.replyTo)}`);
@@ -142,11 +207,41 @@ export function buildTextMessage(msg: TextMessage): string {
     if (!HEADER_NAME.test(name)) throw new Error(`mimeText: invalid header name ${JSON.stringify(name)}`);
     h.push(`${name}: ${headerValue(value)}`);
   }
-  h.push('MIME-Version: 1.0', 'Content-Type: text/plain; charset=utf-8', 'Content-Transfer-Encoding: quoted-printable');
-  return `${h.join('\r\n')}\r\n\r\n${encodeQuotedPrintable(msg.body)}`;
+  h.push('MIME-Version: 1.0', `Content-Type: multipart/alternative; boundary="${boundary}"`);
+  const part = (type: string, content: string) =>
+    `Content-Type: ${type}; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n${encodeQuotedPrintable(content)}`;
+  return `${h.join('\r\n')}\r\n\r\n` +
+    `--${boundary}\r\n${part('text/plain', msg.body)}\r\n` +
+    `--${boundary}\r\n${part('text/html', textToHtml(msg.body))}\r\n` +
+    `--${boundary}--\r\n`;
 }
 
 /** The `raw` field of Gmail's messages/send: the message, base64url. */
-export function buildTextMessageRaw(msg: TextMessage): string {
-  return Buffer.from(buildTextMessage(msg), 'utf8').toString('base64url');
+export function buildTextMessageRaw(msg: TextMessage, boundary?: string): string {
+  return Buffer.from(buildTextMessage(msg, boundary), 'utf8').toString('base64url');
+}
+
+/**
+ * Split a message built by buildTextMessage (or a delivered copy of one) into
+ * its header block and decoded parts — tests and QA runbooks use it to check
+ * what arrived.
+ */
+export function parseTextMessage(message: string): { headers: string; parts: Array<{ type: string; encoding: string; raw: string; decoded: string }> } {
+  const sep = message.indexOf('\r\n\r\n');
+  const headers = message.slice(0, sep);
+  const boundary = headers.replace(/\r\n[ \t]+/g, ' ').match(/boundary="?([^";\r\n]+)"?/i)?.[1];
+  if (!boundary) {
+    const encoding = /^Content-Transfer-Encoding:\s*(.+)$/im.exec(headers)?.[1]?.trim() ?? '';
+    const raw = message.slice(sep + 4);
+    return { headers, parts: [{ type: /^Content-Type:\s*([^;\r\n]+)/im.exec(headers)?.[1]?.trim() ?? '', encoding, raw, decoded: /quoted-printable/i.test(encoding) ? decodeQuotedPrintable(raw) : raw }] };
+  }
+  const parts = message.slice(sep + 4).split(`--${boundary}`).slice(1).filter((p) => !p.startsWith('--')).map((chunk) => {
+    const body = chunk.replace(/^\r\n/, '');
+    const i = body.indexOf('\r\n\r\n');
+    const ph = body.slice(0, i);
+    const raw = body.slice(i + 4).replace(/\r\n$/, '');
+    const encoding = /^Content-Transfer-Encoding:\s*(.+)$/im.exec(ph)?.[1]?.trim() ?? '';
+    return { type: /^Content-Type:\s*([^;\r\n]+)/im.exec(ph)?.[1]?.trim() ?? '', encoding, raw, decoded: /quoted-printable/i.test(encoding) ? decodeQuotedPrintable(raw) : raw };
+  });
+  return { headers, parts };
 }

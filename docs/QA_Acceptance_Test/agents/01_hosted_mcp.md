@@ -65,7 +65,7 @@ curl -s $BASE_URL/api/mcp -X POST \
 ```
 - [ ] Shows send whitelist rules
 
-### A6: Long paragraph delivered unwrapped
+### A6: Long paragraph delivered intact (HTML alternative)
 ```bash
 LONG=$(printf 'Line wrapping probe %03d. ' $(seq 1 20))   # one ~500-char line, no newline
 curl -s $BASE_URL/api/mcp -X POST \
@@ -77,10 +77,11 @@ curl -s $BASE_URL/api/mcp -X POST -H "Authorization: Bearer $TOKEN_B" -H "Conten
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"google_api_get","arguments":{"path":"gmail/v1/users/me/messages?q=subject%3A%22QA%20Hosted%20MCP%20-%20Send%20A6%22"}},"id":2}'
 curl -s $BASE_URL/api/mcp -X POST -H "Authorization: Bearer $TOKEN_B" -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"google_api_get","arguments":{"path":"gmail/v1/users/me/messages/<id>?format=raw"}},"id":3}' \
-  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const raw=JSON.parse(JSON.parse(s).result.content[0].text).raw;const m=Buffer.from(raw,"base64url").toString();const [h,...b]=m.split("\r\n\r\n");console.log(h.match(/^Content-Transfer-Encoding:.*$/m)?.[0]);const body=b.join("\r\n\r\n");console.log("longest encoded line",Math.max(...body.split("\r\n").map(l=>l.length)));console.log("decoded lines",body.replace(/=\r\n/g,"").split("\r\n").length)})'
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const raw=JSON.parse(JSON.parse(s).result.content[0].text).raw;const m=Buffer.from(raw,"base64url").toString();const ct=m.match(/^Content-Type:.*$/m)[0];const b=ct.match(/boundary="?([^";]+)"?/)?.[1];console.log(ct);if(!b){console.log("SINGLE PART — no HTML alternative");return;}for(const part of m.split("--"+b).slice(1).filter(p=>!p.startsWith("--"))){const i=part.indexOf("\r\n\r\n");const h=part.slice(0,i),body=part.slice(i+4);const type=h.match(/^Content-Type:\s*([^;\r\n]+)/im)?.[1];const cte=h.match(/^Content-Transfer-Encoding:\s*(.+)$/im)?.[1]??"(none)";const dec=/quoted-printable/i.test(cte)?Buffer.from(body.replace(/=\r\n/g,"").replace(/=([0-9A-F]{2})/g,(_,x)=>String.fromCharCode(parseInt(x,16))),"latin1").toString():body;console.log(type,"|",cte,"| decoded lines",dec.split(/\r?\n/).length,"| one-<p> paragraph:",/<p>[^\r\n]{300,}<\/p>/.test(dec))}})'
 ```
-- [ ] Header `Content-Transfer-Encoding: quoted-printable` on the DELIVERED copy
-- [ ] Longest encoded line ≤ 76; decoded paragraph is 1 line, equal to `$LONG`
+- [ ] DELIVERED copy is `multipart/alternative` with a `text/html` part
+- [ ] The HTML part decodes to one `<p>…</p>` holding the whole paragraph (no break inside)
+- [ ] The `text/plain` part is present (Gmail may re-fold it at ~72 columns — not a failure)
 
 ---
 

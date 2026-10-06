@@ -59,7 +59,7 @@ curl -X POST http://localhost:18790/api/chat \
 - [ ] OpenClaw reports whitelist error from skill output
 - [ ] Agent does not crash — handles error gracefully
 
-### A6: Long paragraph delivered unwrapped
+### A6: Long paragraph delivered intact (HTML alternative)
 ```bash
 curl -X POST http://localhost:18790/api/chat \
   -H "Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN" \
@@ -68,9 +68,10 @@ curl -X POST http://localhost:18790/api/chat \
 ```
 - [ ] OpenClaw reports the message sent
 - [ ] Read the DELIVERED copy from USER_B's mailbox with `format=raw` (hosted
-  runbook A6 has the decode one-liner): `Content-Transfer-Encoding:
-  quoted-printable`, longest encoded line ≤ 76, and the decoded paragraph is
-  one line equal to what was sent. The sender's Sent copy is not evidence
+  runbook A6 has the decode one-liner): `multipart/alternative` with a
+  `text/html` part whose decoded content holds the paragraph in one `<p>` with
+  no break inside. Gmail re-folds the `text/plain` part at ~72 columns — not a
+  failure. The sender's Sent copy is not evidence
 
 ---
 

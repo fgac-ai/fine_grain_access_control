@@ -195,8 +195,10 @@ export { encodeHeaderWord } from './mimeText';
  * caller). From and Reply-To are the support mailbox; the proxy sends as
  * the key's own account, so Gmail keeps the From consistent. `cc` is used by
  * the dead-grant notice on a delegated mailbox (the key owner rides along).
- * The body goes quoted-printable (mimeText.ts): these sentences run well past
- * 78 columns, and until 2026-10-05 Gmail's relay hard-wrapped them on delivery.
+ * Built by mimeText.ts: the plain text plus an HTML alternative generated
+ * from it. These sentences run well past 78 columns, and until 2026-10-05
+ * Gmail re-folded them on delivery (text-only mail is re-serialised by Gmail
+ * whatever its encoding; the HTML part is what arrives intact).
  */
 export function approvalEmailRaw(opts: {
   from: string; to: string; cc?: string | null; subject: string; body: string;

@@ -3348,9 +3348,10 @@ function registerFgacTools(server: FgacMcpServer) {
         const denial = checkSendWhitelist(rules, [to]);
         if (denial) return sendDenialWithLinks(conn, resolved.proxyKeyId, denial);
 
-        // RFC 5322 message, body quoted-printable (src/lib/mimeText.ts): an
-        // unencoded text/plain body is hard-wrapped at ~72 columns by Gmail's
-        // relay on delivery, so long paragraphs reached phones ragged.
+        // RFC 5322 message via src/lib/mimeText.ts: the plain text plus an HTML
+        // alternative generated from it, both quoted-printable. Gmail re-folds
+        // text-only bodies at ~72 columns on delivery whatever their encoding,
+        // so long paragraphs reached phones ragged; the HTML part survives.
         const raw = buildTextMessageRaw({ to, subject, body });
 
         const result = await gmailFetch(resolved.token, resolved.targetEmail, 'messages/send', 'POST', JSON.stringify({ raw }));

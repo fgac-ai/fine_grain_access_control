@@ -47,19 +47,22 @@
   match pattern" message with the modal still open and the input preserved, and
   `(a+)+$` shows an inline "too complex" message. Neither returns a 500
 
-### A6: A long paragraph is delivered without inserted line breaks
+### A6: A long paragraph is delivered intact (HTML alternative present)
 - Through `gmail_send`, send `USER_B_EMAIL` a body whose first paragraph is ONE
   line of at least 300 characters (no newline inside it). Then read the
   **delivered** copy from USER_B's mailbox with `format=raw`
   (`google_api_get` on USER_B's key: `gmail/v1/users/me/messages?q=subject:...`
   then `gmail/v1/users/me/messages/{id}?format=raw`, base64url-decode `raw`).
-  The sender's Sent copy is NOT evidence — Gmail stores it unfolded and folds
-  only on delivery
-- **Expected**: the delivered message declares
-  `Content-Transfer-Encoding: quoted-printable`, no encoded line exceeds 76
-  characters, and once the soft breaks (`=` followed by CRLF) are removed the
-  paragraph is one line identical to the body that was sent — no inserted
-  line breaks. Regression guard for 2026-10-05: with no transfer encoding
-  declared, Gmail's relay hard-wrapped the paragraph at ~72 columns, so every
-  message any agent sent through FGAC rendered ragged on phones (each wrapped
-  line at the sender's width, the leftover words underneath)
+  The sender's Sent copy is NOT evidence — Gmail stores it as submitted and
+  rewrites only the outbound copy
+- **Expected**: the delivered message is `multipart/alternative` with a
+  `text/html` part (Gmail keeps the submitter's HTML part, re-boundaried) whose
+  decoded content holds the paragraph in ONE `<p>…</p>` with no line break
+  inside, and a `text/plain` part whose text is the paragraph. Gmail
+  re-serialises the plain part on delivery (typically `charset="UTF-8"`, no
+  transfer encoding, folded at word boundaries around 72 columns) — that
+  folding is Gmail's and is NOT a failure; the phone renders the HTML part.
+  Regression guard for 2026-10-05: with a text-only body, Gmail's folding was
+  all the recipient had, so every message any agent sent through FGAC rendered
+  ragged on phones (each wrapped line at the sender's width, the leftover
+  words underneath)
