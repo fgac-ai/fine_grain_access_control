@@ -448,7 +448,10 @@ the tool's error rate converges toward the other Gmail read tools.
 failure branches (`no_proxy_key`, `no_accessible_accounts`,
 `account_not_permitted`, `google_token_unavailable`, and since 2026-09-04
 `delegation_inactive` — the access row exists but the delegation behind it is
-no longer active, so there is no token to fetch and nothing to reconnect)
+no longer active, so there is no token to fetch and nothing to reconnect;
+until 2026-10-05 it could also misfire on a LIVE delegation whose owner address
+had several `users` rows, because the owner was picked by address first — the
+lookup now starts from the delegation, `src/db/delegationOwner.ts`)
 return text without ever reaching Google, so they carry no `error_status` and
 which branch fired used to be unrecoverable — the `outcome='failed'` blind
 class. `failure_reason` names the branch.
