@@ -196,6 +196,11 @@ async function main() {
   check('Drive file GET with no rule is refused', refused(r), r);
   r = await call('PATCH', `upload/drive/v3/files/${FILE_ID}?uploadType=media`, { body: 'x', contentType: 'text/plain', rules: [{ ...sheetRead, actionType: 'sheet_read_write' }] });
   check('upload/ Drive media update under Read & Write forwards to the upload path', r.status === 200 && r.google.length === 1 && r.google[0].url.includes('/upload/drive/v3/files/'), r);
+  r = await call('POST', `drive/v3/files/${FILE_ID}/copy`, { body: '{}', contentType: 'application/json', rules: [sheetRead] });
+  check('copy of a Read Only file forwards (a copy is a READ of its source — MCP drive_copy parity, PR #185)',
+    r.status === 200 && r.google.some(g => g.method === 'POST' && /\/copy/.test(g.url)), r);
+  r = await call('POST', `drive/v3/files/${FILE_ID}/copy`, { body: '{}', contentType: 'application/json' });
+  check('copy of a file no rule names is refused before Google', refused(r), r);
   r = await call('GET', `v4/spreadsheets/${FILE_ID}/values/A1:B2`, { rules: [sheetRead] });
   check('Sheets read under a Read Only rule forwards to sheets.googleapis.com', r.status === 200 && r.google[0]?.url.startsWith('https://sheets.googleapis.com/v4/spreadsheets/'), r);
 
