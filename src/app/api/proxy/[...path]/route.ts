@@ -24,7 +24,7 @@ import {
   classifyDriveDiscovery, driveDiscoveryRefusal, sharedDriveAccess, sharedDriveBlockedText, filterSharedDrives,
   isDriveApiPath, unconfinedDriveDenialText, type DriveDefault, type DriveSetting, type DriveDiscovery,
 } from '@/lib/driveTreeAccess';
-import { agentCreatedGrant, createdDriveFileFromBody } from '@/lib/agentCreatedFiles';
+import { agentCreatedGrant, agentCreatedRuleName, createdDriveFileFromBody } from '@/lib/agentCreatedFiles';
 import { resolveDriveLineage, resolveLineageFrom, parseDriveFileMeta, driveMetaUrl, LineageError, MAX_LINEAGE_HOPS, type MetaFetcher } from '@/lib/driveLineage';
 
 export const dynamic = 'force-dynamic';
@@ -1060,7 +1060,7 @@ async function grantProxyCreatedFile(
     if (!grant) return;
     const [rule] = await db.insert(accessRules).values({
       userId,
-      ruleName: `Agent-created: ${name || file.id}`,
+      ruleName: agentCreatedRuleName(name, file.id),
       service: grant.service,
       actionType: grant.actionType,
       targetResourceId: file.id,

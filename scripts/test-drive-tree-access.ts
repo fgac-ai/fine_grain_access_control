@@ -12,12 +12,13 @@ import {
   normalizeDriveDefault, driveDenialText, accessFromActionType, type LineageNode,
   classifyDriveDiscovery, driveDiscoveryRefusal, sharedDriveAccess, filterSharedDrives,
   SHARED_WITH_ME_ID, SHARED_DRIVES_ID, FOLDER_MIME,
+  countDriveSettings, classifyDriveSettings, settingsAfterClear, isClearableDriveOverride,
 } from '../src/lib/driveTreeAccess';
 import {
   resolveDriveLineage, resolveLineageFrom, parseDriveFileMeta, _resetLineageCache, LineageError, type MetaFetcher, type DriveFileMeta,
 } from '../src/lib/driveLineage';
 import {
-  agentCreatedGrant, createdDriveFileFromBody, isDriveCreatePath, isResumableInitiation, injectCreateId,
+  agentCreatedGrant, agentCreatedRuleName, createdDriveFileFromBody, isDriveCreatePath, isResumableInitiation, injectCreateId,
   classifyProxyDriveCall, legacyUnruledDriveDecision, createMetadataMimeType,
 } from '../src/lib/agentCreatedFiles';
 
@@ -123,6 +124,48 @@ check('the grant is a file-level setting (decided by the file, not the default)'
 check('typed kinds keep the per-file rule (still honoured with the flag off)', agentCreatedGrant(doc, true)?.service === 'docs' && agentCreatedGrant(doc, false)?.service === 'docs');
 check('other kinds get a tree rule only in tree mode', agentCreatedGrant('text/plain', false) === null && agentCreatedGrant('text/plain', true)?.service === 'drive');
 check('an agent-created folder is granted as a folder node', agentCreatedGrant(FOLDER_MIME, true)?.targetKind === 'folder');
+
+console.log('override count and Clear overrides agree; the agent\'s own files are neither:');
+// 2026-10-05 (PR #185 preview): the header read "0 overrides" while two
+// agent-created files showed Write set on themselves. Overrides = the user's
+// card settings, exactly what Clear removes; agent-created and per-file
+// rules are counted apart and kept.
+{
+  const auto = (id: string, mime: string, name: string) => {
+    const g = agentCreatedGrant(mime, true)!;
+    return { id: `auto-${id}`, ruleName: agentCreatedRuleName(name, id), service: g.service, actionType: g.actionType, targetResourceId: id, targetKind: g.targetKind };
+  };
+  const mixed = [
+    auto('txt', 'text/plain', 'qa-a22-source'),
+    auto('gdoc', doc, 'qa-a22-copy renamed'),
+    { id: 'u1', ruleName: 'Read & write: Clients', service: 'drive', actionType: 'drive_read_write', targetResourceId: 'clients', targetKind: 'folder' },
+    { id: 'u2', ruleName: 'Blocked: Drafts', service: 'drive', actionType: 'drive_block', targetResourceId: 'drafts', targetKind: 'folder' },
+    { id: 'p1', ruleName: 'Picker: Budget', service: 'sheets', actionType: 'sheet_read', targetResourceId: 'budget' },
+    // The user also set the agent's text file on the card: that node is an override now.
+    auto('both', 'text/plain', 'agent then user'),
+    { id: 'u3', ruleName: 'Blocked: agent then user', service: 'drive', actionType: 'drive_block', targetResourceId: 'both', targetKind: 'file' },
+  ];
+  const s = settingsFromRules(mixed);
+  const c = countDriveSettings(s);
+  check('agent-created rule names carry the shared prefix', agentCreatedRuleName('a.txt', 'id1') === 'Agent-created: a.txt' && agentCreatedRuleName(null, 'id1') === 'Agent-created: id1');
+  check('agent-created files of both kinds are classed as the agent\'s, not overrides', classifyDriveSettings(s.get('txt')!) === 'agent_created' && classifyDriveSettings(s.get('gdoc')!) === 'agent_created');
+  check('a Picker rule is a per-file rule', classifyDriveSettings(s.get('budget')!) === 'per_file');
+  check('a user setting on an agent file makes the node an override', classifyDriveSettings(s.get('both')!) === 'override');
+  check('counts: 3 overrides, 2 agent-created, 1 per-file', c.overrides === 3 && c.agentCreated === 2 && c.perFile === 1);
+  const onFile = (id: string, set: typeof s) => effectiveDriveAccess([{ id, name: id, kind: 'file' }, node('root', 'My Drive')], set, 'read').access;
+  check('a user Block on the agent\'s own file outranks its Write auto-grant', onFile('both', s) === 'block');
+  const userRead = settingsFromRules([auto('t2', 'text/plain', 'n'), { id: 'u9', ruleName: 'Read: n', service: 'drive', actionType: 'drive_read', targetResourceId: 't2', targetKind: 'file' }]);
+  check('a user Read narrows it too (not combined up to Write)', onFile('t2', userRead) === 'read');
+  check('a native agent file\'s per-kind grant is outranked by a user tree setting', onFile('gdoc', settingsFromRules([auto('gdoc', doc, 'd'), { id: 'u8', ruleName: 'Blocked: d', service: 'drive', actionType: 'drive_block', targetResourceId: 'gdoc', targetKind: 'file' }])) === 'block');
+  const after = settingsAfterClear(s);
+  const ca = countDriveSettings(after);
+  check('after Clear: 0 overrides, agent and per-file settings intact', ca.overrides === 0 && ca.agentCreated === 3 && ca.perFile === 1);
+  check('after Clear the user\'s Block is gone and the agent\'s grant decides again', onFile('both', after) === 'write');
+  check('after Clear the agent\'s files stay writable under default Read',
+    ['txt', 'gdoc', 'both'].every(id => resolveDriveTreeAccess([{ id, name: id, kind: 'file' }, node('root', 'My Drive')], after, 'read', true).allowed));
+  check('server Clear removes exactly the counted rules (user drive rules only)',
+    mixed.filter(isClearableDriveOverride).map(r => r.id).sort().join(',') === 'u1,u2,u3');
+}
 
 console.log('created-file responses and resumable creates:');
 check('a Drive File resource yields the created file', JSON.stringify(createdDriveFileFromBody({ kind: 'drive#file', id: 'f1', name: 'a.txt', mimeType: 'text/plain' })) === JSON.stringify({ id: 'f1', name: 'a.txt', mimeType: 'text/plain' }));
