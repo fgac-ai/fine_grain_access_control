@@ -3,7 +3,7 @@
 import { db } from "@/db";
 import { users, proxyKeys, emailDelegations, keyEmailAccess, accessRules, keyRuleAssignments } from "@/db/schema";
 import { eq, and, desc, isNull, inArray } from "drizzle-orm";
-import { DRIVE_SERVICE, DRIVE_TARGET_KINDS, actionTypeForAccess, accessLabel, type DriveAccess, type DriveDefault, type DriveNodeKind } from "@/lib/driveTreeAccess";
+import { DRIVE_SERVICE, DRIVE_TARGET_KINDS, actionTypeForAccess, isClearableDriveOverride, isAgentCreatedRule, accessLabel, type DriveAccess, type DriveDefault, type DriveNodeKind } from "@/lib/driveTreeAccess";
 import { findActiveDelegation } from "@/db/delegationQueries";
 import { syncDefaultProfileDelegatedAccess } from "@/db/defaultProfile";
 import { currentUser, clerkClient } from "@clerk/nextjs/server";
@@ -1547,11 +1547,14 @@ export async function setDriveNodeAccess(
   const name = (node.name || node.id).slice(0, 300);
   const key = await ownedActiveKey(dbUser.id, keyId);
 
-  const candidates = await db.select().from(accessRules).where(and(
+  // The agent's create auto-grant on this node is never edited or removed
+  // here: a user setting outranks it while present (decidingSettings), and
+  // Inherit hands the node back to it, so the agent's output is not stranded.
+  const candidates = (await db.select().from(accessRules).where(and(
     eq(accessRules.userId, dbUser.id),
     eq(accessRules.service, DRIVE_SERVICE),
     eq(accessRules.targetResourceId, node.id),
-  ));
+  ))).filter(r => !isAgentCreatedRule(r));
   const assignments = candidates.length > 0
     ? await db.select().from(keyRuleAssignments).where(inArray(keyRuleAssignments.accessRuleId, candidates.map(r => r.id)))
     : [];
@@ -1621,25 +1624,46 @@ export async function setDriveNodeAccess(
   return { ruleId };
 }
 
-/** Remove every Drive tree setting this profile holds (its own rules are deleted, shared ones detached). */
+/**
+ * "Clear overrides": remove every Drive tree setting the user made that
+ * applies to this profile — exactly the set the card counts as overrides
+ * (countDriveSettings). The profile's own rules are deleted, shared ones
+ * detached, and a global one is pinned to the other active profiles so it
+ * stops applying here only (the same handling as setting a node to Inherit).
+ * Agent-created auto-grants and legacy per-file rules are kept: the first is
+ * the agent's own output, which a Read default would otherwise strand.
+ */
 export async function clearDriveOverrides(keyId: string) {
   const dbUser = await getDbUser();
   const key = await ownedActiveKey(dbUser.id, keyId);
-  const mine = await db.select({ ruleId: keyRuleAssignments.accessRuleId })
-    .from(keyRuleAssignments)
-    .innerJoin(accessRules, eq(accessRules.id, keyRuleAssignments.accessRuleId))
-    .where(and(eq(keyRuleAssignments.proxyKeyId, key.id), eq(accessRules.service, DRIVE_SERVICE), eq(accessRules.userId, dbUser.id)));
-  for (const { ruleId } of mine) {
-    const others = await db.select().from(keyRuleAssignments)
-      .where(and(eq(keyRuleAssignments.accessRuleId, ruleId)));
-    if (others.every(a => a.proxyKeyId === key.id)) {
-      await db.delete(keyRuleAssignments).where(eq(keyRuleAssignments.accessRuleId, ruleId));
-      await db.delete(accessRules).where(eq(accessRules.id, ruleId));
+  const driveRules = (await db.select().from(accessRules)
+    .where(and(eq(accessRules.userId, dbUser.id), eq(accessRules.service, DRIVE_SERVICE))))
+    .filter(isClearableDriveOverride);
+  const assignments = driveRules.length > 0
+    ? await db.select().from(keyRuleAssignments).where(inArray(keyRuleAssignments.accessRuleId, driveRules.map(r => r.id)))
+    : [];
+  const assignmentsOf = (ruleId: string) => assignments.filter(a => a.accessRuleId === ruleId);
+  const mine = driveRules.filter(r => assignmentsOf(r.id).some(a => a.proxyKeyId === key.id));
+  const globals = driveRules.filter(r => assignmentsOf(r.id).length === 0);
+
+  for (const r of mine) {
+    if (assignmentsOf(r.id).every(a => a.proxyKeyId === key.id)) {
+      await db.delete(keyRuleAssignments).where(eq(keyRuleAssignments.accessRuleId, r.id));
+      await db.delete(accessRules).where(eq(accessRules.id, r.id));
     } else {
-      await db.delete(keyRuleAssignments).where(and(eq(keyRuleAssignments.accessRuleId, ruleId), eq(keyRuleAssignments.proxyKeyId, key.id)));
+      await db.delete(keyRuleAssignments).where(and(eq(keyRuleAssignments.accessRuleId, r.id), eq(keyRuleAssignments.proxyKeyId, key.id)));
+    }
+  }
+  if (globals.length > 0) {
+    const others = (await db.select({ id: proxyKeys.id }).from(proxyKeys)
+      .where(and(eq(proxyKeys.userId, dbUser.id), isNull(proxyKeys.revokedAt))))
+      .filter(k => k.id !== key.id);
+    for (const r of globals) {
+      if (others.length === 0) await db.delete(accessRules).where(eq(accessRules.id, r.id));
+      else await db.insert(keyRuleAssignments).values(others.map(k => ({ proxyKeyId: k.id, accessRuleId: r.id })));
     }
   }
   const { captureServerEvent } = await import("@/lib/posthogServer");
-  captureServerEvent(dbUser.clerkUserId, "drive_tree_settings_cleared", { count: mine.length, profile_default: key.isDefault });
+  captureServerEvent(dbUser.clerkUserId, "drive_tree_settings_cleared", { count: mine.length + globals.length, profile_default: key.isDefault });
   revalidateDashboard();
 }

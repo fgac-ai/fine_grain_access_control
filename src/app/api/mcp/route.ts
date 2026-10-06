@@ -74,10 +74,10 @@ import {
 } from '@/lib/googleTokenFailure';
 import { liveTokenScopes, reconcileScopes } from '@/lib/googleTokenScopes';
 import { driveTreeFlagOn } from '@/lib/featureFlags';
-import { agentCreatedGrant } from '@/lib/agentCreatedFiles';
+import { agentCreatedGrant, agentCreatedRuleName } from '@/lib/agentCreatedFiles';
 import {
   resolveDriveTreeAccess, effectiveDriveAccess, settingsFromRules, normalizeDriveDefault, driveDefaultLabel,
-  driveDenialText, widenListFields, DRIVE_SERVICE, type DriveDefault, type DriveSetting,
+  driveDenialText, widenListFields, DRIVE_SERVICE, countDriveSettings, type DriveDefault, type DriveSetting,
 } from '@/lib/driveTreeAccess';
 import {
   resolveDriveLineage, resolveLineageFrom, parseDriveFileMeta, driveMetaUrl, LineageError, MAX_LINEAGE_HOPS,
@@ -1645,9 +1645,11 @@ async function driveDefaultsForPermissions(conn: ConnectionApproved): Promise<Re
   const token = await getGoogleToken(conn.user.email, conn.user, { quiet: true });
   if ('failure' in token || token.hasDriveFullScope !== true) return legacy;
   const { driveDefault, settings } = await loadDriveTreeSettings(conn.user.id, conn.proxyKeyId);
-  const overrides = [...settings.values()].flat().filter(st => st.source === 'drive').length;
+  // Same count as the dashboard card's "N overrides" (countDriveSettings):
+  // the agent's own auto-granted files are not the user's settings.
+  const counts = countDriveSettings(settings);
   return {
-    drive: `${driveDefaultLabel(driveDefault).toUpperCase()} — this profile's default for every file in the user's Google Drive (My Drive, Shared with me, Shared drives), covering Sheets, Docs, Slides and every other file kind. Folder and file settings in the rules below override it for everything inside them; the nearest setting wins. Blocked files are invisible (reads denied too). ${overrides} folder/file setting(s) apply to this key. Files this agent creates are Read & write for it.`,
+    drive: `${driveDefaultLabel(driveDefault).toUpperCase()} — this profile's default for every file in the user's Google Drive (My Drive, Shared with me, Shared drives), covering Sheets, Docs, Slides and every other file kind. Folder and file settings in the rules below override it for everything inside them; the nearest setting wins. Blocked files are invisible (reads denied too). ${counts.overrides} folder/file setting(s) made by the user apply to this key. Files this agent creates are Read & write for it unless the user sets them otherwise.`,
   };
 }
 
@@ -2503,7 +2505,7 @@ async function autoGrantAgentCreatedFile(
   try {
     const [rule] = await db.insert(accessRules).values({
       userId: conn.user.id,
-      ruleName: `Agent-created: ${title || fileId}`,
+      ruleName: agentCreatedRuleName(title, fileId),
       service: d.service,
       actionType: d.actionTypes.readWrite,
       targetResourceId: fileId,
@@ -2562,7 +2564,7 @@ async function grantDriveCreatedFile(
   try {
     const [rule] = await db.insert(accessRules).values({
       userId: conn.user.id,
-      ruleName: `Agent-created: ${name || id}`,
+      ruleName: agentCreatedRuleName(name, id),
       service: grant.service,
       actionType: grant.actionType,
       targetResourceId: id,

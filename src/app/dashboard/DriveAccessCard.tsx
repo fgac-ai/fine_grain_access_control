@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import { Card, buttonSecondary } from '@/components/ui';
 import {
-  effectiveDriveAccess, settingsFromRules, accessLabel, driveDefaultLabel, SHARED_WITH_ME_ID, SHARED_DRIVES_ID,
+  effectiveDriveAccess, settingsFromRules, decidingSettings, countDriveSettings, classifyDriveSettings, settingsAfterClear, accessLabel, driveDefaultLabel, SHARED_WITH_ME_ID, SHARED_DRIVES_ID,
   type DriveAccess, type DriveDefault, type DriveEffective, type DriveSetting, type LineageNode, type DriveNodeKind,
 } from '@/lib/driveTreeAccess';
 import { setDriveDefault, setDriveNodeAccess, clearDriveOverrides, type DriveNodeInput } from './actions';
@@ -130,9 +130,7 @@ export function DriveAccessCard({ profileId, driveDefault: initialDefault, rules
   const effectiveOf = useCallback((node: Node): DriveEffective => effectiveDriveAccess(lineageOf(node), settings, driveDefault), [lineageOf, settings, driveDefault]);
 
   const settingOf = useCallback((id: string): Setting => {
-    const here = settings.get(id) ?? [];
-    const tree = here.filter(s => s.source === 'drive');
-    const use = tree.length > 0 ? tree : here;
+    const use = decidingSettings(settings.get(id) ?? []);
     if (use.length === 0) return 'inherit';
     if (use.some(s => s.access === 'block')) return 'block';
     if (use.some(s => s.access === 'write')) return 'write';
@@ -265,20 +263,22 @@ export function DriveAccessCard({ profileId, driveDefault: initialDefault, rules
 
   const pickSetting = async (node: Node, value: Setting) => {
     const previous = settings.get(node.id);
-    setSettings(prev => {
+    // The card edits only the user's own setting; the agent's create
+    // auto-grant on the node stays (Inherit hands the node back to it).
+    const withSetting = (prev: Map<string, DriveSetting[]>, ruleId: string | null) => {
       const next = new Map(prev);
-      if (value === 'inherit') next.delete(node.id);
-      else next.set(node.id, [{ nodeId: node.id, access: value, ruleId: 'pending', source: 'drive', name: node.name }]);
+      const kept = (prev.get(node.id) ?? []).filter(s => s.agentCreated);
+      const list = value === 'inherit' || !ruleId ? kept : [...kept, { nodeId: node.id, access: value, ruleId, source: 'drive' as const, name: node.name }];
+      if (list.length) next.set(node.id, list); else next.delete(node.id);
       return next;
-    });
+    };
+    setSettings(prev => withSetting(prev, 'pending'));
     setSavingIds(prev => new Set(prev).add(node.id));
     setError(null);
     try {
       const input: DriveNodeInput = { id: node.id, name: node.name, kind: node.kind };
       const { ruleId } = await setDriveNodeAccess(profileId, input, value);
-      if (ruleId && value !== 'inherit') {
-        setSettings(prev => new Map(prev).set(node.id, [{ nodeId: node.id, access: value, ruleId, source: 'drive', name: node.name }]));
-      }
+      if (ruleId && value !== 'inherit') setSettings(prev => withSetting(prev, ruleId));
       setSavedIds(prev => new Set(prev).add(node.id));
       setTimeout(() => setSavedIds(prev => { const next = new Set(prev); next.delete(node.id); return next; }), 2500);
     } catch (err) {
@@ -289,7 +289,11 @@ export function DriveAccessCard({ profileId, driveDefault: initialDefault, rules
     }
   };
 
-  const overrideCount = useMemo(() => [...settings.values()].filter(list => list.some(s => s.source === 'drive')).length, [settings]);
+  // "Overrides" are the settings made on this card — exactly what Clear
+  // removes. The agent's own files and legacy per-file rules are counted
+  // apart and kept by Clear.
+  const counts = useMemo(() => countDriveSettings(settings), [settings]);
+  const overrideCount = counts.overrides;
   const hasSettingWithin = useCallback((id: string): boolean => {
     if ((settings.get(id) ?? []).length > 0) return true;
     return (children.get(id) ?? []).some(c => hasSettingWithin(c.id));
@@ -300,14 +304,7 @@ export function DriveAccessCard({ profileId, driveDefault: initialDefault, rules
     setClearing(true);
     try {
       await clearDriveOverrides(profileId);
-      setSettings(prev => {
-        const next = new Map<string, DriveSetting[]>();
-        for (const [id, list] of prev) {
-          const legacy = list.filter(s => s.source !== 'drive');
-          if (legacy.length) next.set(id, legacy);
-        }
-        return next;
-      });
+      setSettings(prev => settingsAfterClear(prev));
     } catch (err) {
       setError(`Could not clear settings: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -354,6 +351,15 @@ export function DriveAccessCard({ profileId, driveDefault: initialDefault, rules
         <div className="min-w-0">
           <h2 className="text-[15px] font-bold text-foreground">Google Drive access</h2>
           <p className="mt-0.5 text-xs text-muted-foreground">What this profile&apos;s agent can see and change across My Drive, Shared with me and Shared drives</p>
+          {(counts.agentCreated > 0 || counts.perFile > 0) && (
+            <p className="mt-1 text-xs text-muted-foreground" data-testid="drive-kept-settings">
+              Not counted as overrides, and kept by Clear overrides:{' '}
+              {[
+                counts.agentCreated > 0 && `${counts.agentCreated} ${counts.agentCreated === 1 ? 'file' : 'files'} the agent created (Read & write for it, so it can keep working on its own output)`,
+                counts.perFile > 0 && `${counts.perFile} per-file ${counts.perFile === 1 ? 'rule' : 'rules'} from the Picker or approval links`,
+              ].filter(Boolean).join('; ')}.
+            </p>
+          )}
         </div>
         <div className="flex shrink-0 items-center gap-3">
           <span className="text-xs text-muted-foreground">{driveDefaultLabel(driveDefault)} · {overrideCount} {overrideCount === 1 ? 'override' : 'overrides'}</span>
@@ -398,7 +404,7 @@ export function DriveAccessCard({ profileId, driveDefault: initialDefault, rules
         </label>
         <label className="flex cursor-pointer items-center gap-2 text-[13px] text-foreground">
           <input type="checkbox" checked={overridesOnly} onChange={e => setOverridesOnly(e.target.checked)} className="h-[15px] w-[15px] accent-primary" />
-          Show overrides only
+          Show only items with a setting
         </label>
         <div className="ml-auto hidden items-center gap-3.5 text-xs text-muted-foreground lg:flex">
           {legendPill(TONE.read.solid, 'set here')}
@@ -482,7 +488,7 @@ export function DriveAccessCard({ profileId, driveDefault: initialDefault, rules
           const saving = savingIds.has(node.id);
           const path = isResult ? (node.path ?? []).map(p => p.name).join(' › ') : '';
           const source = explicit ? 'Set here' : eff.level === 'default' ? `default: ${driveDefaultLabel(driveDefault)}` : `from ${eff.decidedBy?.name}`;
-          const legacyOnly = (settings.get(node.id) ?? []).length > 0 && !(settings.get(node.id) ?? []).some(s => s.source === 'drive');
+          const settingClass = classifyDriveSettings(settings.get(node.id) ?? []);
           return (
             <div key={`${node.id}-${depth}`} className={`grid grid-cols-1 items-center gap-2 border-b border-border/60 px-5 py-2 xl:grid-cols-[minmax(0,1fr)_220px_250px] xl:gap-4 ${isResult ? 'min-h-[60px]' : 'min-h-[46px]'} ${explicit ? 'bg-muted/30' : 'bg-card'}`}>
               <div className="flex min-w-0 items-start gap-2">
@@ -501,7 +507,8 @@ export function DriveAccessCard({ profileId, driveDefault: initialDefault, rules
                       <span title={node.name} className={`truncate text-[13px] font-medium ${dim ? 'text-subtle' : 'text-foreground'}`}>{node.name}</span>
                     )}
                     {node.isShortcut && <span className="rounded-full bg-muted px-1.5 text-[10px] font-semibold text-muted-foreground">shortcut</span>}
-                    {legacyOnly && <span className="rounded-full bg-muted px-1.5 text-[10px] font-semibold text-muted-foreground" title="Set by the Picker or an approval link before this profile had Drive access">per-file rule</span>}
+                    {settingClass === 'agent_created' && <span className="rounded-full bg-muted px-1.5 text-[10px] font-semibold text-muted-foreground" title="The agent created this file, so it is Read & write for it. Not an override: Clear overrides keeps it. Set it here to change it.">created by agent</span>}
+                    {settingClass === 'per_file' && <span className="rounded-full bg-muted px-1.5 text-[10px] font-semibold text-muted-foreground" title="Set by the Picker or an approval link before this profile had Drive access">per-file rule</span>}
                     {container && inFolder && <ChevronRight className="h-3.5 w-3.5 shrink-0 text-subtle" />}
                     {loading && <span className="text-[11px] text-subtle">loading…</span>}
                   </span>
@@ -537,7 +544,7 @@ export function DriveAccessCard({ profileId, driveDefault: initialDefault, rules
         })}
         {rows.length === 0 && (
           <div className="m-5 rounded-sm border border-dashed border-border px-4 py-6 text-center text-[13px] text-muted-foreground">
-            {view.mode === 'search' ? (searching ? 'Searching…' : 'Nothing matches.') : view.mode === 'folder' ? (loadingIds.has(view.folder.id) ? 'Loading…' : 'This folder is empty.') : roots.length === 0 ? 'Loading your Drive…' : 'Nothing to show. Turn off “Show overrides only”.'}
+            {view.mode === 'search' ? (searching ? 'Searching…' : 'Nothing matches.') : view.mode === 'folder' ? (loadingIds.has(view.folder.id) ? 'Loading…' : 'This folder is empty.') : roots.length === 0 ? 'Loading your Drive…' : 'Nothing to show. Turn off “Show only items with a setting”.'}
           </div>
         )}
       </div>

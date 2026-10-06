@@ -282,3 +282,37 @@ Regression for 2026-10-05: the REST proxy's tree branch counted
   own file-level Read & write setting, A21); `proxy_request` carries
   `drive_file_gate: 'tree'`. The Blocked source's copy is 403 and no file is
   created. Restore the source's setting to inherit; trash the copy.
+
+### A23: The override count is what Clear overrides removes; the agent's own files are neither
+Regression for 2026-10-05 (PR #185 preview): the card header read "Read
+everything · 0 overrides" while two agent-created files (`qa-a22-copy
+renamed`, `qa-a22-source`) showed **Write** set on themselves. Overrides now
+mean the settings the user made on the card, which is exactly what **Clear
+overrides** removes. Agent-created auto-grants (rule name `Agent-created: …`,
+any kind) and legacy per-file rules (Picker, approval links) are counted
+apart, and Clear keeps them. A user setting on an agent's file outranks the
+auto-grant without deleting it.
+- With the default on **Read everything** and no folder settings: have the
+  agent create one Google Doc (`POST v1/documents`) and one text file (`POST
+  drive/v3/files {name: "qa-a23-agent.txt", mimeType: "text/plain"}`). Reload
+  the card.
+- **Expected**: header `Read everything · 0 overrides`, **Clear overrides
+  (0)** disabled, and the line under the title reads "Not counted as
+  overrides, and kept by Clear overrides: 2 files the agent created …". Both
+  rows carry a **created by agent** tag (not "per-file rule") and a **Read &
+  write** "Set here" pill.
+- Set Test Folder A to **Write**, one never-picked file to **Blocked**, and the
+  agent's text file to **Read**. Reload; call `get_my_permissions`; then
+  `PATCH drive/v3/files/<text id> {name: "qa-a23-agent-renamed.txt"}`.
+- **Expected**: header `· 3 overrides`; the kept line says "1 file the agent
+  created" (the text file is now the user's override); the text file's
+  setting control shows **Read**. `defaults.drive` says "3 folder/file
+  setting(s) made by the user". The rename is denied `drive_read_only` with
+  `rule_match_level: 'file'` (the user's Read outranks the auto-grant).
+- Click **Clear overrides (3)**; repeat the rename; `docs_edit` the Doc.
+- **Expected**: header `· 0 overrides`, kept line back to "2 files the agent
+  created"; Test Folder A and the Blocked file inherit again; the text file is
+  **Read & write** again from its own grant, so the rename and the `docs_edit`
+  both succeed with `rule_match_level: 'file'`.
+  `drive_tree_settings_cleared{count: 3}` is captured. Reload: the same state
+  renders from the server. Trash both fixtures.
