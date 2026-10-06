@@ -127,6 +127,20 @@
       "when": 1790852784591,
       "tag": "0019_drive_tree_access",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1791074805756,
+      "tag": "0020_temporary_api_keys",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1791076331943,
+      "tag": "0021_resumable_session_columns",
+      "breakpoints": true
     }
   ]
 }

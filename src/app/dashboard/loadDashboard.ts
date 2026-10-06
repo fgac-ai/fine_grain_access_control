@@ -1,6 +1,6 @@
 import { kindForService } from '@/lib/driveFileKinds';
-import { proxyKeys, keyEmailAccess, accessRules, keyRuleAssignments } from '@/db/schema';
-import { eq } from 'drizzle-orm';
+import { proxyKeys, keyEmailAccess, accessRules, keyRuleAssignments, temporaryApiKeys, agentConnections } from '@/db/schema';
+import { eq, and, isNull, gt } from 'drizzle-orm';
 import { getActiveDelegationsToEmail, filterLiveDelegatedAccess } from '@/db/delegationQueries';
 import { resolveDbUser } from '@/db/userHelpers';
 import { currentUser } from '@clerk/nextjs/server';
@@ -98,6 +98,28 @@ export async function loadDashboardData(): Promise<DashboardData | null> {
     await db.select().from(keyEmailAccess),
   );
 
+  // Live temporary keys (create_temporary_api_key), shown under their parent
+  // profile so the user can see and revoke what their agents minted.
+  const liveTemporaryKeys = await db
+    .select({
+      id: temporaryApiKeys.id,
+      parentKeyId: temporaryApiKeys.parentKeyId,
+      last4: temporaryApiKeys.keyLast4,
+      purpose: temporaryApiKeys.purpose,
+      expiresAt: temporaryApiKeys.expiresAt,
+      createdAt: temporaryApiKeys.createdAt,
+      nickname: agentConnections.nickname,
+      clientName: agentConnections.clientName,
+      clientId: agentConnections.clientId,
+    })
+    .from(temporaryApiKeys)
+    .innerJoin(agentConnections, eq(agentConnections.id, temporaryApiKeys.connectionId))
+    .where(and(
+      eq(temporaryApiKeys.userId, dbUser.id),
+      isNull(temporaryApiKeys.revokedAt),
+      gt(temporaryApiKeys.expiresAt, new Date()),
+    ));
+
   const profiles = userProxyKeys.map(k => ({
     id: k.id,
     key: k.key,
@@ -110,6 +132,16 @@ export async function loadDashboardData(): Promise<DashboardData | null> {
     emailAccess: allKeyEmailAccess
       .filter(kea => kea.proxyKeyId === k.id)
       .map(kea => kea.targetEmail),
+    temporaryKeys: liveTemporaryKeys
+      .filter(t => t.parentKeyId === k.id)
+      .map(t => ({
+        id: t.id,
+        last4: t.last4,
+        purpose: t.purpose,
+        agentName: t.nickname || t.clientName || t.clientId,
+        createdAt: t.createdAt.toISOString(),
+        expiresAt: t.expiresAt.toISOString(),
+      })),
   }));
 
   // ─── Rules and their per-profile assignments ─────────────────────────────

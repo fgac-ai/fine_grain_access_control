@@ -196,6 +196,28 @@ docker compose -f test/qa-envs/openclaw/docker-compose.yml down
   gateway lets you extract the windows).
 - A8: fold into the Analytics Events queries below (same run window).
 
+## Capability: Temporary API Keys (→ capabilities/23_temporary_api_keys.md)
+
+- Fixtures per the capability doc: a ~2 MB attachment in USER_A's mailbox, and for A8 a
+  scratch profile + scratch connection (manual DCR token). Never revoke the baseline profile.
+- Mask minted keys in evidence (`sk_proxy_…<last4>`).
+- A1–A11: invoke `create_temporary_api_key` through the OpenClaw gateway; run the proxy
+  requests from inside the container (`docker exec … curl`) so the egress path is the real one.
+  Dashboard steps (A5, A7, A8) run in the built-in browser.
+- A12: run only if the OpenClaw agent has its exec/shell tool enabled (check the gateway
+  config first). Otherwise `skip` by design ("no code execution in this runtime"). A key minted
+  but unusable from the container is a `fail`, not a skip — that is the egress finding §7.34 (2)
+  exists to catch.
+- A13: fold into the Analytics Events queries below (same run window), plus monitoring §7.34 (1)–(2).
+
+## Capability: Large File Transfer (→ capabilities/24_large_file_transfer.md)
+
+- Fixtures: generate `qa-out/big.bin` (8 MB random), a ~1 MB PNG, and a ~6 MB attachment.
+  `qa-out/` is gitignored scratch; delete it after the run. Hash every file sent and received.
+- A1–A8: from inside the container, so the chunks take the real egress path.
+- A9: same exec-tool condition as capability 23 A12.
+- A10: fold into the Analytics Events queries below, plus monitoring §7.34 (3).
+
 ---
 
 ## Capability: Analytics Events (→ capabilities/16_analytics_events.md)

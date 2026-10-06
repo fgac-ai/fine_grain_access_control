@@ -4,8 +4,10 @@
 > `raw_google_api_call` for Anthropic Connectors Directory compliance
 > (no single tool may mix safe and unsafe HTTP methods). Classification lives
 > in `src/app/api/mcp/googleApiPolicy.ts`; enforcement must be identical to
-> the dedicated tools. Hosted-MCP interface only (the REST proxy at
-> `/api/proxy` is a separate surface).
+> the dedicated tools. Hosted-MCP interface, except A16, which pins that the
+> REST proxy at `/api/proxy` runs the SAME classifier (since 2026-10-03), and
+> A18, which pins the REST proxy's Drive guard to the same create/copy/no-rule
+> policy as A13–A15.
 >
 > Posture (2026-08-30): Gmail writes are ALLOW-BY-DEFAULT — anything the
 > gmail.modify grant can do is forwarded and stamped for analytics. The gates
@@ -294,3 +296,94 @@
   not write through Sheets) must not reappear in the opposite direction.
 - **Cleanup**: trash all five (reversible; leave them trashed).
 
+### A16: The REST proxy runs the shared classifier — nothing it misses reaches Google
+- Setup: a proxy key K for USER_A (dashboard → API keys) whose profile has a
+  send whitelist rule matching USER_B only; a sheet S exposed Read Only to K;
+  a Drive file id U with NO FGAC rule. All calls are `curl` against
+  `<base>/api/proxy/<path>` with `Authorization: Bearer <K>` — no MCP.
+- Calls:
+  1. `PATCH upload/drive/v3/files/<U>?uploadType=media` (text body), and the
+     same against `<S>` (Read Only).
+  2. `POST upload/gmail/v1/users/me/messages/send?uploadType=media`,
+     `Content-Type: message/rfc822`, body `To: <an address not on the
+     whitelist>` + subject + body.
+  3. `POST gmail/v1/users/me/messages/send` JSON `{"raw": …}` with
+     `To: <USER_B>` and `Bcc: <an address not on the whitelist>`.
+  4. `POST batch/gmail/v1` (any multipart body); `GET calendar/v3/users/me/calendarList`;
+     `GET oauth2/v2/userinfo`.
+  5. `DELETE gmail/v1/users/me/messages/<any id>`.
+  6. Controls: `GET gmail/v1/users/me/messages?maxResults=3`;
+     `GET drive/v3/files?pageSize=3`; `GET v4/spreadsheets/<S>/values/A1:B2`;
+     JSON `{"raw"}` send with `To: <USER_B>` only.
+- **Expected**: 1–5 all answer **403** with a JSON `error` (and `code` for the
+  classifier refusals: `raw_api_batch_unsupported`, `raw_api_family_unsupported`,
+  `raw_api_method_unsupported`; send refusals name the recipient), and NOTHING
+  is sent — USER_B and the outside address receive no mail, `<U>`/`<S>`
+  content is unchanged. `proxy_request` rows for 1–5 carry `outcome: denied`
+  and a `denial_code`. 6 all SUCCEED (the USER_B mail arrives).
+  Before 2026-10-03 every call in 1–5 was forwarded with the owner's token.
+- **Also expected**: `npx tsx scripts/test-rest-proxy-policy.ts` passes (part
+  of `npm run mcp:lint`).
+
+### A17: Recipients the parser cannot account for refuse the send, never ride along
+- Profile with a send whitelist that includes `USER_B_EMAIL`. Via
+  `google_api_modify` POST `gmail/v1/users/me/messages/send`, send three
+  base64url `raw` messages, each with `To: <USER_B_EMAIL>` plus ONE extra
+  recipient the address regex cannot parse: (a) `Bcc: "qa hidden"@example.com`
+  (quoted local part), (b) `Cc: qa@[192.0.2.1]` (domain literal),
+  (c) `Bcc : qa-hidden@example.com` (obsolete space-before-colon header).
+- **Expected**: (a) and (b) are DENIED with the could-not-determine-recipients
+  message and `denial_code: 'recipients_undetermined'`; (c) is DENIED as
+  unauthorized-recipient naming `qa-hidden@example.com` (the header is now
+  scanned). Nothing is sent in any case — confirm in USER_B's inbox that no
+  message arrived. Before 2026-10-03 all three were SENT: the unparsed
+  recipient was dropped and the whitelisted `To` carried the call.
+- Then create a draft whose raw message is (a), and call
+  `gmail/v1/users/me/drafts/send` with `{"id":"<draftId>"}` — DENIED, no
+  approval link, nothing sent (drafts/send fails closed on either side of
+  its stored-draft ∪ inline-message union).
+- The parser forms (UTF-8/IDN, encoded-words, bare-CR, Resent-*, duplicate
+  JSON `raw` keys) are unit-tested in `scripts/test-google-api-policy.ts`;
+  this assertion proves the route maps the parser's null to a refusal.
+
+### A18: The REST proxy grants and gates Drive creates exactly like A13–A15 (per-file model)
+Regression for 2026-10-05: with the Drive tree flag OFF, the REST proxy wrote
+no rule for files the key created, so its per-file guard then denied every
+id-addressed call on the agent's OWN new spreadsheet as "not exposed", and it
+counted `files/{id}/copy` as a WRITE on the source (a Read Only source could
+not be copied — the MCP route allows it). Run as a user WITHOUT the
+`drive_tree` flag (USER_B, or USER_A with the flag off), with the profile's
+`sk_proxy_` bearer, against sheet S (Read & Write rule), sheet R (Read Only
+rule) and sheet B (Blocked rule) as in A14.
+- Calls (all `/api/proxy/…`):
+  1. `POST drive/v3/files` `{"name":"QA rest sheet","mimeType":"application/vnd.google-apps.spreadsheet"}`;
+     then `PATCH drive/v3/files/<new id>` `{"name":"QA rest sheet renamed"}`
+     and `PUT v4/spreadsheets/<new id>/values/A1?valueInputOption=RAW` `{"values":[["ok"]]}`.
+  2. `POST drive/v3/files/<R>/copy` `{"name":"QA rest copy of R"}`; then
+     `PATCH drive/v3/files/<copy id>` `{"name":"QA rest copy renamed"}`.
+  3. `POST drive/v3/files/<B>/copy` and `POST drive/v3/files/<never-picked sheet>/copy`.
+  4. `POST drive/v3/files` `{"name":"QA rest note","mimeType":"text/plain"}`;
+     then `PATCH drive/v3/files/<new id>` `{"name":"QA rest note renamed"}`.
+  5. `PATCH drive/v3/files/<R>` `{"name":"x"}` and `PATCH upload/drive/v3/files/<R>?uploadType=media`
+     (any body).
+- **Expected**:
+  - 1: create 200; rename and values write 200 with no dashboard action; an
+    Read & Write rule (`sheet_read_write`, rule name "Agent-created: QA rest
+    sheet") assigned to the key appears — the dashboard lists it under the
+    file's title, not the rule name;
+    `drive_file_auto_granted{via:'rest_proxy', service:'sheets', drive_tree:false}`
+    fires; the rename's `proxy_request` carries `drive_file_gate: 'rule'`.
+  - 2: the copy SUCCEEDS (a copy is a READ of R) and the copy is Read & Write
+    for the key (rename 200, its own "Agent-created" rule).
+  - 3: both 403 — B "explicitly blocked", the never-picked source "not
+    exposed" — and Google is not called (no new file in Drive).
+  - 4: create 200 with NO rule written (FGAC has no rule type for text);
+    the rename 200 with `drive_file_gate: 'mime_other'` (forwarded under
+    drive.file, which treats an app-created file as writable).
+  - 5: both 403 "restricted to Read-Only" — the `upload/` media update of an
+    existing file is gated like any other id-addressed write (before
+    2026-10-05 the REST guard never looked at `upload/` paths).
+- **Also expected**: `npx tsx scripts/test-drive-tree-access.ts` passes — the
+  "per-file (flag off) model — REST/MCP parity" block pins the classifier and
+  the no-rule decision.
+- **Cleanup**: `PATCH {"trashed":true}` on the three created files.

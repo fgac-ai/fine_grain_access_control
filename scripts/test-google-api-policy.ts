@@ -3,7 +3,7 @@
  * (src/app/api/mcp/googleApiPolicy.ts). Run: npx tsx scripts/test-google-api-policy.ts
  */
 import {
-  classifyGoogleApiCall, canonicalizeGoogleApiPath, extractSendRecipients, extractDraftSendInfo,
+  classifyGoogleApiCall, canonicalizeGoogleApiPath, extractSendRecipients, extractRfc822Recipients, extractDraftSendInfo, draftSendRecipients,
   collectLabelIds, sheetsApprovalAction, docsApprovalAction, fileApprovalAction, extractDocsDocumentId, extractDriveFileKindId,
   templateGoogleApiPath, rawApiFamily, extractGoogleErrorReason,
 } from '../src/app/api/mcp/googleApiPolicy';
@@ -157,6 +157,12 @@ expect('drive files GET (list) stays passthrough — discovery is never gated',
 // Blocked spreadsheet could be trashed via PATCH {trashed:true} while these
 // were passthrough. Every call naming ONE file by id is drive_file so the
 // route can run the per-file guard the REST proxy has always had. ──
+expect('drive v2 file GET → drive_file (v2 is still served; was passthrough)',
+  classifyGoogleApiCall('drive/v2/files/1BxiM2doc-ID_x?alt=media', 'GET'),
+  (c: { kind: string; fileId?: string; isMutating?: boolean }) => c.kind === 'drive_file' && c.fileId === '1BxiM2doc-ID_x' && c.isMutating === false);
+expect('upload/ drive v2 media update → drive_file mutating',
+  classifyGoogleApiCall('upload/drive/v2/files/1BxiM2doc-ID_x?uploadType=media', 'PUT'),
+  (c: { kind: string; fileId?: string; isMutating?: boolean }) => c.kind === 'drive_file' && c.isMutating === true);
 expect('drive file PATCH (rename/trash) → drive_file mutating with id',
   classifyGoogleApiCall('drive/v3/files/1BxiM2doc-ID_x', 'PATCH'),
   (c: { kind: string; fileId?: string; isMutating?: boolean }) => c.kind === 'drive_file' && c.fileId === '1BxiM2doc-ID_x' && c.isMutating === true);
@@ -190,6 +196,24 @@ expect('drive files list with query stays passthrough',
 expect('drive about/changes/drives stay passthrough (not file-addressed)',
   [classifyGoogleApiCall('drive/v3/about?fields=user', 'GET'), classifyGoogleApiCall('drive/v3/changes/startPageToken', 'GET'), classifyGoogleApiCall('drive/v3/drives', 'GET')],
   (cs: Array<{ kind: string }>) => cs.every(c => c.kind === 'passthrough'));
+// Drive v2 addresses the same files (`files/{id}`, `?alt=media` downloads,
+// exportLinks) — before 2026-10-03 only v3 ids were gated, so a Blocked file
+// was readable through drive/v2/files/{id} as unknown-family passthrough.
+expect('drive v2 file GET → drive_file (same per-file gate as v3)',
+  classifyGoogleApiCall('drive/v2/files/1BxiM2doc-ID_x?alt=media', 'GET'),
+  (c: { kind: string; fileId?: string; isMutating?: boolean }) => c.kind === 'drive_file' && c.fileId === '1BxiM2doc-ID_x' && c.isMutating === false);
+expect('drive v2 file PATCH → drive_file mutating',
+  classifyGoogleApiCall('drive/v2/files/1BxiM2doc-ID_x', 'PATCH'),
+  (c: { kind: string; isMutating?: boolean }) => c.kind === 'drive_file' && c.isMutating === true);
+expect('drive v2 files/generateIds stays passthrough',
+  classifyGoogleApiCall('drive/v2/files/generateIds', 'GET'),
+  (c: { kind: string }) => c.kind === 'passthrough');
+expect('trailing-slash listing is the listing, not a drive_file with an empty id',
+  classifyGoogleApiCall('drive/v3/files/?q=x', 'GET'),
+  (c: { kind: string }) => c.kind === 'passthrough');
+expect('doubled slash before an id still gates that id',
+  classifyGoogleApiCall('drive/v3/files//1BxiM2doc-ID_x', 'GET'),
+  (c: { kind: string; fileId?: string }) => c.kind === 'drive_file' && c.fileId === '1BxiM2doc-ID_x');
 expect('copy still wins over drive_file (more specific)',
   classifyGoogleApiCall('drive/v3/files/1BxiM2doc-ID_x/copy', 'POST'),
   (c: { kind: string }) => c.kind === 'drive_copy');
@@ -311,6 +335,105 @@ const foldedRaw = Buffer.from(
 expect('unfolds continuation lines',
   extractSendRecipients({ raw: foldedRaw }),
   (r: string[] | null) => !!r && r.includes('bob@example.org'));
+
+// ── Fail closed (adversarial review 2026-10-03). Every case pairs the hidden
+// recipient with an ordinary whitelisted address: before the fix the hidden
+// one was DROPPED and the list still non-null, so the whitelist passed and
+// the hidden recipient got the mail. Any at-sign in a recipient header that
+// is not inside a cleanly parsed address must make the list undeterminable.
+console.log('extractRfc822Recipients (fail closed):');
+const msg = (headers: string) => `${headers}\r\nSubject: s\r\n\r\nbody`;
+const undetermined = (r: string[] | null) => r === null;
+const hiddenRecipientForms: Array<[string, string]> = [
+  ['quoted local part', 'To: alice@example.com\r\nBcc: "a b"@example.com'],
+  ['quoted local part, same line', 'To: alice@example.com, "evil x"@example.com'],
+  ['domain literal', 'To: alice@example.com\r\nCc: user@[192.0.2.1]'],
+  ['IPv6 domain literal', 'To: alice@example.com, user@[IPv6:2001:db8::1]'],
+  ['UTF-8 local part and IDN domain', 'To: alice@example.com\r\nBcc: 用户@例子.广告'],
+  ['IDN domain only', 'To: alice@example.com, bob@exämple.com'],
+  ['partial match on a non-ASCII local part', 'To: alice@example.com, ü-alice@example.com'],
+  ['partial match on a trailing domain char', 'To: alice@example.com, bob@example.com_x'],
+  ['trailing dot domain', 'To: alice@example.com, bob@example.com.'],
+  ['full-width at-sign', 'To: alice@example.com, bob＠example.com'],
+  ['obsolete header syntax: space before colon', 'To: alice@example.com\r\nBcc : "a b"@example.com'],
+  ['obsolete header syntax: tab before colon', 'To: alice@example.com\r\nCC\t: user@[192.0.2.1]'],
+  ['Resent-Bcc header', 'To: alice@example.com\r\nResent-Bcc: "a b"@example.com'],
+  ['RFC 2047 encoded-word hiding an address',
+    `To: alice@example.com, =?utf-8?b?${Buffer.from('evil@example.com').toString('base64')}?=`],
+  ['RFC 2047 Q-encoded at-sign', 'To: alice@example.com, =?utf-8?q?evil=40example.com?='],
+];
+for (const [name, headers] of hiddenRecipientForms) {
+  expect(`${name} → undetermined (not dropped)`, extractRfc822Recipients(msg(headers)), undetermined);
+  expect(`${name} via {raw} → undetermined`,
+    extractSendRecipients({ raw: Buffer.from(msg(headers)).toString('base64url') }), undetermined);
+}
+// Header spellings that WERE skipped entirely: the hidden recipient is an
+// ordinary address, so the fix must parse it (and the whitelist then checks it).
+const scannedHeaderForms: Array<[string, string]> = [
+  ['obsolete header syntax: space before colon', 'To: alice@example.com\r\nBcc : evil@example.com'],
+  ['leading whitespace on the first header line', ' Bcc: evil@example.com\r\nTo: alice@example.com'],
+  ['bare-CR line break before a Bcc header', 'To: alice@example.com\r\nSubject: hi\rBcc: evil@example.com'],
+  ['bare-LF line break before a Bcc header', 'To: alice@example.com\r\nX-Note: hi\nBcc: evil@example.com'],
+  ['Resent-To header', 'To: alice@example.com\r\nResent-To: evil@example.com'],
+  ['folded header name', 'To: alice@example.com\r\nBcc\r\n : evil@example.com'],
+];
+for (const [name, headers] of scannedHeaderForms) {
+  expect(`${name} → hidden recipient parsed`, extractRfc822Recipients(msg(headers)),
+    (r: string[] | null) => !!r && r.includes('alice@example.com') && r.includes('evil@example.com'));
+}
+// Ordinary forms must keep parsing exactly as before.
+expect('display names, angle brackets, comments, groups still parse',
+  extractRfc822Recipients(msg('To: "Smith, Alice" <alice@example.com>, Bob <bob@example.com> (work)\r\nCc: team: carol@example.com, dave@example.com;\r\nBcc: undisclosed-recipients:;')),
+  (r: string[] | null) => !!r && ['alice@example.com', 'bob@example.com', 'carol@example.com', 'dave@example.com']
+    .every(a => r.includes(a)) && r.length === 4);
+expect('an address in a quoted display name is still checked (fail closed, unchanged)',
+  extractRfc822Recipients(msg('To: "evil@example.com" <alice@example.com>')),
+  (r: string[] | null) => !!r && r.includes('evil@example.com') && r.includes('alice@example.com'));
+expect('an at-sign only in non-recipient headers or the body is ignored',
+  extractRfc822Recipients('To: alice@example.com\r\nFrom: "a b"@example.com\r\nSubject: mail "x y"@example.com\r\n\r\nuser@[192.0.2.1]'),
+  (r: string[] | null) => !!r && r.length === 1 && r[0] === 'alice@example.com');
+expect('encoded-word display name without an at-sign still parses',
+  extractRfc822Recipients(msg('To: =?utf-8?q?J=C3=B6rg?= <alice@example.com>')),
+  (r: string[] | null) => !!r && r.length === 1 && r[0] === 'alice@example.com');
+expect('group-only To with no address → undetermined (unchanged)',
+  extractRfc822Recipients(msg('To: undisclosed-recipients:;')), undetermined);
+
+console.log('extractSendRecipients (JSON raw, fail closed):');
+const benignRaw = Buffer.from(msg('To: alice@example.com')).toString('base64url');
+const evilRaw = Buffer.from(msg('To: evil@example.com')).toString('base64url');
+expect('duplicate "raw" keys → undetermined (Google may honour the other one)',
+  extractSendRecipients(`{"raw":"${benignRaw}","raw":"${evilRaw}"}`), undetermined);
+expect('duplicate "raw" key spelled with a unicode escape → undetermined',
+  extractSendRecipients(`{"raw":"${benignRaw}","r\\u0061w":"${evilRaw}"}`), undetermined);
+expect('single "raw" key with other fields still parses',
+  extractSendRecipients(`{"threadId":"t1","raw":"${benignRaw}"}`),
+  (r: string[] | null) => !!r && r.length === 1 && r[0] === 'alice@example.com');
+
+console.log('draftSendRecipients (drafts/send union, fail closed):');
+const okDraft = Buffer.from(msg('To: alice@example.com')).toString('base64url');
+const hiddenDraft = Buffer.from(msg('To: alice@example.com\r\nBcc: "a b"@example.com')).toString('base64url');
+expect('stored draft unparseable + clean inline message → undetermined',
+  draftSendRecipients(hiddenDraft, extractDraftSendInfo({ id: 'r1', message: { raw: okDraft } })), undetermined);
+expect('clean stored draft + unparseable inline message → undetermined',
+  draftSendRecipients(okDraft, extractDraftSendInfo({ id: 'r1', message: { raw: hiddenDraft } })), undetermined);
+expect('clean stored draft, no inline message → its recipients',
+  draftSendRecipients(okDraft, extractDraftSendInfo({ id: 'r1' })),
+  (r: string[] | null) => !!r && r.length === 1 && r[0] === 'alice@example.com');
+expect('both clean → union, deduplicated',
+  draftSendRecipients(okDraft, extractDraftSendInfo({ id: 'r1', message: { raw: benignRaw } })),
+  (r: string[] | null) => !!r && r.length === 1 && r[0] === 'alice@example.com');
+expect('inline message without raw → undetermined (Google may still rewrite the draft)',
+  draftSendRecipients(okDraft, extractDraftSendInfo({ id: 'r1', message: { threadId: 't1' } })), undetermined);
+expect('draft body with a repeated id → no draft id (fetched draft ≠ sent draft)',
+  extractDraftSendInfo('{"id":"r-benign","id":"r-evil"}'),
+  (d: { draftId: string | null }) => d.draftId === null);
+expect('draft body with a repeated nested raw → undetermined',
+  draftSendRecipients(okDraft, extractDraftSendInfo(`{"id":"r1","message":{"raw":"${benignRaw}","raw":"${evilRaw}"}}`)), undetermined);
+expect('same key in sibling objects is not a duplicate',
+  extractDraftSendInfo(`{"id":"r1","message":{"id":"m1","raw":"${benignRaw}"}}`),
+  (d: { draftId: string | null; bodyRecipients: string[] | null }) => d.draftId === 'r1' && !!d.bodyRecipients);
+expect('stored draft raw missing → undetermined',
+  draftSendRecipients(undefined, extractDraftSendInfo({ id: 'r1' })), undetermined);
 
 console.log('extractDraftSendInfo:');
 expect('draft id alone',
@@ -457,6 +580,24 @@ expect('leading slash stripped, query preserved',
 expect('idempotent on the canonical spelling',
   canonicalizeGoogleApiPath('drive/v3/files/1Abc'),
   (p: string) => p === 'drive/v3/files/1Abc');
+// Drive paths are collapsed to one spelling so classification, the tree
+// engine's listing filter and the forwarded URL all see the same path
+// (2026-10-03: `drive/v3/files/` skipped the filter and reached Google).
+expect('trailing slash on a Drive collection is dropped, query preserved',
+  canonicalizeGoogleApiPath('drive/v3/files/?q=name'),
+  (p: string) => p === 'drive/v3/files?q=name');
+expect('doubled slashes inside a Drive path are collapsed',
+  canonicalizeGoogleApiPath('drive//v3/files//1Abc/'),
+  (p: string) => p === 'drive/v3/files/1Abc');
+expect('bare spelling with a trailing slash is canonicalised too',
+  canonicalizeGoogleApiPath('v3/files/'),
+  (p: string) => p === 'drive/v3/files');
+expect('upload/drive paths are collapsed the same way',
+  canonicalizeGoogleApiPath('upload/drive/v3/files/?uploadType=media'),
+  (p: string) => p === 'upload/drive/v3/files?uploadType=media');
+expect('non-Drive paths keep their slashes (Gmail/Sheets untouched)',
+  canonicalizeGoogleApiPath('gmail/v1/users/me/messages/'),
+  (p: string) => p === 'gmail/v1/users/me/messages/');
 expect('a full googleapis.com URL (what agents send under `url`) is reduced to its path',
   canonicalizeGoogleApiPath('https://gmail.googleapis.com/gmail/v1/users/me/messages?q=is%3Aunread'),
   (p: string) => p === 'gmail/v1/users/me/messages?q=is%3Aunread');

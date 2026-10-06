@@ -224,6 +224,38 @@ export function driveDenialText(
   return `🚫 Access Denied: '${fileLabel}' is not allowed for this agent profile — its default is "${driveDefaultLabel(driveDefault)}" and no folder or file setting reaches it. ${DASHBOARD_PROFILE_HINT} ${dashboardUrl}`;
 }
 
+// ─── Full-scope tokens outside the engine ───────────────────────────────────
+
+/**
+ * True when the live token carries the full `drive` scope but the tree
+ * engine is NOT confining it: a delegated mailbox whose owner granted the
+ * scope (the engine runs only for the key owner's own mailbox), or the
+ * owner's own mailbox after the flag is switched off. The legacy per-file
+ * path assumes `drive.file` — Google hiding every unpicked file — so in this
+ * state its Drive listings and `mime_other` reads would see the whole Drive.
+ * Callers fail closed on both.
+ */
+export function driveScopeUnconfined(ctx: { active: boolean; hasDriveFullScope: boolean } | undefined): boolean {
+  return !!ctx && !ctx.active && ctx.hasDriveFullScope;
+}
+
+/** A Drive API path (`drive/v2/…`, `drive/v3/…`, their `upload/` twins), any resource. */
+export function isDriveApiPath(path: string): boolean {
+  return /^(upload\/)?drive\/v[23](\/|\?|#|$)/i.test(path.replace(/^\/+/, ''));
+}
+
+/** Denial for a Drive listing or a non-Sheets/Docs/Slides file on an unconfined full-scope token. */
+export function unconfinedDriveDenialText(o: { targetEmail: string; delegated: boolean; what: 'listing' | 'file'; fileId?: string }): string {
+  const subject = o.what === 'listing'
+    ? 'Google Drive file listing'
+    : `Drive file '${o.fileId}' (not a Sheet, Doc, or Slides deck)`;
+  const why = o.delegated
+    ? `the account owner's Google grant covers their whole Drive, and their folder-based access settings do not apply to mailboxes shared with other people's agents`
+    : `the Google grant covers the whole Drive, but folder-based Drive access is not enabled for this account`;
+  return `🚫 Access Denied: ${subject} on '${o.targetEmail}' is refused — ${why}, so FGAC cannot confine it and fails closed. ` +
+    `STOP — retrying will NOT help. Sheets, Docs and Slides exposed to this key still work by id (get_my_permissions lists them).`;
+}
+
 // ─── Drive listing (files.list) filtering ───────────────────────────────────
 
 /** Fields every listed file must carry so its lineage can be resolved. */
@@ -277,3 +309,102 @@ export function nodeKindFor(meta: { id: string; mimeType?: string; driveId?: str
 
 export const SHARED_WITH_ME_NODE: LineageNode = { id: SHARED_WITH_ME_ID, name: 'Shared with me', kind: 'shared_with_me' };
 export const SHARED_DRIVES_NODE: LineageNode = { id: SHARED_DRIVES_ID, name: 'Shared drives', kind: 'shared_drives' };
+
+// ─── Drive discovery under the tree engine ───────────────────────────────────
+
+/**
+ * What the tree engine does with a Drive call that is not addressed to one
+ * file by id. With the full `drive` scope every listing-shaped response can
+ * name files the profile Blocks (names, thumbnailLink, exportLinks), so
+ * discovery is fail-closed: `files.list` and `drives.list` are filtered, a
+ * shared drive fetched by id is gated on its own setting, a short allowlist of
+ * endpoints that name no file passes, and every other read is refused with
+ * guidance to use `drive/v3/files`. Before 2026-10-03 only the exact path
+ * `drive/v3/files` was filtered: `drive/v2/files`, `drive/v3/files/`, changes
+ * (v2/v3), v2 folder children and shared-drive listings passed through.
+ *
+ * `null` = not a Drive discovery call (another family, a write, or an
+ * id-addressed file call, which the per-file guards gate). Both API surfaces
+ * (MCP google_api_get, REST proxy) call this, so they cannot drift.
+ */
+export type DriveDiscovery =
+  | { kind: 'filter_files' }
+  | { kind: 'filter_drives' }
+  | { kind: 'shared_drive'; driveId: string }
+  | { kind: 'allow' }
+  | { kind: 'refuse'; endpoint: string };
+
+/** Drive endpoints that never name a file (account info, change cursors, id minting). */
+const DISCOVERY_ALLOW = [
+  /^v[23]\/about$/,
+  /^v[23]\/changes\/startpagetoken$/,
+  /^v[23]\/apps(\/[^/]+)?$/,
+  /^v[23]\/files\/generateids$/,
+];
+
+export function classifyDriveDiscovery(rawPath: string, method: string): DriveDiscovery | null {
+  const path = rawPath.split(/[?#]/)[0].replace(/\/{2,}/g, '/').replace(/^\/+|\/+$/g, '');
+  // Bare `v3/files` is how agents often spell Drive; canonicalisation adds the
+  // prefix before forwarding, so classify it the same way.
+  const withPrefix = /^v[23]\//i.test(path) ? `drive/${path}` : path;
+  if (!/^drive\//i.test(withPrefix)) return null;
+  const rest = withPrefix.slice('drive/'.length);
+  const lower = rest.toLowerCase();
+  const endpoint = `drive/${rest}`;
+  const m = method.toUpperCase();
+
+  // A push channel over the changes feed delivers the same unfiltered stream.
+  if (/^v[23]\/changes\/watch$/.test(lower)) return { kind: 'refuse', endpoint };
+  if (m !== 'GET' && m !== 'HEAD') return null;
+
+  if (lower === 'v3/files') return { kind: 'filter_files' };
+  if (lower === 'v3/drives') return { kind: 'filter_drives' };
+  const drive = rest.match(/^v3\/drives\/([^/]+)$/);
+  if (drive) return { kind: 'shared_drive', driveId: decodeURIComponent(drive[1]) };
+  if (DISCOVERY_ALLOW.some(re => re.test(lower))) return { kind: 'allow' };
+  // v2 lists a folder's children by id (childReference) — a listing, not a
+  // read of the folder.
+  if (/^v2\/files\/[^/]+\/children(\/|$)/.test(lower)) return { kind: 'refuse', endpoint };
+  // Any other id-addressed file call is the per-file guards' job.
+  if (/^v[23]\/files\/[^/]+/.test(lower)) return null;
+  return { kind: 'refuse', endpoint };
+}
+
+/** Denial text for a refused discovery read: what is refused, why, and the filtered alternative. */
+export function driveDiscoveryRefusal(endpoint: string): string {
+  const children = /\/children(\/|$)/.test(endpoint);
+  const changes = /\/changes/.test(endpoint);
+  const alt = children
+    ? 'To list a folder\'s contents, call GET drive/v3/files?q=\'<folderId>\' in parents instead.'
+    : changes
+      ? 'To find recently changed files, call GET drive/v3/files?orderBy=modifiedTime desc (optionally q=modifiedTime > \'<RFC 3339 time>\') instead.'
+      : 'List or search files with GET drive/v3/files (q, orderBy, corpora, driveId and includeItemsFromAllDrives all work there) instead.';
+  return `Access Denied: ${endpoint} is not available while this agent profile uses folder-based Google Drive access — its results are not filtered by the profile's Blocked folders and files. ${alt} Blocked files are withheld from that listing.`;
+}
+
+/** Effective access of a shared drive itself (its own setting, then "Shared drives", then the default). */
+export function sharedDriveAccess(
+  driveId: string,
+  name: string,
+  settings: Map<string, DriveSetting[]>,
+  driveDefault: DriveDefault,
+): DriveAccess {
+  return effectiveDriveAccess([{ id: driveId, name, kind: 'shared_drive' }, SHARED_DRIVES_NODE], settings, driveDefault).access;
+}
+
+/** Denial text for a shared drive fetched by id that the profile Blocks. */
+export function sharedDriveBlockedText(driveId: string): string {
+  return `Access Denied: shared drive '${driveId}' is Blocked for this agent profile, so its details and files are withheld. ${DASHBOARD_PROFILE_HINT}`;
+}
+
+/** Withhold Blocked shared drives (and entries with no id) from a drives.list page. */
+export function filterSharedDrives<T extends { drives?: unknown[] }>(
+  data: T,
+  settings: Map<string, DriveSetting[]>,
+  driveDefault: DriveDefault,
+): T & { drives: Array<{ id?: string; name?: string }>; withheld: number } {
+  const all = (Array.isArray(data.drives) ? data.drives : []) as Array<{ id?: string; name?: string }>;
+  const { files: drives, withheld } = partitionListing(all, d =>
+    typeof d?.id === 'string' && d.id ? sharedDriveAccess(d.id, d.name ?? '', settings, driveDefault) : 'block');
+  return { ...data, drives, withheld };
+}

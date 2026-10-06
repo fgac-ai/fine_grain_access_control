@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Card, CardHeader, Badge, EmptyState, buttonPrimary, buttonSecondary, buttonDanger } from '@/components/ui';
-import { assignRulesToKey, unassignRuleFromKey, revokeProxyKey, setSheetRulePermission, exposeFilesFromPicker, applyRecommendedSecurityRules, enableSendToAnyone } from './actions';
+import { assignRulesToKey, unassignRuleFromKey, revokeProxyKey, revokeTemporaryKey, setSheetRulePermission, exposeFilesFromPicker, applyRecommendedSecurityRules, enableSendToAnyone } from './actions';
 import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, kindForService, type DriveFileKind } from '@/lib/driveFileKinds';
 import { useGooglePicker, PickedSheet } from './useGooglePicker';
 import { DriveAccessCard } from './DriveAccessCard';
@@ -34,6 +34,17 @@ export interface Profile {
   driveDefault: 'read' | 'write' | 'explicit';
   /** A quick option was saved — the profile uses the tree model (losing the scope then means "re-enable"). */
   driveConfigured: boolean;
+  /** Live short-lived keys agents minted for scripts (create_temporary_api_key). */
+  temporaryKeys: TemporaryKey[];
+}
+
+export interface TemporaryKey {
+  id: string;
+  last4: string;
+  purpose: string;
+  agentName: string;
+  createdAt: string;
+  expiresAt: string;
 }
 
 export interface Rule {
@@ -265,6 +276,8 @@ export function AgentProfilesView({
                 loading={connectionsLoading}
                 onChanged={fetchConnections}
               />
+
+              {active.temporaryKeys.length > 0 && <TemporaryKeysCard keys={active.temporaryKeys} />}
 
               <GmailAccessCard
                 profile={active}
@@ -1296,6 +1309,68 @@ function CopyRow({ value, display }: { value: string; display?: string }) {
         {copied ? 'Copied' : 'Copy'}
       </span>
     </button>
+  );
+}
+
+const TEMP_KEY_PURPOSE_LABEL: Record<string, string> = {
+  upload: 'Uploading a file',
+  download: 'Downloading a file',
+  send_attachment: 'Sending an email with an attachment',
+  bulk_calls: 'Scripted calls',
+  other: 'Scripted calls',
+};
+
+/**
+ * Short-lived keys an agent created for a script (large uploads/downloads).
+ * Each carries exactly this profile's permissions and dies on its own within
+ * an hour; Revoke ends it now. Only live keys are listed.
+ */
+function TemporaryKeysCard({ keys }: { keys: TemporaryKey[] }) {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [revoked, setRevoked] = useState<Set<string>>(new Set());
+  const visible = keys.filter(k => !revoked.has(k.id));
+  if (visible.length === 0) return null;
+
+  const revoke = async (key: TemporaryKey) => {
+    if (!window.confirm(`Revoke the temporary key ending ${key.last4}? Scripts using it stop working immediately.`)) return;
+    setBusyId(key.id);
+    try {
+      await revokeTemporaryKey(key.id);
+      setRevoked(prev => new Set(prev).add(key.id));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader
+        title="Temporary keys"
+        subtitle="Short-lived keys your agents created to move large files. They have this profile's permissions and expire on their own."
+      />
+      <div className="px-5 pb-5 space-y-2.5">
+        {visible.map(k => (
+          <div key={k.id} className="rounded-sm border border-border bg-card p-3.5" data-testid="temporary-key-row">
+            <div className="flex items-center justify-between gap-2">
+              <span className="min-w-0 truncate text-[13px] font-semibold text-foreground">{k.agentName}</span>
+              <span className="shrink-0 font-mono text-[11px] text-muted-foreground">…{k.last4}</span>
+            </div>
+            <div className="mt-2 flex items-center justify-between gap-2">
+              <span className="text-[11px] text-subtle">
+                {TEMP_KEY_PURPOSE_LABEL[k.purpose] ?? 'Scripted calls'} · expires {new Date(k.expiresAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+              </span>
+              <button
+                className="text-[11px] font-semibold text-muted-foreground hover:text-destructive disabled:opacity-50"
+                disabled={busyId === k.id}
+                onClick={() => revoke(k)}
+              >
+                {busyId === k.id ? '…' : 'Revoke'}
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </Card>
   );
 }
 

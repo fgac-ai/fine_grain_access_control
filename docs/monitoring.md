@@ -3180,8 +3180,8 @@ signal (`Anthropic/Toolbox` = via the directory), the LATEST is the product.
 claude.ai. It is exact for "claude.ai vs everything else" (no inspector-only
 registration exists) and over-counts claude.ai where a user also drove the
 same registration from Claude Code (79 of the 135 inspector registrations);
-the CLI's own calls are separable by user agent, remote Claude Code on the
-`Claude-User` agent is not.
+the CLI's own calls are separable by user agent, the Claude Code harness on
+the `Claude-User` agent is not (revision of 2026-10-01 below).
 
 ```sql
 -- 7.32 product expression, valid on both sides of the deploy. The Grok and
@@ -3227,27 +3227,139 @@ WHERE event = 'mcp_connection_client_identified' AND properties.environment = 'p
 GROUP BY day, transition, from_name, to_name ORDER BY day, n DESC
 ```
 
+**Revision 2026-10-01 (PR #175, `docs/implementation_plans/mcp-client-name-shared-registrations_v1.md`): on the proxy user agent the claude.ai vs Claude Code split is a latest-handshake proxy, not a measurement.** The first half-day after the deploy read as a reversal: 2,415 `$mcp_tool_call` rows labelled `claude-code` on the `Claude-User` agent against 73 `Anthropic/ClaudeAI`, where the week before ran 2,000–7,000 claude.ai-family calls a day against under 130 on the CLI agent. Established before changing anything:
+
+1. **`claude-code` on `Claude-User` is the Claude Code harness using the claude.ai-managed connector — the CLI included.** Its `client_version` is the harness version (2.1.280 → 2.1.286 over 09-22 → 10-01), rolling forward daily in lockstep: each day 80–118 people handshake on the newest version and the whole population has moved within two days (an auto-updating install base). The same version numbers appear on the CLI's own `claude-code/<ver> (claude-desktop, agent-sdk/0.3.x)` agent, which over 21 days is ONE person's direct registration (`claude mcp add`); every other Claude Code handshake and call arrives through Anthropic's proxy as `Claude-User`. `Anthropic/ClaudeAI` is always version `1.0.0`. The pinned stragglers (one person each on 2.1.218, 2.1.259, 2.1.263) are the 7.16 loop clients: 2.1.259 alone handshook 239 times in 48 h on one registration with no calls. Cowork, the desktop Code tab, Claude Code on the web and the CLI all run this harness and are not separable from one another.
+2. **Shared registrations carry 91% of proxied calls.** Week 09-24 → 10-01, `Claude-User` registrations by the handshake names they reported: 163 shared (both names; 34,768 calls), 53 claude.ai-only (3,310 calls), 3 harness-only (4 calls). The per-product split is exact only on the single-product 9%.
+3. **The rule does what it says.** Post-deploy, 2,467 of 2,476 proxied calls carry exactly the name of the latest preceding product handshake on their registration (the rest: six `Anthropic/Toolbox` rows on registrations with no handshake since the deploy, three third-party names). `mcp_connection_client_identified` in the first eleven hours: 77 registrations switched product 162 times — 35 once, 16 twice, 26 three or more; 42 in both directions. Gaps between consecutive switches on one registration: p25 11 min, median 63 min, p75 2.6 h; 20 of the 85 follow-on switches within 10 min.
+4. **The post-deploy mix is what the latest handshake always said; the deploy exposed it, it did not create it.** Attributing every proxied call to its nearest preceding handshake (7.32e) gives the harness 91% on 09-27, 87% on 09-28, 67% on 09-29, 86% on 09-30 and 97% on 10-01 — the same shape on both sides of the deploy, while the row labels on the pre-deploy days read 98% claude.ai-family (inspector plus ClaudeAI, 7.32a). Independently, the 14 registrations with 100+ harness handshakes that week (the 7.16 automation loops — Claude Code processes by construction) carried 17,475 of the week's 38,082 proxied calls.
+5. **No per-request signal can make the per-call split exact.** A tool call carries the user agent (`Claude-User` for both) and the `MCP-Protocol-Version` header, and the one event that records that header (`mcp_transport_rejected`) shows the same value, `2026-07-28`, from claude.ai's discovery probes and from the desktop CLI. Only the ambiguity is measurable: 75 of 2,476 post-deploy calls (3%) followed handshakes from BOTH products within ten minutes; 1,003 (40%) had neither within ten minutes and rest on an older handshake.
+
+Rejected on this evidence: damping a switch when the other product handshook minutes earlier re-labels at most the 3% ambiguous calls, with nothing to say which way is right; freezing a registration as "shared" and stamping a family label discards a split that is consistent at the registration level and the 9% that is exact; per-product timestamps labelled by the nearer preceding handshake is the current rule under another name (finding 3). The code is unchanged; this revision is the reading rule and the queries that keep it honest.
+
+**Reading rule (from 2026-10-01).** On `$mcp_tool_call`, report the Anthropic family as buckets with their precision, never as two separable products:
+
+| bucket | how to recognise it | precision |
+| --- | --- | --- |
+| Claude Code CLI, direct registration | `user_agent LIKE 'claude-code/%'` | exact, per request |
+| claude.ai | `Claude-User`, and the registration reported only `Anthropic/ClaudeAI` (or the inspector) in the window | exact |
+| Claude Code harness via the managed connector (CLI, desktop Code tab, web, Cowork) | `Claude-User`, and the registration reported only `claude-code` | exact |
+| shared registration | `Claude-User`, both names in the window | `client_name` is the latest handshake — a proxy. Report as "claude.ai-family, split by latest handshake", with 7.32e's within-10-minute ambiguity |
+
+Say "Claude Code harness", never "Claude Code remote": the harness bucket holds the CLI whenever its connector is claude.ai-managed. Anthropic's directory dashboard computes its own per-product numbers on the proxy side; this split is internal, and its one job is to stop a review from reading a label flip as a product-mix change. Pre-deploy rows keep the inspector fold above; their per-product split is the same proxy with the first handshake pinned instead of the latest, so compare weeks across the deploy with 7.32e (handshake-based, valid on both sides), never with raw labels.
+
 ```sql
--- 7.32c — the per-product split the directory-parity review wants, using the
--- fold so the pre-deploy weeks are comparable.
-SELECT toStartOfWeek(timestamp, 1) AS week,
-       multiIf(properties.user_agent LIKE 'grok-connectors-manager/%'
-                 OR properties.user_agent = 'Grok'
-                 OR properties.client_name IN ('connectors-manager', 'grok-validator'), 'Grok',
-               properties.user_agent LIKE 'Cursor/%' OR properties.user_agent LIKE 'CursorServer/%'
-                 OR properties.client_name IN ('Cursor', 'Cursor MCP Availability'),   'Cursor',
-               properties.user_agent LIKE 'claude-code/%',                             'claude-code',
-               properties.client_name = 'Anthropic/Toolbox',                           'Anthropic/ClaudeAI',
-               properties.client_name) AS product,
-       count() AS calls, uniq(person_id) AS callers
-FROM events
-WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
-  AND timestamp > now() - INTERVAL 8 WEEK
-GROUP BY week, product ORDER BY week, calls DESC
+-- 7.32c — the family split, with the exact and proxy portions separated.
+-- Registration kind comes from the handshake names each (person, client_id)
+-- reported in the window; shared registrations are labelled by the latest
+-- handshake (the row rule) and reported as a proxy. The Grok and Cursor arms
+-- are 7.21f's (same strings; keep the two in step). Week to 2026-10-01:
+-- shared→Toolbox 20,251 (pre-deploy rows), shared→ClaudeAI 10,696,
+-- claude.ai exact 3,200, shared→claude-code 2,695, CLI direct 203, harness
+-- exact 4.
+WITH reg AS (
+  SELECT person_id AS rpid, toString(properties.client_id) AS rcid,
+         countIf(toString(properties.client_name) = 'claude-code') > 0 AS has_cc,
+         countIf(toString(properties.client_name) = 'Anthropic/ClaudeAI') > 0 AS has_ai
+  FROM events
+  WHERE event = 'mcp_client_initialize' AND properties.environment = 'production'
+    AND properties.user_agent = 'Claude-User' AND timestamp > now() - INTERVAL 7 DAY
+  GROUP BY rpid, rcid
+), calls AS (
+  SELECT person_id AS cpid, toString(properties.client_id) AS ccid,
+         multiIf(properties.user_agent LIKE 'grok-connectors-manager/%' OR properties.user_agent = 'Grok'
+                   OR properties.client_name IN ('connectors-manager', 'grok-validator'), 'Grok',
+                 properties.user_agent LIKE 'Cursor/%' OR properties.user_agent LIKE 'CursorServer/%'
+                   OR properties.client_name IN ('Cursor', 'Cursor MCP Availability'),   'Cursor',
+                 properties.user_agent LIKE 'claude-code/%',                             'claude-code CLI (direct)',
+                 properties.user_agent = 'Claude-User',                                  'Claude-User',
+                 toString(properties.client_name)) AS family,
+         toString(properties.client_name) AS label, count() AS n
+  FROM events
+  WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
+    AND timestamp > now() - INTERVAL 7 DAY
+  GROUP BY cpid, ccid, family, label
+)
+SELECT multiIf(family != 'Claude-User', family,
+               has_cc AND has_ai, concat('Claude-User shared → ', label, ' (proxy)'),
+               has_ai,            'Claude-User claude.ai (exact)',
+               has_cc,            'Claude-User Claude Code harness (exact)',
+                                  'Claude-User no handshake in window') AS bucket,
+       sum(n) AS calls, uniq(cpid) AS callers
+FROM calls LEFT JOIN reg ON calls.cpid = reg.rpid AND calls.ccid = reg.rcid
+GROUP BY bucket ORDER BY calls DESC
+```
+
+```sql
+-- 7.32d — flip rate on shared registrations. A switch is one
+-- mcp_connection_client_identified with transition = 'product_switch'
+-- between the two Anthropic names; the gap is to the previous switch on the
+-- same registration (the first switch per registration has no gap and is
+-- not counted here). Baseline, first eleven hours after the deploy
+-- (2026-10-01): 42 registrations with a follow-on switch, 85 follow-on
+-- switches, median gap 63 min, 20 within 10 min.
+SELECT toDate(timestamp) AS day, uniq(conn) AS switching_registrations, count() AS follow_on_switches,
+       quantile(0.5)(gap_s) AS median_gap_s, countIf(gap_s <= 600) AS within_10m
+FROM (
+  SELECT timestamp, toString(properties.connection_id) AS conn,
+         toUnixTimestamp(timestamp) - lagInFrame(toUnixTimestamp(timestamp), 1, toUnixTimestamp(timestamp))
+           OVER (PARTITION BY toString(properties.connection_id) ORDER BY timestamp
+                 ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS gap_s
+  FROM events
+  WHERE event = 'mcp_connection_client_identified' AND properties.environment = 'production'
+    AND properties.transition = 'product_switch' AND timestamp > now() - INTERVAL 14 DAY
+    AND toString(properties.client_name) IN ('claude-code', 'Anthropic/ClaudeAI')
+    AND toString(properties.previous_client_name) IN ('claude-code', 'Anthropic/ClaudeAI')
+)
+WHERE gap_s > 0
+GROUP BY day ORDER BY day
+```
+
+```sql
+-- 7.32e — nearest-handshake attribution and its ambiguity, per day. Every
+-- proxied call is attributed to the product that handshook most recently on
+-- its registration (what the row rule stamps), bucketed by how stale that
+-- handshake was, with the count where BOTH products handshook within ten
+-- minutes (the calls no rule can place). Handshake-based, so valid on both
+-- sides of the deploy — this is the comparison that showed the post-deploy
+-- mix was not new. Harness share per day, 09-27 → 10-01: 91, 87, 67, 86, 97%.
+WITH hs AS (
+  SELECT person_id AS pid, toString(properties.client_id) AS cid,
+         groupArray((toUnixTimestamp(timestamp), toString(properties.client_name))) AS arr
+  FROM events
+  WHERE event = 'mcp_client_initialize' AND properties.user_agent = 'Claude-User'
+    AND toString(properties.client_name) IN ('claude-code', 'Anthropic/ClaudeAI')
+    AND timestamp > now() - INTERVAL 9 DAY
+  GROUP BY pid, cid
+), calls AS (
+  SELECT person_id AS pid, toString(properties.client_id) AS cid,
+         toUnixTimestamp(timestamp) AS t, toDate(timestamp) AS day
+  FROM events
+  WHERE event = '$mcp_tool_call' AND properties.environment = 'production'
+    AND properties.user_agent = 'Claude-User' AND timestamp > now() - INTERVAL 7 DAY
+)
+SELECT day,
+       if(last_cc > last_ai, 'Claude Code harness', if(last_ai > 0, 'claude.ai', 'no handshake')) AS nearest_handshake,
+       multiIf(gap < 0, 'none', gap <= 600, 'a_<=10m', gap <= 3600, 'b_<=1h', gap <= 21600, 'c_<=6h', 'd_>6h') AS staleness,
+       count() AS calls, uniq(pid) AS people,
+       countIf(last_cc > 0 AND last_ai > 0 AND t - last_cc <= 600 AND t - last_ai <= 600) AS both_within_10m
+FROM (
+  SELECT calls.day AS day, calls.pid AS pid, calls.t AS t,
+         arrayMax(arrayMap(x -> if(x.2 = 'claude-code' AND x.1 <= calls.t, x.1, 0), hs.arr)) AS last_cc,
+         arrayMax(arrayMap(x -> if(x.2 = 'Anthropic/ClaudeAI' AND x.1 <= calls.t, x.1, 0), hs.arr)) AS last_ai,
+         if(greatest(last_cc, last_ai) = 0, -1, calls.t - greatest(last_cc, last_ai)) AS gap
+  FROM calls LEFT JOIN hs ON calls.pid = hs.pid AND calls.cid = hs.cid
+)
+GROUP BY day, nearest_handshake, staleness ORDER BY day, calls DESC
 ```
 
 Healthy: 7.32a's `toolbox` column at zero a week after the deploy; 7.32b shows
-no transition whose `to_name` is `Anthropic/Toolbox` other than `first`.
+no transition whose `to_name` is `Anthropic/Toolbox` other than `first`;
+7.32e's `both_within_10m` stays in single-digit percent of the day's proxied
+calls (3% on 2026-10-01). A product-mix change is real only when 7.32c's
+EXACT buckets move, or when 7.32e's nearest-handshake mix moves on a day
+whose flip rate (7.32d) did not — a day where the raw labels swing and 7.32d
+jumps is shared registrations changing hands, not users changing products.
 
 **7.33 — Directory connections stop while everything else is green (the
 2026-09-27..30 gap).** Added 2026-10-01
@@ -3341,3 +3453,122 @@ sign-in and the OAuth consent page on fgac.ai (Clerk's `<OAuthConsent />`,
 Configure → Paths, and a `/sign-in` page), which moves the blind segment onto
 our Vercel logs and PostHog.
 
+
+**7.34 — Temporary API keys and large transfers.** Added 2026-10-03
+(`docs/implementation_plans/large-api-payload-options_v5.md`). Agents call
+`create_temporary_api_key` to get a short-lived `sk_proxy_tmp_` key, then a
+script moves the bytes through `/api/proxy`: streamed downloads, and
+resumable uploads in ≤ 4 MB chunks. Each `proxy_request` row from such a key
+carries `key_kind = 'temporary'` and `temp_key_id`; `proxy_key_id` stays the
+parent **profile** key, so per-profile dashboards keep working. Join a mint to
+its use on `temp_api_key_created.temp_key_id = proxy_request.temp_key_id`.
+Exclude the support profile's key and the QA accounts from external counts,
+as everywhere else.
+
+1. **Adoption**: mints per week, people, and the split by purpose and client.
+
+   ```sql
+   SELECT toStartOfWeek(timestamp) AS week, properties.purpose AS purpose,
+          properties.client_name AS client, count() AS mints, uniq(person_id) AS people,
+          countIf(properties.ttl_capped) AS asked_over_60
+   FROM events
+   WHERE event = 'temp_api_key_created' AND properties.environment = 'production'
+     AND timestamp > now() - INTERVAL 8 WEEK
+   GROUP BY week, purpose, client ORDER BY week DESC, mints DESC
+   ```
+
+2. **Minted but never used**: the share of keys with no proxy request at
+   all. The expected cause is sandbox egress: claude.ai's code execution
+   allows only allow-listed domains, so `fgac.ai` must be on the org's list.
+   A high never-used share concentrated on one `client_name` is that client's
+   egress wall, not a key bug; tell those users how to allow-list
+   `fgac.ai`.
+
+   ```sql
+   SELECT m.client, count() AS mints, countIf(u.calls = 0) AS never_used,
+          round(countIf(u.calls = 0) / count(), 2) AS never_used_share
+   FROM (SELECT properties.temp_key_id AS k, any(properties.client_name) AS client
+         FROM events WHERE event = 'temp_api_key_created' AND properties.environment = 'production'
+           AND timestamp > now() - INTERVAL 14 DAY GROUP BY k) AS m
+   LEFT JOIN (SELECT properties.temp_key_id AS k, count() AS calls
+              FROM events WHERE event = 'proxy_request' AND properties.key_kind = 'temporary'
+                AND timestamp > now() - INTERVAL 15 DAY GROUP BY k) AS u ON u.k = m.k
+   GROUP BY m.client ORDER BY mints DESC
+   ```
+   ClickHouse fills an unmatched LEFT JOIN with `0`, not NULL, so
+   `calls = 0` is the never-used test.
+
+3. **Stranded uploads**: sessions opened (`resumable_init`) with no
+   `upload_complete` within 24 h. A cluster right after `auth_failure_reason
+   = 'expired'` means agents are not re-minting and resuming, so the recipe's
+   resume step is not landing.
+
+   ```sql
+   SELECT properties.upload_id_hash AS upload, any(properties.service) AS service,
+          min(timestamp) AS opened, countIf(properties.upload_type = 'resumable_chunk') AS chunks,
+          countIf(properties.status = 403) AS refused_chunks, max(properties.upload_complete) AS completed
+   FROM events
+   WHERE event = 'proxy_request' AND properties.upload_id_hash != ''
+     AND properties.environment = 'production' AND timestamp > now() - INTERVAL 8 DAY
+   GROUP BY upload
+   HAVING completed != true AND opened < now() - INTERVAL 1 DAY
+   ORDER BY opened DESC
+   ```
+   A Gmail session refused on its first chunk (a non-whitelisted Cc or Bcc)
+   is stranded by design. `refused_chunks > 0` separates those uploads from
+   ones the agent abandoned.
+
+4. **Limits hit**: our own 413s, expired keys, and chunk errors and timeouts.
+
+   ```sql
+   SELECT toDate(timestamp) AS day,
+          countIf(properties.oversize_refused) AS fgac_413,
+          countIf(properties.auth_failure_reason = 'expired' AND properties.key_kind = 'temporary') AS expired_key_401,
+          countIf(properties.upload_type = 'resumable_chunk' AND properties.status = 400) AS chunk_400,
+          countIf(properties.upload_type = 'resumable_chunk' AND properties.outcome = 'timeout') AS chunk_timeout,
+          countIf(properties.streamed AND properties.outcome = 'timeout') AS stream_timeout
+   FROM events
+   WHERE event = 'proxy_request' AND properties.environment = 'production' AND timestamp > now() - INTERVAL 14 DAY
+   GROUP BY day ORDER BY day
+   ```
+   **Blind spot:** a body over 4.5 MB is rejected by Vercel with
+   `FUNCTION_PAYLOAD_TOO_LARGE` *before* FGAC runs, so it is never in
+   PostHog. Check weekly, read-only:
+   `npx vercel logs <production deployment url> | grep -c FUNCTION_PAYLOAD_TOO_LARGE`
+   (or Vercel Observability → Errors, filtered to `/api/proxy` and
+   `/api/mcp`). Any hit on `/api/proxy` means some client ignores the 4 MB
+   chunk guidance, which our own 4.25 MiB refusal should have caught first.
+
+5. **Demand not converting**: windowed reads large enough to show the hint
+   (`large_file_hint_shown`), and whether that person minted a key within
+   10 minutes.
+
+   ```sql
+   SELECT h.person_id, h.t AS hinted_at, h.tool, m.t AS minted_at
+   FROM (SELECT person_id, timestamp AS t, properties.$mcp_tool_name AS tool FROM events
+         WHERE event = '$mcp_tool_call' AND properties.large_file_hint_shown
+           AND properties.environment = 'production' AND timestamp > now() - INTERVAL 14 DAY) AS h
+   LEFT JOIN (SELECT person_id, min(timestamp) AS t FROM events
+              WHERE event = 'temp_api_key_created' AND timestamp > now() - INTERVAL 15 DAY
+              GROUP BY person_id) AS m ON m.person_id = h.person_id
+   ORDER BY h.t DESC
+   ```
+   A `minted_at` of 1970 means no mint (the ClickHouse LEFT JOIN fill). A
+   mint after the hint is a conversion. A hint with no mint on a client that
+   does run code is the case to read in session recordings or the agent's
+   transcript.
+
+6. **Runaway keys**: refusals at the 10-live-key cap, and the busiest
+   temporary keys. A script stuck in a loop shows up here before it shows up
+   anywhere else.
+
+   ```sql
+   SELECT properties.temp_key_id AS k, count() AS calls, uniq(properties.status) AS statuses,
+          min(timestamp) AS first, max(timestamp) AS last
+   FROM events
+   WHERE event = 'proxy_request' AND properties.key_kind = 'temporary'
+     AND properties.environment = 'production' AND timestamp > now() - INTERVAL 2 DAY
+   GROUP BY k ORDER BY calls DESC LIMIT 20
+   ```
+   Pair it with `SELECT count() FROM events WHERE event = 'temp_api_key_refused'
+   AND properties.reason = 'rate_capped' AND timestamp > now() - INTERVAL 7 DAY`.

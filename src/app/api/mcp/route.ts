@@ -21,15 +21,18 @@ import { z } from 'zod';
 import { db } from '@/db';
 import {
   agentConnections, users, proxyKeys, keyEmailAccess,
-  accessRules, keyRuleAssignments, emailDelegations,
+  accessRules, keyRuleAssignments, emailDelegations, temporaryApiKeys,
 } from '@/db/schema';
-import { eq, and, isNull } from 'drizzle-orm';
+import { eq, and, isNull, gt, sql } from 'drizzle-orm';
+import {
+  TEMP_KEY_PURPOSES, TEMP_KEY_MAX_LIVE_PER_CONNECTION, TEMP_KEY_MAX_TTL_MINUTES, type TempKeyPurpose,
+  clampTtlMinutes, expectedBytesBucket, generateTemporaryKey, requestOrigin, temporaryKeyRecipe,
+} from '@/lib/temporaryApiKeys';
 import { filterLiveDelegatedAccess } from '@/db/delegationQueries';
 import { delegateLinkPath } from '@/lib/secondAccount';
 import { clerkClient } from '@clerk/nextjs/server';
 import { resolveDbUser } from '@/db/userHelpers';
-import { loadApplicableRules, checkReadRestrictions, decodeB64Url, stripHtmlToText, type ApplicableRules } from '@/lib/gmailRules';
-import { compileRulePattern } from '@/lib/rulePatterns';
+import { loadApplicableRules, checkReadRestrictions, decodeB64Url, stripHtmlToText, checkSendWhitelist, type SendDenial } from '@/lib/gmailRules';
 import { captureServerEvent } from '@/lib/posthogServer';
 import { runWithToolCallProps, addToolCallProps, getToolCallProps, runWithRequestProps, getRequestProps, setDriveEngine, getDriveEngine, type DriveEngineContext } from '@/lib/toolCallContext';
 import { normalizeToolArguments, unknownArgumentKeys, describeArgumentFailure, rewriteValidationFailureBody, type AliasHit, type ZodIssueLike } from '@/lib/mcpArgumentGuidance';
@@ -52,12 +55,12 @@ import { mintApprovalLink, describeApproval, actionTarget, fileApprovalActionFor
 import { connectionsDeepLink } from '@/lib/dashboardAgentLinks';
 import { recordApprovalMint, getApprovalRequestResourceName } from '@/lib/approvalRequests';
 import {
-  AGENT_APPROVAL_PROTOCOL, SEND_DISABLED_MESSAGE, recipientNotWhitelistedMessage,
+  AGENT_APPROVAL_PROTOCOL,
   accountNotPermittedByCaller, accountNotPermittedByDefault, googleNotFoundMessage, crossMailboxHint, withNoLinkStop, withLinkUnavailableStop, LINK_UNAVAILABLE_STOP,
 } from '@/lib/denialCopy';
 import { TOOL_DEFS, toolAnnotations, type FgacToolDef } from './toolDefs';
 import {
-  classifyGoogleApiCall, canonicalizeGoogleApiPath, extractSendRecipients, extractDraftSendInfo,
+  classifyGoogleApiCall, canonicalizeGoogleApiPath, extractSendRecipients, extractDraftSendInfo, draftSendRecipients,
   fileApprovalAction, parseDriveFileId, driveFileKindForPath,
   templateGoogleApiPath, rawApiFamily, extractGoogleErrorReason,
   RAW_MODIFY_METHODS, isForwardableGoogleMethod, methodDenial,
@@ -74,9 +77,12 @@ import {
 } from '@/lib/googleTokenFailure';
 import { liveTokenScopes, reconcileScopes } from '@/lib/googleTokenScopes';
 import { driveTreeFlagOn } from '@/lib/featureFlags';
+import { agentCreatedGrant } from '@/lib/agentCreatedFiles';
 import {
   resolveDriveTreeAccess, effectiveDriveAccess, settingsFromRules, normalizeDriveDefault, driveDefaultLabel,
   driveDenialText, widenListFields, DRIVE_SERVICE, type DriveDefault, type DriveSetting,
+  classifyDriveDiscovery, driveDiscoveryRefusal, sharedDriveAccess, filterSharedDrives, sharedDriveBlockedText,
+  driveScopeUnconfined, isDriveApiPath, unconfinedDriveDenialText,
 } from '@/lib/driveTreeAccess';
 import {
   resolveDriveLineage, resolveLineageFrom, parseDriveFileMeta, driveMetaUrl, LineageError, MAX_LINEAGE_HOPS,
@@ -659,49 +665,8 @@ async function getGoogleToken(
 // shared with the push-notification filter so read policy and notification
 // policy can never drift apart.
 
-/**
- * Send-whitelist enforcement shared by gmail_send and google_api_modify.
- * Every recipient must match a whitelist pattern; unknown recipients deny.
- * Returns a denial ({ message, deniedRecipient? }) or null if sending is
- * allowed. deniedRecipient feeds the magic approval link — absent when we
- * could not even parse who the mail was for (no link in that case).
- */
-type SendDenial = { message: string; deniedRecipient?: string; code: string };
-
-function checkSendWhitelist(rules: ApplicableRules, recipients: string[] | null): SendDenial | null {
-  const sendRules = rules.filter(r => r.service === 'gmail' && r.actionType === 'send_whitelist');
-
-  if (!recipients || recipients.length === 0) {
-    return { message: '🚫 Could not determine the message recipients, so sending was denied. Provide a standard RFC 2822 message with To/Cc/Bcc headers.', code: 'recipients_undetermined' };
-  }
-
-  if (sendRules.length === 0) {
-    return {
-      message: SEND_DISABLED_MESSAGE,
-      deniedRecipient: recipients[0],
-      code: 'send_disabled',
-    };
-  }
-
-  for (const recipient of recipients) {
-    let isWhitelisted = false;
-    for (const rule of sendRules) {
-      if (!rule.regexPattern) continue;
-      const regex = compileRulePattern(rule.regexPattern);
-      if (!regex) continue;
-      if (regex.test(recipient)) { isWhitelisted = true; break; }
-    }
-    if (!isWhitelisted) {
-      return {
-        message: recipientNotWhitelistedMessage(recipient),
-        deniedRecipient: recipient,
-        code: 'recipient_not_whitelisted',
-      };
-    }
-  }
-
-  return null;
-}
+// checkSendWhitelist moved to src/lib/gmailRules.ts — shared with the REST
+// proxy so both surfaces enforce one recipient policy.
 
 /**
  * Magic-link denial (connector-growth Phase C): policy denials that a user
@@ -1634,6 +1599,42 @@ async function filteredDriveListing(engine: DriveEngineContext, cleanPath: strin
   return jsonResult({ ...data, files: kept, withheld });
 }
 
+/**
+ * Drive tree engine: every Drive call not addressed to one file by id goes
+ * through the shared discovery classifier (classifyDriveDiscovery) — files
+ * and shared-drive listings are filtered, a shared drive fetched by id is
+ * gated on its own setting, and listing-shaped reads the engine cannot
+ * filter (changes, v2 lists, v2 children, …) are refused with guidance to
+ * use drive/v3/files. Returns null when the call is not discovery or is on
+ * the allowlist, so the caller's normal dispatch runs.
+ */
+async function driveTreeDiscovery(engine: DriveEngineContext, cleanPath: string, method: string, rawUrl: (p: string) => string, resolved: ResolvedAccount) {
+  const discovery = classifyDriveDiscovery(cleanPath, method);
+  if (!discovery || discovery.kind === 'allow') return null;
+  if (discovery.kind === 'refuse') {
+    addToolCallProps({ drive_tree: true, denial_code: 'drive_discovery_unfiltered' });
+    return textResult(`🚫 ${driveDiscoveryRefusal(discovery.endpoint)}`);
+  }
+  if (discovery.kind === 'filter_files') return filteredDriveListing(engine, cleanPath, rawUrl, resolved);
+  const { settings, driveDefault } = await loadDriveTreeSettings(engine.userId, engine.proxyKeyId);
+  if (discovery.kind === 'shared_drive') {
+    // Decided on settings alone (a shared drive is a root: nothing above it
+    // but "Shared drives"), so a Blocked drive's name never leaves Google.
+    if (sharedDriveAccess(discovery.driveId, '', settings, driveDefault) === 'block') {
+      addToolCallProps({ drive_tree: true, denial_code: 'drive_blocked', rule_match_level: 'shared_drive', drive_default: driveDefault });
+      return textResult(`🚫 ${sharedDriveBlockedText(discovery.driveId)}`);
+    }
+    return null;
+  }
+  const result = await googleFetch(rawUrl(cleanPath), engine.token, 'GET', undefined, engine.targetEmail);
+  if (!result.ok) return passthroughErrorResult(result, cleanPath, resolved);
+  const data = result.data as { drives?: unknown[] } | null;
+  if (!data || !Array.isArray(data.drives)) return jsonResult(result.data);
+  const filtered = filterSharedDrives(data, settings, driveDefault);
+  addToolCallProps({ drive_tree: true, drive_list_total: data.drives.length, drive_list_withheld: filtered.withheld, drive_default: driveDefault });
+  return jsonResult(filtered);
+}
+
 /** `defaults` entries for Drive in get_my_permissions: the tree posture when the engine applies to this owner, else the legacy per-kind lines. */
 async function driveDefaultsForPermissions(conn: ConnectionApproved): Promise<Record<string, string>> {
   const legacy = Object.fromEntries(ACTIVE_DRIVE_FILE_KINDS.map(k => {
@@ -1855,8 +1856,22 @@ async function checkDriveFileAccess(
     // Unreachable in practice (no rule ⇒ not_exposed), but keep the executor total.
     return { gate: 'rule', kind: check.kind, perm: check.perm };
   }
+  if (driveScopeUnconfined(getDriveEngine())) {
+    // A full-`drive` token outside the tree engine: Google no longer gates
+    // this file per pick, so "rides the per-file grant" would mean any file
+    // in the Drive. Fail closed (see driveScopeUnconfined).
+    return { denial: unconfinedDriveDenial(conn, resolved, 'file', fileId) };
+  }
   addToolCallProps({ drive_file_gate: 'mime_other', raw_api_passthrough: true });
   return { gate: 'mime_other' };
+}
+
+/** Refusal for Drive listings / `mime_other` files on a full-scope token the tree engine does not confine. */
+function unconfinedDriveDenial(conn: ConnectionApproved, resolved: ResolvedAccount, what: 'listing' | 'file', fileId?: string) {
+  const delegated = resolved.targetEmail.toLowerCase() !== conn.user.email.toLowerCase();
+  addToolCallProps({ denial_code: 'drive_full_scope_unconfined', drive_scope_unconfined: true, ...(what === 'file' ? { drive_file_gate: 'unconfined' } : {}) });
+  console.warn(`[MCP] Drive ${what} refused: full drive scope outside the tree engine (delegated=${delegated})`);
+  return textResult(unconfinedDriveDenialText({ targetEmail: resolved.targetEmail, delegated, what, fileId }));
 }
 
 const COMMENT_LIST_FIELDS = 'nextPageToken,comments(id,content,resolved,createdTime,modifiedTime,author(displayName),quotedFileContent(value),replies(id,content,action,createdTime,author(displayName)))';
@@ -1879,6 +1894,22 @@ const MAX_ATTACHMENT_CHARS = 200_000; // base64url chars ≈ 150 KB decoded
  * can adopt the same envelope.
  */
 const RESPONSE_WINDOW_MAX_CHARS = 200_000;
+
+/**
+ * Payloads this big (≈1.1 MB of base64 / 1.5 MB of JSON) take enough windowed
+ * calls that a script with a temporary API key is the better path. The hint
+ * rides the FIRST response only (offset 0 / the ⚠️ size cap), never every
+ * window. `large_file_hint_shown` measures demand the hint did not convert
+ * (monitoring §7.34 (5)).
+ */
+const LARGE_FILE_HINT_CHARS = 1_500_000;
+
+function largeFileHint(totalChars: number, windowChars: number): string {
+  addToolCallProps({ large_file_hint_shown: true });
+  const calls = Math.ceil(totalChars / windowChars);
+  return `This payload needs about ${calls} windowed calls. If you can run code with network access, ` +
+    `create_temporary_api_key (purpose "download") fetches it in one request instead.`;
+}
 
 function windowPayload(payload: string, offset: number, limit: number | undefined) {
   const cappedLimit = Math.min(Math.max(1, limit ?? RESPONSE_WINDOW_MAX_CHARS), RESPONSE_WINDOW_MAX_CHARS);
@@ -1917,10 +1948,13 @@ function windowedResult(
   const reassemble = encoding === 'base64url'
     ? 'concatenate the data strings in offset order, then base64url-decode the result once'
     : 'concatenate the data strings in offset order to reconstruct the full payload';
+  const hint = off === 0 && win.next_offset !== null && payload.length >= LARGE_FILE_HINT_CHARS
+    ? largeFileHint(payload.length, win.chars_returned) : undefined;
   return jsonResult({
     ...extra,
     ...(encoding ? { encoding } : {}),
     ...win,
+    ...(hint ? { large_file_hint: hint } : {}),
     note: win.next_offset === null
       ? `Final window — ${reassemble}.`
       : `Partial content — call again with offset: ${win.next_offset} for the next window; ${reassemble}.`,
@@ -2523,8 +2557,9 @@ async function autoGrantAgentCreatedFile(
  * mimeType; a caller's `fields` mask can strip it, so fetch the metadata when
  * it is missing rather than skip the grant. Files FGAC has no per-file rule
  * model for (folders, PDFs, plain uploads) are stamped
- * `file_created_kind: 'other'` and left ungated — the same scope-backstop
- * posture every other Drive call has.
+ * `file_created_kind: 'other'`; under drive.file they stay ungated (the
+ * scope backstop), under the Drive tree engine they get a file-level
+ * Read & Write setting (src/lib/agentCreatedFiles.ts).
  */
 async function grantDriveCreatedFile(
   conn: ConnectionApproved,
@@ -2548,8 +2583,31 @@ async function grantDriveCreatedFile(
   }
   const kind = kindForMimeType(mimeType);
   addToolCallProps({ file_created_kind: kind ?? 'other' });
-  if (!kind) return;
-  await autoGrantAgentCreatedFile(conn, resolved.proxyKeyId, kind, id, name, origin);
+  if (kind) {
+    await autoGrantAgentCreatedFile(conn, resolved.proxyKeyId, kind, id, name, origin);
+    return;
+  }
+  // Drive tree engine: every kind is gated, so a text/PDF/image/folder the
+  // agent made needs its own file-level setting or the profile default
+  // (often Read) refuses the agent's next rename or update.
+  const grant = agentCreatedGrant(mimeType, getDriveEngine()?.active === true);
+  if (!grant) return;
+  try {
+    const [rule] = await db.insert(accessRules).values({
+      userId: conn.user.id,
+      ruleName: `Agent-created: ${name || id}`,
+      service: grant.service,
+      actionType: grant.actionType,
+      targetResourceId: id,
+      targetKind: grant.targetKind,
+      resourceName: name,
+    }).returning();
+    await db.insert(keyRuleAssignments).values({ proxyKeyId: resolved.proxyKeyId, accessRuleId: rule.id });
+    addToolCallProps({ file_created_origin: origin, drive_tree_auto_granted: true });
+  } catch (err) {
+    console.error('[MCP] Failed to auto-grant agent-created Drive file:', err);
+    addToolCallProps({ file_created_origin: origin, drive_tree_auto_granted: false });
+  }
 }
 
 // ─── Raw Google API Execution ───────────────────────────────────────────────
@@ -2687,6 +2745,15 @@ async function executeRawGoogleCall(
       : `https://www.googleapis.com/${p}`;
   };
 
+  // Drive tree engine: any Drive discovery read (listings, changes, v2
+  // children, shared drives) can name files the profile Blocks, so it is
+  // filtered or refused before the per-kind dispatch below.
+  const driveEngine = getDriveEngine();
+  if (driveEngine?.active) {
+    const discovery = await driveTreeDiscovery(driveEngine, cleanPath, method, rawUrl, resolved);
+    if (discovery) return discovery;
+  }
+
   if (cls.kind === 'file_create') {
     // Agent-created files (POST v4/spreadsheets / v1/documents /
     // v1/presentations) are allowed and auto-granted to the calling key
@@ -2774,11 +2841,12 @@ async function executeRawGoogleCall(
   }
 
   if (cls.kind === 'passthrough') {
-    // Drive tree engine: a Drive listing is the one passthrough that can
-    // reveal files the profile blocks, so it is forwarded and filtered.
-    const engine = getDriveEngine();
-    if (engine?.active && method === 'GET' && /^drive\/v3\/files(\?|$)/.test(cleanPath)) {
-      return filteredDriveListing(engine, cleanPath, rawUrl, resolved);
+    // A full-`drive` token the engine does not confine (delegated mailbox,
+    // or flag off): every Drive passthrough — files.list, changes, drives —
+    // would enumerate the whole Drive. Refuse rather than forward (PR #183;
+    // the engine's own discovery reads were decided by driveTreeDiscovery above).
+    if (isDriveApiPath(cleanPath) && driveScopeUnconfined(getDriveEngine())) {
+      return unconfinedDriveDenial(conn, resolved, 'listing');
     }
     // Classify-don't-block: unknown Google API families are forwarded with
     // the account's token (Google's scopes are the enforcement backstop) and
@@ -2827,7 +2895,8 @@ async function executeRawGoogleCall(
       addToolCallProps({ denial_code: 'recipients_undetermined' });
       return textResult(`🚫 ${detail} Nothing was sent — drafts/send is denied whenever the draft's recipients cannot be determined and verified against the send whitelist.`);
     };
-    const { draftId, bodyRecipients } = extractDraftSendInfo(body);
+    const draftInfo = extractDraftSendInfo(body);
+    const { draftId } = draftInfo;
     if (!draftId) {
       return draftDenial('Could not determine which draft to send. Provide the draft id in the body: {"id": "<draftId>"}.');
     }
@@ -2842,10 +2911,9 @@ async function executeRawGoogleCall(
       return draftDenial(`The draft could not be fetched to verify its recipients (${draftResult.error}). Confirm the draft id via google_api_get gmail/v1/users/me/drafts and retry.`);
     }
     const draftRaw = (draftResult.data as { message?: { raw?: unknown } })?.message?.raw;
-    const draftRecipients = typeof draftRaw === 'string' ? extractSendRecipients({ raw: draftRaw }) : null;
-    const recipients = [...new Set([...(draftRecipients ?? []), ...(bodyRecipients ?? [])])];
-    if (recipients.length === 0) {
-      return draftDenial('The draft has no parseable To/Cc/Bcc recipients. Update the draft with standard recipient headers, then retry drafts/send.');
+    const recipients = draftSendRecipients(draftRaw, draftInfo);
+    if (!recipients) {
+      return draftDenial('The recipients of the draft (or of the message sent with it) could not all be parsed. Use plain To/Cc/Bcc addresses (name@example.com, no quoted local parts, IP-literal domains, or non-ASCII addresses), then retry drafts/send.');
     }
     const denial = checkSendWhitelist(rules, recipients);
     if (denial) return sendDenialWithLinks(conn, resolved.proxyKeyId, denial);
@@ -3030,7 +3098,7 @@ function registerFgacTools(server: FgacMcpServer) {
             sending: 'Email sending is off by default; the first gmail_send returns a one-click approval link the user can use to whitelist the recipient.',
             raw_api: "Anything the typed tools can't express — Gmail mailbox writes (labels, drafts, archive/mark-read, trash) and threads, Drive listing and export, creating new docs, sheets, or slides — is reachable via google_api_get / google_api_modify under the same rules (see their descriptions). "
               + (driveTreeActive
-                ? "The Google grant covers Gmail plus the user's whole Google Drive, scoped by this profile's folder and file settings (Blocked files are withheld from listings too); "
+                ? "The Google grant covers Gmail plus the user's whole Google Drive, scoped by this profile's folder and file settings (Blocked files are withheld from listings too — list and search files with GET drive/v3/files; the changes feed, Drive v2 listings and v2 folder children are refused because they cannot be filtered); "
                 : "The Google grant covers ONLY Gmail plus per-file Drive access (Sheets/Docs/Slides/Drive files the user picked or this agent created); ")
               + "People/Contacts, Calendar, Tasks, and other Google APIs are not available and calls to them are refused.",
           },
@@ -3315,6 +3383,7 @@ function registerFgacTools(server: FgacMcpServer) {
               `⚠️ Attachment is ~${approxKb} KB, which exceeds the ~150 KB limit for a single MCP response. ` +
               `Retrieve it in windows: call again with offset: 0 and a limit sized to your tool-result budget (chars of base64url data, max 200000). ` +
               `Each response reports total_chars and next_offset — concatenate the data strings in offset order, then base64url-decode the result once. ` +
+              (attachmentChars >= LARGE_FILE_HINT_CHARS ? largeFileHint(attachmentChars, RESPONSE_WINDOW_MAX_CHARS) + ' ' : '') +
               `Or ask the user to retrieve it directly from Gmail.`);
           }
           return jsonResult(attachment);
@@ -3927,6 +3996,88 @@ function registerFgacTools(server: FgacMcpServer) {
       }
     );
 
+    // ── create_temporary_api_key ──────────────────────────────────────
+    // A short-lived REST-proxy key for scripts the agent runs (payloads too
+    // large for tool calls). It is a pointer to this connection's profile key,
+    // resolved by the proxy on every request — never a profile of its own.
+    // Plan: docs/implementation_plans/large-api-payload-options_v5.md
+    server.registerTool(
+      TOOL_DEFS.create_temporary_api_key.name,
+      toolConfig(TOOL_DEFS.create_temporary_api_key, {
+        purpose: z.enum(TEMP_KEY_PURPOSES).optional().describe('What the script will do: upload (file to Drive), download (Drive file or Gmail attachment), send_attachment (email with a large attachment), bulk_calls, or other. Selects the recipe returned with the key. Default other.'),
+        ttl_minutes: z.number().optional().describe(`Key lifetime in minutes, 1–${TEMP_KEY_MAX_TTL_MINUTES} (default 15). Ask for more only when a transfer will take longer; an expired upload can be resumed with a new key.`),
+        expected_bytes: z.number().optional().describe('Approximate size of the file or payload, if known (used for usage statistics only).'),
+      }),
+      async ({ purpose, ttl_minutes, expected_bytes }, { authInfo }) => {
+        const chosen: TempKeyPurpose = purpose ?? 'other';
+        addToolCallProps({ temp_key_purpose: chosen });
+        const conn = await requireApproval(authInfo);
+        if ('content' in conn) {
+          const userId = authInfo?.extra?.userId as string | undefined;
+          if (userId) captureServerEvent(userId, 'temp_api_key_refused', { reason: 'connection_not_approved', purpose: chosen, client_id: authInfo?.clientId });
+          return conn;
+        }
+        if (!conn.proxyKeyId) {
+          captureServerEvent(conn.user.clerkUserId, 'temp_api_key_refused', { reason: 'no_profile', purpose: chosen, client_id: conn.clientId });
+          return textResult('❌ This connection is not bound to an agent profile yet, so there are no permissions to put on a key. Ask the user to finish approving the connection in the FGAC dashboard.');
+        }
+        if (ttl_minutes !== undefined && ttl_minutes < 1) {
+          return textResult(`❌ ttl_minutes must be between 1 and ${TEMP_KEY_MAX_TTL_MINUTES}. Omit it for the 15-minute default. No key was created.`);
+        }
+        const ttl = clampTtlMinutes(ttl_minutes);
+        const now = new Date();
+
+        const [{ live }] = await db
+          .select({ live: sql<number>`count(*)::int` })
+          .from(temporaryApiKeys)
+          .where(and(
+            eq(temporaryApiKeys.connectionId, conn.connectionId),
+            isNull(temporaryApiKeys.revokedAt),
+            gt(temporaryApiKeys.expiresAt, now),
+          ));
+        if (live >= TEMP_KEY_MAX_LIVE_PER_CONNECTION) {
+          captureServerEvent(conn.user.clerkUserId, 'temp_api_key_refused', {
+            reason: 'rate_capped', purpose: chosen, client_id: conn.clientId, live_temp_keys: live,
+          });
+          return textResult(`❌ This connection already has ${live} unexpired temporary keys (the limit is ${TEMP_KEY_MAX_LIVE_PER_CONNECTION}). Reuse the key you created most recently — it works for any number of requests until it expires. No new key was created.`);
+        }
+
+        const generated = generateTemporaryKey();
+        const expiresAt = new Date(now.getTime() + ttl.granted * 60_000);
+        const [row] = await db.insert(temporaryApiKeys).values({
+          keyHash: generated.hash,
+          keyLast4: generated.last4,
+          parentKeyId: conn.proxyKeyId,
+          userId: conn.user.id,
+          connectionId: conn.connectionId,
+          purpose: chosen,
+          expiresAt,
+        }).returning({ id: temporaryApiKeys.id });
+
+        const props = {
+          purpose: chosen,
+          ttl_requested: ttl_minutes,
+          ttl_granted: ttl.granted,
+          ttl_capped: ttl.capped,
+          expected_bytes_bucket: expectedBytesBucket(expected_bytes),
+          client_id: conn.clientId,
+          client_name: conn.clientName ?? undefined,
+          connection_id: conn.connectionId,
+          parent_proxy_key_id: conn.proxyKeyId,
+          temp_key_id: row.id,
+          live_temp_keys: live + 1,
+        };
+        captureServerEvent(conn.user.clerkUserId, 'temp_api_key_created', props);
+        addToolCallProps({ temp_key_id: row.id, ttl_granted: ttl.granted });
+
+        const baseUrl = (authInfo?.extra?.requestOrigin as string | undefined) ?? DASHBOARD_URL;
+        return textResult(temporaryKeyRecipe({
+          key: generated.key, baseUrl, purpose: chosen, ttlGranted: ttl.granted,
+          ttlRequested: ttl_minutes, capped: ttl.capped, expiresAt,
+        }));
+      }
+    );
+
     // ── get_my_permissions ────────────────────────────────────────────
     server.registerTool(
       TOOL_DEFS.get_my_permissions.name,
@@ -4033,7 +4184,9 @@ const handler = createMcpHandler(
       'cell formatting, charts, sheet tabs, slides and shapes), comments_read and comments_add cover Drive-API comments on docs, sheets, and slides, and the values/gmail tools ' +
       'handle the simple cases. The full Google API surface is available through google_api_get (reads) and google_api_modify (writes) — Gmail threads, ' +
       'drafts, labels, and mailbox organization (archive, mark read, trash), Drive file listing and export, creating new documents, spreadsheets, or presentations. Fall back to them instead of treating an operation as ' +
-      'unsupported. A denied call is not a dead end: it returns a one-click approval link — show it to the user and retry after they approve.',
+      'unsupported. A denied call is not a dead end: it returns a one-click approval link — show it to the user and retry after they approve. ' +
+      'For files too large for a tool call (uploads, or attachments and downloads over ~1 MB), call create_temporary_api_key and move the bytes ' +
+      'with a script — the same access rules apply.',
   },
   {
     basePath: '/api',
@@ -4362,7 +4515,10 @@ const verifyMcpAuth = async (req: Request, bearerToken?: string) => {
     const clientId = (authInfo as Record<string, unknown>).clientId as string | undefined;
     // withToolAnalytics sees only authInfo, never the Request — ride the
     // user-agent along so $mcp_tool_call can be split by client product.
-    (authInfo as { extra?: Record<string, unknown> }).extra = { ...authInfo.extra, userAgent, profileSlug };
+    // requestOrigin: the host serving THIS request — a temporary API key must
+    // point its script at the same deployment (a preview's keys do not exist
+    // on fgac.ai), so NEXT_PUBLIC_APP_URL is the wrong source for it.
+    (authInfo as { extra?: Record<string, unknown> }).extra = { ...authInfo.extra, userAgent, profileSlug, requestOrigin: requestOrigin(req) };
     // Once-per-MCP-session product attribution (the initialize handshake).
     // Deliberately NOT coalesced: automation that spawns a fresh Claude Code
     // process every ~30 s (2026-09-08) makes this the largest event in the
