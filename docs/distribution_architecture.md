@@ -167,6 +167,24 @@ in `src/app/api/mcp/googleApiPolicy.ts`:
   mirroring the Gmail scope pre-flight.
 - Batch endpoints and non-send Gmail writes are denied. DELETE is not exposed
   at all.
+- **Messages FGAC assembles itself** — `gmail_send`, the owner notices
+  (`approvalNotifyCopy.ts`), the sales-lead mail (`salesLead.ts`) — go through
+  `src/lib/mimeText.ts`: `multipart/alternative` carrying the plain text the
+  caller wrote AND a minimal HTML rendering of it (one `<p>` per paragraph,
+  `<br>` inside, bare URLs linked, everything else escaped), both parts
+  `charset=utf-8` quoted-printable (RFC 2045, ≤ 76 columns per encoded
+  line), the Subject RFC 2047 when non-ASCII, CRLF throughout, header values
+  stripped of CR/LF. The HTML part is not cosmetic: Gmail does not forward a
+  `text/plain` part as submitted — it decodes it, whatever its
+  Content-Transfer-Encoding (quoted-printable included), and re-serialises it
+  with its own folding at ~72 columns ON DELIVERY. The Sent copy stays one
+  line, the recipient's copy gains real CRLFs, and on a phone every paragraph
+  renders ragged. A `text/html` part is preserved intact and Gmail's clients
+  render it, which is how the claude.ai connector's mail arrives unbroken
+  (measured 2026-10-05 on delivered copies, `format=raw`; capability 01 A6
+  guards it). An agent's own raw MIME via `google_api_modify` is forwarded
+  untouched, so that tool's description tells agents to add a text/html
+  alternative themselves.
 
 **Discoverability layers** (2026-08-23, after an agent shipped a pipe-character
 text table because nothing at its decision point mentioned the raw fallback):

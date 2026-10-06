@@ -76,6 +76,18 @@ claude -p "Using the fgac skill, send an email to blocked@untrusted.com with sub
 ```
 - [ ] Result contains "blocked", "403", "Unauthorized", or "whitelist"
 
+### A6: Long paragraph delivered intact (HTML alternative)
+```bash
+claude -p "Using the fgac skill, send an email to \$USER_B_EMAIL with subject 'QA CC CLI - Send A6' whose body is one paragraph of at least 300 characters with no line breaks" \
+  --allowedTools "Bash(node:*)" --output-format json --max-turns 5 --dangerously-skip-permissions
+```
+- [ ] Result reports the message sent
+- [ ] Read the DELIVERED copy from USER_B's mailbox with `format=raw` (hosted
+  runbook A6 has the decode one-liner): `multipart/alternative` with a
+  `text/html` part whose decoded content holds the paragraph in one `<p>` with
+  no break inside. Gmail re-folds the `text/plain` part at ~72 columns — not a
+  failure. The sender's Sent copy is not evidence
+
 ---
 
 ## Capability: Read Blacklist (→ capabilities/02_read_blacklist.md)

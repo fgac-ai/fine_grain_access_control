@@ -20,6 +20,7 @@
  * through `sanitizeLine`: CR/LF stripped (header injection), control
  * characters dropped, length capped. Plain text, no HTML.
  */
+import { buildTextMessage } from './mimeText';
 
 export type NotifyStatus =
   | 'sent'
@@ -185,17 +186,19 @@ export function approvalEmailBody(opts: {
   return lines.join('\n');
 }
 
-/** RFC 2047 encoded-word for a header that may carry non-ASCII (the subject's em dash). */
-export function encodeHeaderWord(value: string): string {
-  if (/^[\x20-\x7e]*$/.test(value)) return value;
-  return `=?UTF-8?B?${Buffer.from(value, 'utf8').toString('base64')}?=`;
-}
+/** RFC 2047 encoded word(s) for a header that may carry non-ASCII — lives in
+ * mimeText.ts; re-exported for salesLead.ts and the tests. */
+export { encodeHeaderWord } from './mimeText';
 
 /**
- * The RFC 2822 message FGAC's proxy API sends (base64url-encoded by the
+ * The RFC 5322 message FGAC's proxy API sends (base64url-encoded by the
  * caller). From and Reply-To are the support mailbox; the proxy sends as
  * the key's own account, so Gmail keeps the From consistent. `cc` is used by
  * the dead-grant notice on a delegated mailbox (the key owner rides along).
+ * Built by mimeText.ts: the plain text plus an HTML alternative generated
+ * from it. These sentences run well past 78 columns, and until 2026-10-05
+ * Gmail re-folded them on delivery (text-only mail is re-serialised by Gmail
+ * whatever its encoding; the HTML part is what arrives intact).
  */
 export function approvalEmailRaw(opts: {
   from: string; to: string; cc?: string | null; subject: string; body: string;
@@ -203,16 +206,15 @@ export function approvalEmailRaw(opts: {
   notice?: NoticeKind;
 }): string {
   const from = sanitizeLine(opts.from, 254);
-  const cc = opts.cc ? sanitizeLine(opts.cc, 254) : '';
-  return `From: FGAC <${from}>\r\n` +
-    `Reply-To: ${from}\r\n` +
-    `To: ${sanitizeLine(opts.to, 254)}\r\n` +
-    (cc ? `Cc: ${cc}\r\n` : '') +
-    `Subject: ${encodeHeaderWord(sanitizeLine(opts.subject, 200))}\r\n` +
-    (opts.notice ? `${NOTICE_HEADER}: ${opts.notice}\r\n` : '') +
-    `MIME-Version: 1.0\r\n` +
-    `Content-Type: text/plain; charset=utf-8\r\n` +
-    `Content-Transfer-Encoding: 8bit\r\n\r\n${opts.body}`;
+  return buildTextMessage({
+    from: `FGAC <${from}>`,
+    replyTo: from,
+    to: sanitizeLine(opts.to, 254),
+    cc: opts.cc ? sanitizeLine(opts.cc, 254) : undefined,
+    subject: sanitizeLine(opts.subject, 200),
+    extra: opts.notice ? { [NOTICE_HEADER]: opts.notice } : undefined,
+    body: opts.body,
+  });
 }
 
 /**
