@@ -37,6 +37,11 @@ sensitive reads are checked against the rules the user set for this agent.
   telling the user an operation is unsupported.
 - `get_my_permissions` explains the rules in force; `request_access` asks the
   user to expose a specific spreadsheet or document.
+- Files too large for a tool call (uploads, attachments or downloads over
+  ~1 MB): if you can run code with network access, call
+  `create_temporary_api_key` and move the bytes with a script — it returns the
+  key, the base URL, and a step-by-step recipe. Same rules, same refusals. Keep
+  the key inside the script.
 
 ## Multiple accounts
 

@@ -12,8 +12,16 @@
    ```
 3. Launch Claude Code IN the workspace:
    ```bash
-   tmux new-session -d -s fgac-qa -x 200 -y 50 "cd test/qa-envs/cc-mcp && claude --dangerously-skip-permissions"
+   tmux new-session -d -s fgac-qa -x 200 -y 50 "cd test/qa-envs/cc-mcp && claude --permission-mode auto"
    ```
+   Auto mode, not `--dangerously-skip-permissions` (Ken, 2026-10-05): the
+   bypass flag predates auto mode, and the orchestrator's permission
+   classifier denies launching a nested bypass session. Auto mode keeps the
+   nested agent unattended while its own classifier still reviews each
+   action — which is also closer to how real users run Claude Code. If the
+   nested agent stops on a prompt auto mode will not resolve, record the
+   prompt text as evidence (it is a real-user friction point), answer it in
+   the pane, and continue.
 4. Verify Discovery: Enter `/mcp` in Claude Code and confirm `fgac` is listed.
 
 ## Auth Setup
@@ -250,6 +258,28 @@ tmux kill-session -t fgac-qa
   `total_chars` equals the summed `chars_returned` and the final
   `next_offset` is null.
 - A8: fold into the Analytics Events queries below (same run window).
+
+## Capability: Temporary API Keys (→ capabilities/23_temporary_api_keys.md)
+
+- Fixtures per the capability doc: a ~2 MB attachment in USER_A's mailbox, and for A8 a
+  scratch profile + scratch connection (manual DCR token). Never revoke the baseline profile.
+- Mask minted keys in evidence (`sk_proxy_…<last4>`).
+- A1–A11: the tmux Claude Code session calls `create_temporary_api_key` and runs the proxy
+  requests with its Bash tool (instruct it to mask the key in output). Dashboard steps (A5, A7,
+  A8) run in the built-in browser.
+- A12: the **primary environment for this assertion** — a fresh tmux session, the prompt
+  verbatim, no hints. Grade on the transcript: mint call present, ≤ 2 proxy requests, hash
+  match, no key in the final reply.
+- A13: fold into the Analytics Events queries below (same run window), plus monitoring §7.34 (1)–(2).
+
+## Capability: Large File Transfer (→ capabilities/24_large_file_transfer.md)
+
+- Fixtures: generate `qa-out/big.bin` (8 MB random), a ~1 MB PNG, and a ~6 MB attachment.
+  `qa-out/` is gitignored scratch; delete it after the run. Hash every file sent and received.
+- A1–A8: drive through the tmux session's Bash tool, per the capability doc.
+- A9: the **primary environment** — a fresh session, the prompt verbatim. Grade on the
+  transcript and the proxy log (no 413s, chunk sizes ≤ 4 MB), plus USER_B's received hash.
+- A10: fold into the Analytics Events queries below, plus monitoring §7.34 (3).
 
 ---
 

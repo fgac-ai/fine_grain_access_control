@@ -91,6 +91,10 @@ chars, no tool forwarding both safe and unsafe HTTP methods.
 - **Write tools** (`destructiveHint` set — MCP clients prompt before running):
   `gmail_send`, `sheets_update_range`, `sheets_append_rows`, `sheets_edit`,
   `docs_edit`, `comments_add`, `google_api_modify`
+- **Credential tool** (`readOnlyHint: false`, `destructiveHint: false`):
+  `create_temporary_api_key` — a short-lived REST-proxy key with the
+  connection's own permissions, for scripts that move files too large for tool
+  calls (architecture §5)
 
 **Raw Google API pair.** The former `raw_google_api_call` (one tool spanning
 GET→DELETE — an automatic directory rejection) is split into `google_api_get`

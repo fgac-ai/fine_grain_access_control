@@ -34,3 +34,6 @@
 | 18 | `18_google_reconnect.md` | Broken/expired Google grants route into the Reconnect Google flow |
 | 19 | `19_docs_management.md` | Per-document read/write/block rules, docs MCP tools, raw `documents` enforcement, docs grant recovery |
 | 20 | `20_attachment_reading.md` | Caller-directed windowing of large read payloads (offset/limit envelope) across attachment, gmail_read, docs, sheets, and raw GET; guided size-cap refusal |
+| 21 | `21_slides_management.md` | Per-presentation expose/access rules and the Slides MCP tools |
+| 23 | `23_temporary_api_keys.md` | MCP-minted short-lived proxy keys: parent-profile parity, no escalation, live rule changes, expiry/revoke/cascade, agent guidance, mint-to-use telemetry |
+| 24 | `24_large_file_transfer.md` | Over-4.5 MB transfers: streamed downloads, resumable chunked Drive/Gmail uploads routed through FGAC, first-chunk recipient check, size-limit guidance |

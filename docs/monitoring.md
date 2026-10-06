@@ -3341,3 +3341,122 @@ sign-in and the OAuth consent page on fgac.ai (Clerk's `<OAuthConsent />`,
 Configure → Paths, and a `/sign-in` page), which moves the blind segment onto
 our Vercel logs and PostHog.
 
+
+**7.34 — Temporary API keys and large transfers.** Added 2026-10-03
+(`docs/implementation_plans/large-api-payload-options_v5.md`). Agents call
+`create_temporary_api_key` to get a short-lived `sk_proxy_tmp_` key, then a
+script moves the bytes through `/api/proxy`: streamed downloads, and
+resumable uploads in ≤ 4 MB chunks. Each `proxy_request` row from such a key
+carries `key_kind = 'temporary'` and `temp_key_id`; `proxy_key_id` stays the
+parent **profile** key, so per-profile dashboards keep working. Join a mint to
+its use on `temp_api_key_created.temp_key_id = proxy_request.temp_key_id`.
+Exclude the support profile's key and the QA accounts from external counts,
+as everywhere else.
+
+1. **Adoption**: mints per week, people, and the split by purpose and client.
+
+   ```sql
+   SELECT toStartOfWeek(timestamp) AS week, properties.purpose AS purpose,
+          properties.client_name AS client, count() AS mints, uniq(person_id) AS people,
+          countIf(properties.ttl_capped) AS asked_over_60
+   FROM events
+   WHERE event = 'temp_api_key_created' AND properties.environment = 'production'
+     AND timestamp > now() - INTERVAL 8 WEEK
+   GROUP BY week, purpose, client ORDER BY week DESC, mints DESC
+   ```
+
+2. **Minted but never used**: the share of keys with no proxy request at
+   all. The expected cause is sandbox egress: claude.ai's code execution
+   allows only allow-listed domains, so `fgac.ai` must be on the org's list.
+   A high never-used share concentrated on one `client_name` is that client's
+   egress wall, not a key bug; tell those users how to allow-list
+   `fgac.ai`.
+
+   ```sql
+   SELECT m.client, count() AS mints, countIf(u.calls = 0) AS never_used,
+          round(countIf(u.calls = 0) / count(), 2) AS never_used_share
+   FROM (SELECT properties.temp_key_id AS k, any(properties.client_name) AS client
+         FROM events WHERE event = 'temp_api_key_created' AND properties.environment = 'production'
+           AND timestamp > now() - INTERVAL 14 DAY GROUP BY k) AS m
+   LEFT JOIN (SELECT properties.temp_key_id AS k, count() AS calls
+              FROM events WHERE event = 'proxy_request' AND properties.key_kind = 'temporary'
+                AND timestamp > now() - INTERVAL 15 DAY GROUP BY k) AS u ON u.k = m.k
+   GROUP BY m.client ORDER BY mints DESC
+   ```
+   ClickHouse fills an unmatched LEFT JOIN with `0`, not NULL, so
+   `calls = 0` is the never-used test.
+
+3. **Stranded uploads**: sessions opened (`resumable_init`) with no
+   `upload_complete` within 24 h. A cluster right after `auth_failure_reason
+   = 'expired'` means agents are not re-minting and resuming, so the recipe's
+   resume step is not landing.
+
+   ```sql
+   SELECT properties.upload_id_hash AS upload, any(properties.service) AS service,
+          min(timestamp) AS opened, countIf(properties.upload_type = 'resumable_chunk') AS chunks,
+          countIf(properties.status = 403) AS refused_chunks, max(properties.upload_complete) AS completed
+   FROM events
+   WHERE event = 'proxy_request' AND properties.upload_id_hash != ''
+     AND properties.environment = 'production' AND timestamp > now() - INTERVAL 8 DAY
+   GROUP BY upload
+   HAVING completed != true AND opened < now() - INTERVAL 1 DAY
+   ORDER BY opened DESC
+   ```
+   A Gmail session refused on its first chunk (a non-whitelisted Cc or Bcc)
+   is stranded by design. `refused_chunks > 0` separates those uploads from
+   ones the agent abandoned.
+
+4. **Limits hit**: our own 413s, expired keys, and chunk errors and timeouts.
+
+   ```sql
+   SELECT toDate(timestamp) AS day,
+          countIf(properties.oversize_refused) AS fgac_413,
+          countIf(properties.auth_failure_reason = 'expired' AND properties.key_kind = 'temporary') AS expired_key_401,
+          countIf(properties.upload_type = 'resumable_chunk' AND properties.status = 400) AS chunk_400,
+          countIf(properties.upload_type = 'resumable_chunk' AND properties.outcome = 'timeout') AS chunk_timeout,
+          countIf(properties.streamed AND properties.outcome = 'timeout') AS stream_timeout
+   FROM events
+   WHERE event = 'proxy_request' AND properties.environment = 'production' AND timestamp > now() - INTERVAL 14 DAY
+   GROUP BY day ORDER BY day
+   ```
+   **Blind spot:** a body over 4.5 MB is rejected by Vercel with
+   `FUNCTION_PAYLOAD_TOO_LARGE` *before* FGAC runs, so it is never in
+   PostHog. Check weekly, read-only:
+   `npx vercel logs <production deployment url> | grep -c FUNCTION_PAYLOAD_TOO_LARGE`
+   (or Vercel Observability → Errors, filtered to `/api/proxy` and
+   `/api/mcp`). Any hit on `/api/proxy` means some client ignores the 4 MB
+   chunk guidance, which our own 4.25 MiB refusal should have caught first.
+
+5. **Demand not converting**: windowed reads large enough to show the hint
+   (`large_file_hint_shown`), and whether that person minted a key within
+   10 minutes.
+
+   ```sql
+   SELECT h.person_id, h.t AS hinted_at, h.tool, m.t AS minted_at
+   FROM (SELECT person_id, timestamp AS t, properties.$mcp_tool_name AS tool FROM events
+         WHERE event = '$mcp_tool_call' AND properties.large_file_hint_shown
+           AND properties.environment = 'production' AND timestamp > now() - INTERVAL 14 DAY) AS h
+   LEFT JOIN (SELECT person_id, min(timestamp) AS t FROM events
+              WHERE event = 'temp_api_key_created' AND timestamp > now() - INTERVAL 15 DAY
+              GROUP BY person_id) AS m ON m.person_id = h.person_id
+   ORDER BY h.t DESC
+   ```
+   A `minted_at` of 1970 means no mint (the ClickHouse LEFT JOIN fill). A
+   mint after the hint is a conversion. A hint with no mint on a client that
+   does run code is the case to read in session recordings or the agent's
+   transcript.
+
+6. **Runaway keys**: refusals at the 10-live-key cap, and the busiest
+   temporary keys. A script stuck in a loop shows up here before it shows up
+   anywhere else.
+
+   ```sql
+   SELECT properties.temp_key_id AS k, count() AS calls, uniq(properties.status) AS statuses,
+          min(timestamp) AS first, max(timestamp) AS last
+   FROM events
+   WHERE event = 'proxy_request' AND properties.key_kind = 'temporary'
+     AND properties.environment = 'production' AND timestamp > now() - INTERVAL 2 DAY
+   GROUP BY k ORDER BY calls DESC LIMIT 20
+   ```
+   Pair it with `SELECT count() FROM events WHERE event = 'temp_api_key_refused'
+   AND properties.reason = 'rate_capped' AND timestamp > now() - INTERVAL 7 DAY`.

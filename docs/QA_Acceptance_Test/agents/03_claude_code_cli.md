@@ -41,7 +41,10 @@ This runs each test case via `claude -p` (non-interactive mode) with:
 - `--output-format json` — structured results with tool calls, cost, turns
 - `--allowedTools "Bash(node:*)"` — restricted to skill scripts
 - `--max-turns 5` — prevents runaway execution
-- `--dangerously-skip-permissions` — unattended execution
+- `--permission-mode auto` — unattended execution with the auto-mode classifier
+  reviewing each action (replaced `--permission-mode auto` on 2026-10-05:
+  it predates auto mode and nested bypass sessions are denied by the
+  orchestrator's classifier)
 
 > **Key insight**: Slash commands (`/fgac`) are interactive-only. In `-p` mode,
 > prompts reference the skill by its trigger description in natural language
@@ -62,14 +65,14 @@ This runs each test case via `claude -p` (non-interactive mode) with:
 ### A1: Send to whitelisted address
 ```bash
 claude -p "Using the fgac skill, send an email to \$USER_B_EMAIL with subject 'QA CC CLI - Send Whitelist A1' and body 'Test'" \
-  --allowedTools "Bash(node:*)" --output-format json --max-turns 5 --dangerously-skip-permissions
+  --allowedTools "Bash(node:*)" --output-format json --max-turns 5 --permission-mode auto
 ```
 - [ ] Result contains "sent successfully" or "Message ID"
 
 ### A2: Send to blocked address
 ```bash
 claude -p "Using the fgac skill, send an email to blocked@untrusted.com with subject 'Should Block' and body 'Test'" \
-  --allowedTools "Bash(node:*)" --output-format json --max-turns 5 --dangerously-skip-permissions
+  --allowedTools "Bash(node:*)" --output-format json --max-turns 5 --permission-mode auto
 ```
 - [ ] Result contains "blocked", "403", "Unauthorized", or "whitelist"
 
@@ -80,7 +83,7 @@ claude -p "Using the fgac skill, send an email to blocked@untrusted.com with sub
 ### A3: Read normal email
 ```bash
 claude -p "Using the fgac skill, list my 5 most recent emails" \
-  --allowedTools "Bash(node:*)" --output-format json --max-turns 5 --dangerously-skip-permissions
+  --allowedTools "Bash(node:*)" --output-format json --max-turns 5 --permission-mode auto
 ```
 - [ ] Result contains email subjects/senders or appropriate rule-based block message
 
@@ -91,7 +94,7 @@ claude -p "Using the fgac skill, list my 5 most recent emails" \
 ### A4: List accounts
 ```bash
 claude -p "Using the fgac skill, what email accounts can I access?" \
-  --allowedTools "Bash(node:*)" --output-format json --max-turns 5 --dangerously-skip-permissions
+  --allowedTools "Bash(node:*)" --output-format json --max-turns 5 --permission-mode auto
 ```
 - [ ] Result shows mapped email addresses
 
@@ -216,6 +219,28 @@ No tmux sessions to clean up. Results are saved to `test/qa-envs/cc-cli/evals/re
   limit) and the ⚠️/❌ guidance. A3 reassembly: script the windows via the
   eval harness, concatenate + decode once, compare length/hash.
 - A8: fold into the Analytics Events queries below (same run window).
+
+## Capability: Temporary API Keys (→ capabilities/23_temporary_api_keys.md)
+
+- Fixtures per the capability doc: a ~2 MB attachment in USER_A's mailbox, and for A8 a
+  scratch profile + scratch connection (manual DCR token). Never revoke the baseline profile.
+- Mask minted keys in evidence (`sk_proxy_…<last4>`).
+- A1–A11: headless `claude -p` evals that call the tool and script the proxy requests; grade on
+  the response text and HTTP statuses. Dashboard steps (A5, A7, A8) run in the built-in browser.
+- A12: a `claude -p` eval with the capability's prompt verbatim, graded on the stream-json
+  transcript (mint call, request count, hash, no key echoed).
+- If the CLI login has expired, these are `blocked` ("USER ACTION REQUIRED: `claude login`"),
+  never `skip`.
+- A13: fold into the Analytics Events queries below (same run window), plus monitoring §7.34 (1)–(2).
+
+## Capability: Large File Transfer (→ capabilities/24_large_file_transfer.md)
+
+- Fixtures: generate `qa-out/big.bin` (8 MB random), a ~1 MB PNG, and a ~6 MB attachment.
+  `qa-out/` is gitignored scratch; delete it after the run. Hash every file sent and received.
+- A1–A8: eval-driven scripts per the capability doc.
+- A9: a `claude -p` eval with the prompt verbatim, graded as in the CC MCP runbook.
+- An expired CLI login → `blocked` with USER ACTION.
+- A10: fold into the Analytics Events queries below, plus monitoring §7.34 (3).
 
 ---
 

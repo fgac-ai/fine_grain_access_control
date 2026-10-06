@@ -117,3 +117,22 @@ Behind a per-user feature flag — the PostHog feature flag `drive_tree`, evalua
 5. **Two gates, both required**: the flag, and the live token carrying `https://www.googleapis.com/auth/drive` (tokeninfo, never Clerk's record). A flagged user still on `drive.file` sees the legacy cards plus an "Enable full Drive access" card; the scope is requested **only** there (in-place `reauthorize`, consent prompt) and in the nav UserButton's connect-account scopes for flagged users. Nobody else's sign-in, reconnect or Picker flow mentions `drive`. The restricted scope needs Google verification (CASA) before the flag goes beyond ≤100 test users in production.
 6. **Enforcement doors**: the MCP route's `checkFilePermission` (typed Sheets/Docs/Slides tools, comments, raw per-file calls), the id-addressed Drive guard (`checkDriveFileAccess` — every file kind, PDFs included), `files/{id}/copy`, raw `drive/v3/files` listings (forwarded with a widened `fields` mask, then filtered, `withheld: n`), and the REST proxy's Drive-file guard, per-kind handlers and listings — all through the same resolver. The engine context rides a dedicated AsyncLocalStorage store (`toolCallContext.ts`) so the token never enters the analytics bag. `get_my_permissions.defaults.drive` states the posture. Delegated mailboxes stay on the per-file path.
 7. **Dashboard** (`DriveAccessCard`): the three roots as a lazy tree (`/api/drive/children`), search across the whole Drive with each hit's path (`/api/drive/search`), a folder view whose breadcrumb is the inheritance chain (pills only on folders that carry a setting), and an Inherit · Read · Write · Block control on every row that saves on change.
+
+## 5. Large Payloads — Temporary API Keys (2026-10-03)
+
+MCP tool calls cannot carry files: tool results are windowed at ~150 KB, and Vercel caps
+every request body, and every buffered response body, at 4.5 MB. Instead of caching files,
+FGAC stays a pass-through and lets the agent's own code use Prong 1:
+
+- **`create_temporary_api_key`** (MCP) mints an `sk_proxy_tmp_` key (default 15 min,
+  max 60) for the calling connection. It lives in `temporary_api_keys` (hash only) and
+  is a *pointer* to the connection's profile key: the REST proxy swaps it for the parent
+  at authentication, so every rule, refusal and revocation applies unchanged.
+- **Downloads stream.** Drive media, Sheets/Docs/Slides responses and Gmail attachments are
+  piped, not buffered (attachments after the parent message passes the read rules).
+- **Uploads go in chunks.** Google's resumable protocol runs through the proxy in ≤ 4 MB
+  chunks. FGAC opens the session, keeps Google's session URL server-side, and gives the
+  caller an FGAC session URL bound to the profile. A Gmail send's recipients are checked
+  on the chunk that starts at byte 0, before any byte reaches Google.
+
+Runbook: `docs/monitoring.md` §7.34. Plan: `docs/implementation_plans/large-api-payload-options_v5.md`.
