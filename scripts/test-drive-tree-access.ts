@@ -1,12 +1,14 @@
 /**
  * Unit tests for the folder-inherited Drive access model:
  *   src/lib/driveTreeAccess.ts (pure resolver, listing helpers) and
- *   src/lib/driveLineage.ts (lineage walk over a fake Drive, caching).
+ *   src/lib/driveLineage.ts (lineage walk over a fake Drive, caching), and
+ *   the Drive discovery classifier both API surfaces share.
  * Run: npx tsx scripts/test-drive-tree-access.ts  (part of `npm run mcp:lint`)
  */
 import {
   resolveDriveTreeAccess, effectiveDriveAccess, settingsFromRules, widenListFields, partitionListing,
   normalizeDriveDefault, driveDenialText, accessFromActionType, type LineageNode,
+  classifyDriveDiscovery, driveDiscoveryRefusal, sharedDriveAccess, filterSharedDrives,
   SHARED_WITH_ME_ID, SHARED_DRIVES_ID, FOLDER_MIME,
 } from '../src/lib/driveTreeAccess';
 import {
@@ -107,6 +109,71 @@ check('files/ syntax appended', widenListFields('files/id')!.startsWith('files/i
 check('a mask with no files is untouched', widenListFields('nextPageToken') === 'nextPageToken');
 const part = partitionListing([{ id: 'a' }, { id: 'b' }, { id: 'c' }], f => (f.id === 'b' ? 'block' : 'read'));
 check('partition withholds blocked files and counts them', part.files.length === 2 && part.withheld === 1);
+
+// ── Drive discovery under the tree engine (2026-10-03 adversarial review):
+// only `drive/v3/files` was filtered; every other listing-shaped read —
+// `drive/v2/files`, the `drive/v3/files/` trailing-slash spelling, changes
+// (v2 and v3), v2 folder children, shared-drive listings — returned names,
+// thumbnailLink and exportLinks of Blocked files with the full `drive` scope.
+console.log('Drive discovery classification (tree engine on):');
+const disc = (p: string, m = 'GET') => classifyDriveDiscovery(p, m);
+check('drive/v3/files → filtered listing', disc('drive/v3/files')?.kind === 'filter_files');
+check('drive/v3/files with a query → filtered listing', disc('drive/v3/files?q=name%20contains%20%27x%27&fields=files(name,thumbnailLink)')?.kind === 'filter_files');
+check('trailing-slash drive/v3/files/ → filtered listing, never unfiltered passthrough', disc('drive/v3/files/')?.kind === 'filter_files');
+check('trailing-slash with a query → filtered listing', disc('drive/v3/files/?q=trashed%3Dfalse')?.kind === 'filter_files');
+check('doubled slashes drive//v3//files → filtered listing', disc('drive//v3//files')?.kind === 'filter_files');
+check('HEAD on the listing is treated as a read', disc('drive/v3/files', 'HEAD')?.kind === 'filter_files');
+check('drive/v2/files (v2 list: title, exportLinks) → refused', disc('drive/v2/files')?.kind === 'refuse');
+check('drive/v2/files/ trailing slash → refused', disc('drive/v2/files/?maxResults=100')?.kind === 'refuse');
+check('drive/v3/changes → refused', disc('drive/v3/changes?pageToken=1')?.kind === 'refuse');
+check('drive/v2/changes → refused', disc('drive/v2/changes')?.kind === 'refuse');
+check('drive/v3/changes/ trailing slash → refused', disc('drive/v3/changes/?pageToken=1')?.kind === 'refuse');
+check('POST drive/v3/changes/watch (push channel over changes) → refused', disc('drive/v3/changes/watch?pageToken=1', 'POST')?.kind === 'refuse');
+check('v2 folder children listing → refused', disc('drive/v2/files/folder123/children')?.kind === 'refuse');
+check('v2 folder children with a child id → refused', disc('drive/v2/files/folder123/children/child9')?.kind === 'refuse');
+check('teamdrives (deprecated shared-drive list) → refused', disc('drive/v3/teamdrives')?.kind === 'refuse' && disc('drive/v2/teamdrives')?.kind === 'refuse');
+check('v2 drives list → refused (v2 shape is not filtered)', disc('drive/v2/drives')?.kind === 'refuse');
+check('an unknown Drive GET endpoint fails closed → refused', disc('drive/v3/somethingNew')?.kind === 'refuse');
+check('drive/v3/drives → filtered shared-drive listing', disc('drive/v3/drives?pageSize=10')?.kind === 'filter_drives');
+check('drive/v3/drives/{id} → gated on that shared drive', (() => { const d = disc('drive/v3/drives/drv1'); return d?.kind === 'shared_drive' && d.driveId === 'drv1'; })());
+check('about / startPageToken / apps / generateIds → allowed as is',
+  ['drive/v3/about?fields=user', 'drive/v2/about', 'drive/v3/changes/startPageToken', 'drive/v2/changes/startPageToken', 'drive/v3/apps', 'drive/v3/files/generateIds?count=3', 'drive/v2/files/generateIds']
+    .every(p => disc(p)?.kind === 'allow'));
+check('id-addressed file calls are not discovery (gated per file elsewhere)',
+  ['drive/v3/files/abc', 'drive/v3/files/abc/export?mimeType=text/plain', 'drive/v2/files/abc', 'drive/v2/files/abc?alt=media', 'drive/v2/files/abc/parents', 'drive/v3/files//abc']
+    .every(p => disc(p) === null));
+check('writes other than changes/watch are not discovery', disc('drive/v3/files', 'POST') === null && disc('drive/v3/drives', 'POST') === null && disc('drive/v3/files/abc', 'PATCH') === null);
+check('non-Drive paths are not discovery', disc('gmail/v1/users/me/messages') === null && disc('v4/spreadsheets/abc') === null);
+check('bare v3/files spelling is classified like drive/v3/files', disc('v3/files/')?.kind === 'filter_files' && disc('v3/changes')?.kind === 'refuse');
+check('upload/drive paths are not discovery reads', disc('upload/drive/v3/files?uploadType=media', 'POST') === null);
+const refusal = disc('drive/v3/changes');
+check('the refusal names the endpoint and points at drive/v3/files', refusal?.kind === 'refuse' && /drive\/v3\/changes/.test(driveDiscoveryRefusal(refusal.endpoint)) && /drive\/v3\/files/.test(driveDiscoveryRefusal(refusal.endpoint)));
+const childRefusal = disc('drive/v2/files/folder123/children');
+check('the children refusal suggests the in-parents query', childRefusal?.kind === 'refuse' && /in parents/.test(driveDiscoveryRefusal(childRefusal.endpoint)));
+
+console.log('shared-drive filtering:');
+const blockDrv = settingsFromRules([{ id: 'x', service: 'drive', actionType: 'drive_block', targetResourceId: 'drvB', targetKind: 'shared_drive' }]);
+check('a Blocked shared drive resolves to block', sharedDriveAccess('drvB', 'Legal', blockDrv, 'read') === 'block');
+check('an unset shared drive follows the default', sharedDriveAccess('drvA', 'Eng', blockDrv, 'read') === 'read' && sharedDriveAccess('drvA', 'Eng', blockDrv, 'explicit') === 'block');
+const blockAllDrives = settingsFromRules([{ id: 'y', service: 'drive', actionType: 'drive_block', targetResourceId: SHARED_DRIVES_ID, targetKind: 'shared_drives' }]);
+check('Blocked "Shared drives" pseudo-root blocks every shared drive', sharedDriveAccess('drvA', 'Eng', blockAllDrives, 'write') === 'block');
+const drivesPage = filterSharedDrives({ kind: 'drive#driveList', drives: [{ id: 'drvA', name: 'Eng' }, { id: 'drvB', name: 'Legal' }, { name: 'no id' }] }, blockDrv, 'read');
+check('drives.list withholds Blocked (and unidentifiable) drives and counts them',
+  drivesPage.drives.length === 1 && drivesPage.drives[0].id === 'drvA' && drivesPage.withheld === 2 && drivesPage.kind === 'drive#driveList');
+
+console.log('route wiring (both surfaces use the shared discovery classifier):');
+{
+  const { readFileSync } = require('fs') as typeof import('fs');
+  const { join } = require('path') as typeof import('path');
+  const mcp = readFileSync(join(__dirname, '..', 'src', 'app', 'api', 'mcp', 'route.ts'), 'utf8');
+  const proxy = readFileSync(join(__dirname, '..', 'src', 'app', 'api', 'proxy', '[...path]', 'route.ts'), 'utf8');
+  check('MCP route calls classifyDriveDiscovery', /classifyDriveDiscovery\(/.test(mcp));
+  check('MCP route no longer matches the listing with an exact-path regex', !/\/\^drive\\\/v3\\\/files\(\\\?\|\$\)\//.test(mcp));
+  check('REST proxy calls classifyDriveDiscovery', /classifyDriveDiscovery\(/.test(proxy));
+  check('REST proxy no longer has the exact-path isDriveListPath', !/isDriveListPath/.test(proxy));
+  check('REST proxy builds the engine for every drive/ path, not only drive/v[23]/files',
+    !/const drivePath = \/\^drive\\\/v\[23\]\\\/files\//.test(proxy));
+}
 
 console.log('lineage walk over a fake Drive:');
 const fake: Record<string, DriveFileMeta> = {

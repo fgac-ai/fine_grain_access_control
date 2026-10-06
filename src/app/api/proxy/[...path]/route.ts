@@ -20,7 +20,8 @@ import { driveTreeFlagOn } from '@/lib/featureFlags';
 import { liveTokenScopes, DRIVE_FULL_SCOPE } from '@/lib/googleTokenScopes';
 import {
   resolveDriveTreeAccess, effectiveDriveAccess, settingsFromRules, normalizeDriveDefault, driveDenialText, widenListFields,
-  type DriveDefault, type DriveSetting,
+  classifyDriveDiscovery, driveDiscoveryRefusal, sharedDriveAccess, sharedDriveBlockedText, filterSharedDrives,
+  type DriveDefault, type DriveSetting, type DriveDiscovery,
 } from '@/lib/driveTreeAccess';
 import { resolveDriveLineage, resolveLineageFrom, parseDriveFileMeta, driveMetaUrl, LineageError, MAX_LINEAGE_HOPS, type MetaFetcher } from '@/lib/driveLineage';
 
@@ -515,6 +516,8 @@ async function forwardDriveCall(
   fileId?: string,
   /** POST drive/v3/files (incl. upload/ media/multipart): grant the result to the profile. */
   isCreate = false,
+  /** The tree engine's verdict on a discovery read (PR #181): which listing filter applies. */
+  driveDiscovery: DriveDiscovery | null = null,
 ): Promise<NextResponse> {
   telemetry.targetEmail = owner.email;
   telemetry.accountDelegated = false;
@@ -531,7 +534,8 @@ async function forwardDriveCall(
   const canonicalPath = canonicalizeGoogleApiPath(fullPath);
   // Drive tree engine: a Drive listing is forwarded with a fields mask wide
   // enough to resolve each file's lineage, then filtered below.
-  const filterListing = !!driveTree && request.method === 'GET' && isDriveListPath(canonicalPath);
+  const filterListing = !!driveTree && driveDiscovery?.kind === 'filter_files';
+  const filterDrives = !!driveTree && driveDiscovery?.kind === 'filter_drives';
   let search = request.nextUrl.search;
   if (filterListing) {
     const urlParams = new URLSearchParams(request.nextUrl.searchParams);
@@ -541,12 +545,14 @@ async function forwardDriveCall(
   }
   const url = `https://www.googleapis.com/${canonicalPath}${search}`;
   const body = isMutating ? await request.clone().arrayBuffer() : undefined;
-  if (filterListing && driveTree) {
+  if ((filterListing || filterDrives) && driveTree) {
     // The tree engine must read the listing to filter it: buffered.
     const forward = await forwardToGoogle(url, { method: request.method, headers, body }, telemetry);
     if (!forward.ok) return forward.response;
     if (forward.status === 200 && forward.headers.get('content-type')?.includes('application/json')) {
-      const filtered = await proxyFilterDriveListing(driveTree, forward.body);
+      const filtered = filterListing
+        ? await proxyFilterDriveListing(driveTree, forward.body)
+        : proxyFilterSharedDrives(driveTree, forward.body);
       const responseHeaders = new Headers(forward.headers);
       responseHeaders.delete('content-encoding');
       responseHeaders.delete('content-length');
@@ -577,7 +583,8 @@ async function forwardDriveCall(
 // ─── DRIVE TREE ENGINE (feature-flagged folder-inherited access) ─────────────
 // Mirror of the MCP route's engine (src/lib/driveTreeAccess.ts): with the
 // key owner's flag on and the live token carrying the full `drive` scope,
-// the Drive-file guard, the per-kind handlers and Drive listings below defer
+// the Drive-file guard, the per-kind handlers and Drive discovery reads
+// (classifyDriveDiscovery: listings filtered, unfilterable ones refused) defer
 // to the folder-lineage resolver instead of the per-file rule table alone.
 
 type ProxyDriveTree = {
@@ -588,17 +595,15 @@ type ProxyDriveTree = {
   clerkUserId: string;
 };
 
-function isDriveListPath(fullPath: string): boolean {
-  return /^drive\/v3\/files$/.test(fullPath.split('?')[0]);
-}
-
 async function proxyDriveTreeEngine(
   dbUser: { id: string; email: string; clerkUserId: string },
   proxyKeyId: string,
   fullPath: string,
   telemetry: ProxyTelemetry,
 ): Promise<ProxyDriveTree | null> {
-  const drivePath = /^drive\/v[23]\/files/.test(fullPath) || !!driveFileKindForPath(fullPath);
+  // Every drive/ path, not only drive/v[23]/files: changes, drives and v2
+  // listings name files too (2026-10-03 review).
+  const drivePath = /^(upload\/)?drive\//i.test(fullPath) || !!driveFileKindForPath(fullPath);
   if (!drivePath) return null;
   if (!(await driveTreeFlagOn({ clerkUserId: dbUser.clerkUserId, email: dbUser.email }))) return null;
   const token = await fetchClerkGoogleToken(dbUser.clerkUserId, dbUser.clerkUserId, telemetry);
@@ -967,6 +972,14 @@ async function handleResumableChunk(
   return new NextResponse(forward.body, { status: forward.status, headers: uploadResponseHeaders(forward.headers) });
 }
 
+/** drives.list under the tree engine: Blocked shared drives withheld, `withheld` says how many. */
+function proxyFilterSharedDrives(engine: ProxyDriveTree, body: string): string {
+  let data: { drives?: unknown[] } | null = null;
+  try { data = JSON.parse(body); } catch { return body; }
+  if (!data || !Array.isArray(data.drives)) return body;
+  return JSON.stringify(filterSharedDrives(data, engine.settings, engine.driveDefault));
+}
+
 async function handleProxyRequest(request: NextRequest, params: { path: string[] }, telemetry: ProxyTelemetry) {
   try {
     const authHeader = request.headers.get('authorization');
@@ -976,7 +989,10 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     }
 
     const keyValue = authHeader.split(' ')[1];
-    const fullPath = params.path.join('/');
+    // Canonical spelling (bare `v3/files` → `drive/v3/files`, Drive slashes
+    // collapsed) so the guards below and the forwarded URL see one path —
+    // `drive/v3/files/` or `files//{id}` must not slip past an exact match.
+    const fullPath = canonicalizeGoogleApiPath(params.path.join('/'));
     // Same guard as the MCP classifier: a `..` segment would let the per-file
     // check authorize one id while Google serves another.
     if (hasDotSegment(fullPath)) {
@@ -1122,6 +1138,19 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
       dbUser, dbKey.id, canonicalizeGoogleApiPath(fullPath).replace(/^upload\//, ''), telemetry,
     );
 
+    // Drive discovery under the tree engine (PR #181): listing-shaped reads can
+    // name Blocked files, so they are filtered in forwardDriveCall or refused here.
+    const driveDiscovery: DriveDiscovery | null = driveTree ? classifyDriveDiscovery(fullPath, request.method) : null;
+    if (driveDiscovery?.kind === 'refuse') {
+      telemetry.denialCode = 'drive_discovery_unfiltered';
+      return NextResponse.json({ error: driveDiscoveryRefusal(driveDiscovery.endpoint) }, { status: 403 });
+    }
+    if (driveTree && driveDiscovery?.kind === 'shared_drive'
+      && sharedDriveAccess(driveDiscovery.driveId, '', driveTree.settings, driveTree.driveDefault) === 'block') {
+      telemetry.denialCode = 'drive_blocked';
+      return NextResponse.json({ error: sharedDriveBlockedText(driveDiscovery.driveId) }, { status: 403 });
+    }
+
     // ─── GOOGLE DRIVE PER-FILE ACCESS GUARD ──────────────────────────────────
     // Policy: never override Google's native API behavior for discovery —
     // listing passes through (above; filtered by the tree engine when on). But ACCESS to a specific file
@@ -1142,7 +1171,7 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     // the `upload/` variant): the new file is app-owned, so no existing file
     // is reachable through them.
     if (cls.kind === 'passthrough' || cls.kind === 'drive_create') {
-      return forwardDriveCall(request, fullPath, dbUser, telemetry, dbKey.id, driveTree, undefined, cls.kind === 'drive_create');
+      return forwardDriveCall(request, fullPath, dbUser, telemetry, dbKey.id, driveTree, undefined, cls.kind === 'drive_create', driveDiscovery);
     }
 
     // ─── PER-FILE PROXY HANDLER (Sheets / Docs / Slides) ─────────────────────

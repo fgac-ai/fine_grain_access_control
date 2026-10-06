@@ -235,6 +235,27 @@ by the nav UserButton's connect-account scopes (via `/api/drive/flag`).
   the per-kind cards are back; A1's call denies `sheets_not_exposed`. This is
   also the mandatory restore step for the QA baseline.
 
+### A21: No unfiltered discovery path leaks a Blocked file
+Added 2026-10-03 after an adversarial review found that only the exact path
+`drive/v3/files` was filtered. Keep Test Folder K (and a file `K1` inside it)
+**Blocked** for this run.
+- Raw `google_api_get` on each of: `drive/v3/files/?q=name contains 'K1'`
+  (trailing slash), `drive/v2/files?q=title contains 'K1'`,
+  `drive/v3/changes?pageToken=<startPageToken>`, `drive/v2/changes`,
+  `drive/v2/files/<K folder id>/children`, `drive/v3/teamdrives`, and
+  `drive/v2/files/<K1 id>?alt=media`. Repeat the first four through the REST
+  proxy (`/api/proxy/drive/...`) with the Default Profile's `sk_proxy_` key.
+- **Expected**: the trailing-slash listing is the filtered listing (no `K1`,
+  `withheld` ≥ 1); changes, v2 lists, v2 children and teamdrives are refused
+  (🚫 on MCP, 403 on the proxy) with text pointing at `GET drive/v3/files`,
+  `denial_code: drive_discovery_unfiltered`; the v2 `alt=media` read is
+  denied `drive_blocked` exactly like the v3 read. `drive/v3/about` and
+  `drive/v3/changes/startPageToken` still answer normally. No response body
+  anywhere contains `K1`'s name.
+- Set one shared drive to **Block** (if the QA account has one): `GET
+  drive/v3/drives` omits it with `withheld: 1`, and `GET drive/v3/drives/<id>`
+  is denied `drive_blocked` without returning its name.
+
 ## Out of scope for this capability
 * Google verification / CASA for the restricted scope (user action).
 * Shared-drive fixtures (the QA accounts cannot create one; the

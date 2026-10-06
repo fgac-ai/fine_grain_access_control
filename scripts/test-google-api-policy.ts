@@ -196,6 +196,24 @@ expect('drive files list with query stays passthrough',
 expect('drive about/changes/drives stay passthrough (not file-addressed)',
   [classifyGoogleApiCall('drive/v3/about?fields=user', 'GET'), classifyGoogleApiCall('drive/v3/changes/startPageToken', 'GET'), classifyGoogleApiCall('drive/v3/drives', 'GET')],
   (cs: Array<{ kind: string }>) => cs.every(c => c.kind === 'passthrough'));
+// Drive v2 addresses the same files (`files/{id}`, `?alt=media` downloads,
+// exportLinks) — before 2026-10-03 only v3 ids were gated, so a Blocked file
+// was readable through drive/v2/files/{id} as unknown-family passthrough.
+expect('drive v2 file GET → drive_file (same per-file gate as v3)',
+  classifyGoogleApiCall('drive/v2/files/1BxiM2doc-ID_x?alt=media', 'GET'),
+  (c: { kind: string; fileId?: string; isMutating?: boolean }) => c.kind === 'drive_file' && c.fileId === '1BxiM2doc-ID_x' && c.isMutating === false);
+expect('drive v2 file PATCH → drive_file mutating',
+  classifyGoogleApiCall('drive/v2/files/1BxiM2doc-ID_x', 'PATCH'),
+  (c: { kind: string; isMutating?: boolean }) => c.kind === 'drive_file' && c.isMutating === true);
+expect('drive v2 files/generateIds stays passthrough',
+  classifyGoogleApiCall('drive/v2/files/generateIds', 'GET'),
+  (c: { kind: string }) => c.kind === 'passthrough');
+expect('trailing-slash listing is the listing, not a drive_file with an empty id',
+  classifyGoogleApiCall('drive/v3/files/?q=x', 'GET'),
+  (c: { kind: string }) => c.kind === 'passthrough');
+expect('doubled slash before an id still gates that id',
+  classifyGoogleApiCall('drive/v3/files//1BxiM2doc-ID_x', 'GET'),
+  (c: { kind: string; fileId?: string }) => c.kind === 'drive_file' && c.fileId === '1BxiM2doc-ID_x');
 expect('copy still wins over drive_file (more specific)',
   classifyGoogleApiCall('drive/v3/files/1BxiM2doc-ID_x/copy', 'POST'),
   (c: { kind: string }) => c.kind === 'drive_copy');
@@ -562,6 +580,24 @@ expect('leading slash stripped, query preserved',
 expect('idempotent on the canonical spelling',
   canonicalizeGoogleApiPath('drive/v3/files/1Abc'),
   (p: string) => p === 'drive/v3/files/1Abc');
+// Drive paths are collapsed to one spelling so classification, the tree
+// engine's listing filter and the forwarded URL all see the same path
+// (2026-10-03: `drive/v3/files/` skipped the filter and reached Google).
+expect('trailing slash on a Drive collection is dropped, query preserved',
+  canonicalizeGoogleApiPath('drive/v3/files/?q=name'),
+  (p: string) => p === 'drive/v3/files?q=name');
+expect('doubled slashes inside a Drive path are collapsed',
+  canonicalizeGoogleApiPath('drive//v3/files//1Abc/'),
+  (p: string) => p === 'drive/v3/files/1Abc');
+expect('bare spelling with a trailing slash is canonicalised too',
+  canonicalizeGoogleApiPath('v3/files/'),
+  (p: string) => p === 'drive/v3/files');
+expect('upload/drive paths are collapsed the same way',
+  canonicalizeGoogleApiPath('upload/drive/v3/files/?uploadType=media'),
+  (p: string) => p === 'upload/drive/v3/files?uploadType=media');
+expect('non-Drive paths keep their slashes (Gmail/Sheets untouched)',
+  canonicalizeGoogleApiPath('gmail/v1/users/me/messages/'),
+  (p: string) => p === 'gmail/v1/users/me/messages/');
 expect('a full googleapis.com URL (what agents send under `url`) is reduced to its path',
   canonicalizeGoogleApiPath('https://gmail.googleapis.com/gmail/v1/users/me/messages?q=is%3Aunread'),
   (p: string) => p === 'gmail/v1/users/me/messages?q=is%3Aunread');
