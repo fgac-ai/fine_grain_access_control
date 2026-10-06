@@ -66,6 +66,10 @@ function installFetch() {
         scopes: ['https://www.googleapis.com/auth/gmail.modify', 'https://www.googleapis.com/auth/drive.file'],
       }] }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
+    // Google tokeninfo (scope checks): the fixture token holds drive.file, not the full drive scope.
+    if (new URL(url).hostname === 'oauth2.googleapis.com') {
+      return new Response(JSON.stringify({ scope: 'https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/drive.file', expires_in: 3000 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
     const body = init?.body as ArrayBuffer | undefined;
     // Node's fetch (undici) refuses these outright — mirror it so a forwarded
     // client connection header fails the test the way it fails in production.

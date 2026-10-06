@@ -256,6 +256,23 @@ Added 2026-10-03 after an adversarial review found that only the exact path
   drive/v3/drives` omits it with `withheld: 1`, and `GET drive/v3/drives/<id>`
   is denied `drive_blocked` without returning its name.
 
+### A22: A full-scope token outside the engine fails closed
+- Precondition: USER_A (flagged) holds the full `drive` scope (tokeninfo
+  shows `.../auth/drive`) and delegates their mailbox to USER_B. Using a
+  USER_B key that reaches USER_A's mailbox:
+  1. `google_api_get` `drive/v3/files` with `account: <USER_A>`;
+  2. `google_api_get` `drive/v3/files/<id>?alt=media` on a USER_A PDF or
+     image no rule names, with `account: <USER_A>`.
+- **Expected**: both 🚫 with `denial_code: 'drive_full_scope_unconfined'` and
+  `drive_scope_unconfined: true` (call 2 also `drive_file_gate: 'unconfined'`);
+  no file names or bytes in the response. A USER_A Sheet exposed to the key
+  by a per-file rule still reads normally. Before 2026-10-03 call 1 listed
+  USER_A's whole Drive and call 2 returned the file (`mime_other`).
+- Same refusal on USER_A's OWN mailbox if USER_A is removed from the flag
+  while still holding the full scope; on the REST proxy that case answers
+  `GET /api/proxy/drive/v3/files` 403 (`error_status`
+  `drive_full_scope_unconfined`, `denial_code` the same). The proxy has no delegated-mailbox path; a no-rule non-Sheets/Docs/Slides file read through the proxy with that token is refused the same way (`denial_code: drive_full_scope_unconfined`).
+
 ## Out of scope for this capability
 * Google verification / CASA for the restricted scope (user action).
 * Shared-drive fixtures (the QA accounts cannot create one; the

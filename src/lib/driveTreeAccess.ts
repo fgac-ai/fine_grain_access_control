@@ -224,6 +224,38 @@ export function driveDenialText(
   return `🚫 Access Denied: '${fileLabel}' is not allowed for this agent profile — its default is "${driveDefaultLabel(driveDefault)}" and no folder or file setting reaches it. ${DASHBOARD_PROFILE_HINT} ${dashboardUrl}`;
 }
 
+// ─── Full-scope tokens outside the engine ───────────────────────────────────
+
+/**
+ * True when the live token carries the full `drive` scope but the tree
+ * engine is NOT confining it: a delegated mailbox whose owner granted the
+ * scope (the engine runs only for the key owner's own mailbox), or the
+ * owner's own mailbox after the flag is switched off. The legacy per-file
+ * path assumes `drive.file` — Google hiding every unpicked file — so in this
+ * state its Drive listings and `mime_other` reads would see the whole Drive.
+ * Callers fail closed on both.
+ */
+export function driveScopeUnconfined(ctx: { active: boolean; hasDriveFullScope: boolean } | undefined): boolean {
+  return !!ctx && !ctx.active && ctx.hasDriveFullScope;
+}
+
+/** A Drive API path (`drive/v2/…`, `drive/v3/…`, their `upload/` twins), any resource. */
+export function isDriveApiPath(path: string): boolean {
+  return /^(upload\/)?drive\/v[23](\/|\?|#|$)/i.test(path.replace(/^\/+/, ''));
+}
+
+/** Denial for a Drive listing or a non-Sheets/Docs/Slides file on an unconfined full-scope token. */
+export function unconfinedDriveDenialText(o: { targetEmail: string; delegated: boolean; what: 'listing' | 'file'; fileId?: string }): string {
+  const subject = o.what === 'listing'
+    ? 'Google Drive file listing'
+    : `Drive file '${o.fileId}' (not a Sheet, Doc, or Slides deck)`;
+  const why = o.delegated
+    ? `the account owner's Google grant covers their whole Drive, and their folder-based access settings do not apply to mailboxes shared with other people's agents`
+    : `the Google grant covers the whole Drive, but folder-based Drive access is not enabled for this account`;
+  return `🚫 Access Denied: ${subject} on '${o.targetEmail}' is refused — ${why}, so FGAC cannot confine it and fails closed. ` +
+    `STOP — retrying will NOT help. Sheets, Docs and Slides exposed to this key still work by id (get_my_permissions lists them).`;
+}
+
 // ─── Drive listing (files.list) filtering ───────────────────────────────────
 
 /** Fields every listed file must carry so its lineage can be resolved. */
