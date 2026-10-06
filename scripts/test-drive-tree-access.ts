@@ -5,6 +5,8 @@
  *   the Drive discovery classifier both API surfaces share.
  * Run: npx tsx scripts/test-drive-tree-access.ts  (part of `npm run mcp:lint`)
  */
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import {
   resolveDriveTreeAccess, effectiveDriveAccess, settingsFromRules, widenListFields, partitionListing,
   normalizeDriveDefault, driveDenialText, accessFromActionType, type LineageNode,
@@ -229,8 +231,6 @@ check('drives.list withholds Blocked (and unidentifiable) drives and counts them
 
 console.log('route wiring (both surfaces use the shared discovery classifier):');
 {
-  const { readFileSync } = require('fs') as typeof import('fs');
-  const { join } = require('path') as typeof import('path');
   const mcp = readFileSync(join(__dirname, '..', 'src', 'app', 'api', 'mcp', 'route.ts'), 'utf8');
   const proxy = readFileSync(join(__dirname, '..', 'src', 'app', 'api', 'proxy', '[...path]', 'route.ts'), 'utf8');
   check('MCP route calls classifyDriveDiscovery', /classifyDriveDiscovery\(/.test(mcp));
