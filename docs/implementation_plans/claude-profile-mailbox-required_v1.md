@@ -56,7 +56,7 @@ New capability assertions in `docs/QA_Acceptance_Test/capabilities/07_key_lifecy
 - **A8** — A mailbox-less profile can be repaired from the profile page and the key then works.
 
 A8 needs a mailbox-less key; since the UI can no longer create one, the fixture is a key created
-before this change (production has some) or — on a local/preview branch — a profile whose only
+before this change (unmeasured in production) or — on a local/preview branch — a profile whose only
 mailbox was a delegation that has since been revoked (revocation deletes the rows). Do NOT
 insert/delete `key_email_access` rows directly (Database Rule 7).
 
