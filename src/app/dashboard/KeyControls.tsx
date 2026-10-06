@@ -4,6 +4,8 @@ import { useState, useTransition } from "react";
 import { Eye, EyeOff, Copy, Check } from "lucide-react";
 import { createProxyKey, revokeProxyKey, rollProxyKey } from "./actions";
 
+const PROXY_ENDPOINT = "https://gmail.fgac.ai";
+
 interface AccessibleEmail {
   email: string;
   type: 'own' | 'delegated';
@@ -83,6 +85,52 @@ export function KeyControls({
   const [isPending, startTransition] = useTransition();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [created, setCreated] = useState<{ proxyKey: string; privateKey: string } | null>(null);
+  const [selectedEmails, setSelectedEmails] = useState<string[]>([]);
+
+  const isSelectable = (ae: AccessibleEmail) => !(ae.type === 'own' && ae.hasCompleteGoogleAccess === false);
+
+  function openModal() {
+    // A profile with no mailbox is a dead key (every proxy call 403s), so
+    // start from the user's own linked mailbox — or, if it isn't linked, the
+    // first delegated one — and never let the form submit with none.
+    const selectable = accessibleEmails.filter(isSelectable);
+    const initial = selectable.find(ae => ae.type === 'own') ?? selectable[0];
+    setSelectedEmails(initial ? [initial.email] : []);
+    setCreateError(null);
+    setCreated(null);
+    setIsModalOpen(true);
+  }
+
+  function closeModal() {
+    setIsModalOpen(false);
+    setCreated(null);
+  }
+
+  function downloadSaJson(proxyKey: string, privateKey: string) {
+    const jsonContent = JSON.stringify({
+      type: "service_account",
+      project_id: "fgac-proxy",
+      private_key_id: proxyKey,
+      private_key: privateKey,
+      client_email: `${proxyKey}@fgac.ai`,
+      client_id: proxyKey,
+      auth_uri: "https://accounts.fgac.ai/o/oauth2/auth",
+      token_uri: "https://oauth2.fgac.ai/token",
+      auth_provider_x509_cert_url: "https://www.fgac.ai/oauth2/v1/certs",
+      client_x509_cert_url: `https://www.fgac.ai/robot/v1/metadata/x509/${proxyKey}%40fgac.ai`,
+    }, null, 2);
+    const blob = new Blob([jsonContent], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.style.display = 'none';
+    a.href = url;
+    a.download = `fgac-credentials-${proxyKey.substring(0, 16)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
 
   async function onSubmit(formData: FormData) {
     startTransition(async () => {
@@ -99,60 +147,16 @@ export function KeyControls({
         }
 
         if (result?.privateKey && result?.proxyKey) {
-          // Show the key and endpoint to the user (primary flow)
-          const proxyEndpoint = "https://gmail.fgac.ai";
-          const keyDisplay = result.proxyKey;
-          
-          // Copy key to clipboard
+          // Shown in the dialog, not window.alert/confirm: native dialogs are
+          // inert in the Claude desktop pane, and a modal alert is a poor
+          // place to hand over a secret.
+          setCreated({ proxyKey: result.proxyKey, privateKey: result.privateKey });
           try {
-            await navigator.clipboard.writeText(keyDisplay);
+            await navigator.clipboard.writeText(result.proxyKey);
           } catch { /* Clipboard may not be available */ }
-
-          // Prepare SA JSON for optional download (secondary flow)
-          const jsonContent = JSON.stringify({
-            type: "service_account",
-            project_id: "fgac-proxy",
-            private_key_id: result.proxyKey,
-            private_key: result.privateKey,
-            client_email: `${result.proxyKey}@fgac.ai`,
-            client_id: result.proxyKey,
-            auth_uri: "https://accounts.fgac.ai/o/oauth2/auth",
-            token_uri: "https://oauth2.fgac.ai/token",
-            auth_provider_x509_cert_url: "https://www.fgac.ai/oauth2/v1/certs",
-            client_x509_cert_url: `https://www.fgac.ai/robot/v1/metadata/x509/${result.proxyKey}%40fgac.ai`,
-          }, null, 2);
-          
-          const downloadSaJson = () => {
-            const blob = new Blob([jsonContent], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.style.display = 'none';
-            a.href = url;
-            a.download = `fgac-credentials-${result.proxyKey.substring(0, 16)}.json`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-          };
-
-          window.alert(
-            `✅ API Key Created!\n\n` +
-            `Your proxy key: ${keyDisplay}\n` +
-            `Endpoint: ${proxyEndpoint}\n\n` +
-            `The key has been copied to your clipboard.\n\n` +
-            `Configure your agent:\n` +
-            `  Python: client_options={"api_endpoint": "${proxyEndpoint}/gmail/v1"}\n` +
-            `  Node.js: rootUrl: "${proxyEndpoint}/"\n` +
-            `  cURL:    ${proxyEndpoint}/gmail/v1/users/me/messages\n` +
-            `  Header:  Authorization: Bearer ${keyDisplay}`
-          );
-          
-          // Offer SA JSON as a secondary download
-          if (window.confirm("Would you also like to download the Service Account JSON file? (Advanced — requires rootUrl override in your code)")) {
-            downloadSaJson();
-          }
+          return;
         }
-        
+
         setIsModalOpen(false);
       } catch (err) {
         console.error("Failed to create key", err);
@@ -168,7 +172,7 @@ export function KeyControls({
     <>
       {variant === 'button' ? (
         <button
-          onClick={() => setIsModalOpen(true)}
+          onClick={openModal}
           className={triggerClassName ?? 'inline-flex items-center justify-center gap-1.5 rounded-sm border border-border bg-card px-3 py-1.5 text-[13px] font-semibold text-foreground hover:bg-muted'}
         >
           {triggerLabel}
@@ -178,7 +182,7 @@ export function KeyControls({
       <div className="flex justify-between items-center mb-4">
         <h2 className="text-xl font-semibold text-gray-900">API Keys</h2>
         <button
-          onClick={() => setIsModalOpen(true)}
+          onClick={openModal}
           className="bg-blue-600 text-white hover:bg-blue-500 px-4 py-2 text-sm font-medium rounded-md transition-all shadow-sm"
         >
           {triggerLabel}
@@ -278,6 +282,46 @@ export function KeyControls({
       {isModalOpen && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 transition-all">
           <div className="bg-white rounded-xl shadow-2xl max-w-md w-full p-6 border border-slate-200">
+            {created ? (
+              <div className="flex flex-col gap-4">
+                <div>
+                  <h3 className="text-xl font-bold text-slate-900 mb-1">Profile created</h3>
+                  <p className="text-sm text-slate-800">
+                    Your key has been copied to your clipboard. Point your agent at the
+                    endpoint below and send the key as a Bearer token.
+                  </p>
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-slate-700">API key</p>
+                  <SecretKeyDisplay apiKey={created.proxyKey} className="w-full text-sm text-slate-700" />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-slate-700">Endpoint</p>
+                  <pre className="mt-1.5 whitespace-pre-wrap break-all rounded-xs border border-border bg-muted px-2 py-1.5 font-mono text-xs text-slate-700">{`${PROXY_ENDPOINT}
+Python:  client_options={"api_endpoint": "${PROXY_ENDPOINT}/gmail/v1"}
+Node.js: rootUrl: "${PROXY_ENDPOINT}/"
+cURL:    ${PROXY_ENDPOINT}/gmail/v1/users/me/messages`}</pre>
+                </div>
+                <div className="mt-2 flex flex-wrap justify-end gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => downloadSaJson(created.proxyKey, created.privateKey)}
+                    title="Advanced — requires a rootUrl override in your code"
+                    className="px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-100 rounded-md transition-colors"
+                  >
+                    Download Service Account JSON
+                  </button>
+                  <button
+                    type="button"
+                    onClick={closeModal}
+                    className="px-5 py-2.5 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-500 rounded-md shadow-sm transition-colors"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            ) : (
+            <>
             <h3 className="text-xl font-bold text-slate-900 mb-1">
               Create API Key
             </h3>
@@ -312,17 +356,20 @@ export function KeyControls({
                     {accessibleEmails.map((ae) => (
                       <label
                         key={ae.email}
-                        className={`flex items-center gap-2 text-sm ${ae.type === 'own' && ae.hasCompleteGoogleAccess === false ? 'opacity-50 text-slate-500' : 'text-slate-800'}`}
-                        title={ae.type === 'own' && ae.hasCompleteGoogleAccess === false ? "Google Account not securely linked. Open Account Settings to grant access." : ""}
+                        className={`flex items-center gap-2 text-sm ${!isSelectable(ae) ? 'opacity-50 text-slate-500' : 'text-slate-800'}`}
+                        title={!isSelectable(ae) ? "Google Account not securely linked. Open Account Settings to grant access." : ""}
                       >
                         <input
                           type="checkbox"
                           name="emails"
                           value={ae.email}
-                          disabled={ae.type === 'own' && ae.hasCompleteGoogleAccess === false}
+                          checked={selectedEmails.includes(ae.email)}
+                          onChange={(e) => setSelectedEmails(prev =>
+                            e.target.checked ? [...prev, ae.email] : prev.filter(x => x !== ae.email))}
+                          disabled={!isSelectable(ae)}
                           className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                         />
-                        <span className={ae.type === 'own' && ae.hasCompleteGoogleAccess === false ? 'line-through' : ''}>{ae.email}</span>
+                        <span className={!isSelectable(ae) ? 'line-through' : ''}>{ae.email}</span>
                         {ae.type === 'delegated' && (
                           <span className="text-xs text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded">
                             Delegated
@@ -333,13 +380,18 @@ export function KeyControls({
                             You
                           </span>
                         )}
-                        {ae.type === 'own' && ae.hasCompleteGoogleAccess === false && (
+                        {!isSelectable(ae) && (
                            <span className="text-xs text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200 ml-auto">
                               Action Required: Connect Google
                            </span>
                         )}
                       </label>
                     ))}
+                    {selectedEmails.length === 0 && (
+                      <p className="text-xs text-amber-700">
+                        Select at least one mailbox — a profile without one cannot read or send any mail.
+                      </p>
+                    )}
                   </div>
                 )}
               </div>
@@ -352,20 +404,22 @@ export function KeyControls({
               <div className="mt-2 flex justify-end gap-3 pt-2">
                 <button
                   type="button"
-                  onClick={() => setIsModalOpen(false)}
+                  onClick={closeModal}
                   className="px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-100 rounded-md transition-colors"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={isPending || accessibleEmails.length === 0}
+                  disabled={isPending || selectedEmails.length === 0}
                   className="px-5 py-2.5 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-500 rounded-md disabled:opacity-50 shadow-sm transition-colors"
                 >
                   {isPending ? "Creating..." : "Create Key"}
                 </button>
               </div>
             </form>
+            </>
+            )}
           </div>
         </div>
       )}

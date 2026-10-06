@@ -366,6 +366,64 @@ export async function dismissPendingApproval(requestId: string) {
 
 // ─── Proxy Keys ─────────────────────────────────────────────────────────────
 
+/**
+ * May `ownerEmail`'s user attach `email` to one of their keys? Their own
+ * address always; any other address only through an ACTIVE delegation, whose
+ * id is recorded on the key_email_access row so revoking the delegation tears
+ * the access down again. Shared by profile creation and the profile page's
+ * "Add mailbox" so the two cannot drift. Returns null when not allowed.
+ */
+async function resolveMailboxGrant(
+  email: string,
+  ownerEmail: string,
+): Promise<{ email: string; delegationId: string | null } | null> {
+  if (email.toLowerCase() === ownerEmail.toLowerCase()) return { email, delegationId: null };
+  // Matched on both emails: the previous `.limit(1)` lookup of the owner row
+  // picked arbitrarily among duplicate rows for the same address, so a real
+  // delegation could come back empty. A miss must refuse — inserting the row
+  // with a null delegationId granted access that no delegation backed, that
+  // revocation could not remove, and that looked like the user's own mailbox
+  // to every downstream check.
+  const delegation = await findActiveDelegation(email, ownerEmail);
+  return delegation ? { email, delegationId: delegation.id } : null;
+}
+
+export type MailboxActionResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * Attach one more mailbox to an existing profile — the profile page's repair
+ * for a key that has none (created before mailboxes were required, or whose
+ * only delegated mailbox was revoked) and the way to widen a profile later.
+ */
+export async function addMailboxToProfile(keyId: string, email: string): Promise<MailboxActionResult> {
+  const dbUser = await getDbUser();
+  const key = await db.select().from(proxyKeys).where(eq(proxyKeys.id, keyId)).limit(1).then(res => res[0]);
+  if (!key || key.userId !== dbUser.id || key.revokedAt) {
+    return { ok: false, error: "That profile no longer exists." };
+  }
+
+  const grant = await resolveMailboxGrant(email.trim(), dbUser.email);
+  if (!grant) return { ok: false, error: `No active delegation grants you access to ${email}.` };
+
+  const inserted = await db.insert(keyEmailAccess).values({
+    proxyKeyId: key.id,
+    delegationId: grant.delegationId,
+    targetEmail: grant.email,
+  }).onConflictDoNothing().returning({ id: keyEmailAccess.id });
+
+  if (inserted.length > 0) {
+    const { captureServerEvent } = await import("@/lib/posthogServer");
+    captureServerEvent(dbUser.clerkUserId, "account_linked", {
+      target_email: grant.email,
+      delegated: !!grant.delegationId,
+      via: "profile_page",
+    });
+  }
+
+  revalidateDashboard();
+  return { ok: true };
+}
+
 export async function createProxyKey(formData: FormData) {
   const dbUser = await getDbUser();
   const label = formData.get("label") as string;
@@ -409,33 +467,26 @@ export async function createProxyKey(formData: FormData) {
     };
   }
 
+  // A key with no key_email_access row is dead on arrival: every proxy call
+  // 403s and, before the profile page grew an "Add" control, nothing could
+  // repair it (PR #185 preview QA, 2026-10-05). The dialog pre-ticks a mailbox
+  // and disables submit on zero; this catches anything that bypasses it.
+  if (emailAddresses.length === 0) {
+    await profileEvent('agent_profile_create_failed', { reason: 'no_mailbox', existing_profiles: existingKeys.length });
+    return { error: "Select at least one mailbox for this profile." };
+  }
+
   // Resolve the delegation backing every non-own address BEFORE creating the
   // key: a refusal after the insert used to leave an orphaned key with partial
-  // access. Every non-own address must be backed by an ACTIVE delegation,
-  // recorded on the row so revocation can tear it down again.
+  // access.
   const grants: { email: string; delegationId: string | null }[] = [];
   for (const email of emailAddresses) {
-    let delegationId: string | null = null;
-
-    if (email.toLowerCase() !== dbUser.email.toLowerCase()) {
-      // Matched on both emails: the previous `.limit(1)` lookup of the owner
-      // row picked arbitrarily among duplicate rows for the same address, so a
-      // real delegation could come back empty.
-      const delegation = await findActiveDelegation(email, dbUser.email);
-
-      if (!delegation) {
-        // Previously this fell through and inserted the row with a null
-        // delegationId — granting access that no delegation backed, that
-        // revocation could not remove, and that looked like the user's own
-        // mailbox to every downstream check.
-        await profileEvent('agent_profile_create_failed', { reason: 'no_delegation', existing_profiles: existingKeys.length });
-        return { error: `No active delegation grants you access to ${email}.` };
-      }
-
-      delegationId = delegation.id;
+    const grant = await resolveMailboxGrant(email, dbUser.email);
+    if (!grant) {
+      await profileEvent('agent_profile_create_failed', { reason: 'no_delegation', existing_profiles: existingKeys.length });
+      return { error: `No active delegation grants you access to ${email}.` };
     }
-
-    grants.push({ email, delegationId });
+    grants.push(grant);
   }
 
   // Generate RSA Keypair for Service Account compatibility
