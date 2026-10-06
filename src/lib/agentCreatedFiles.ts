@@ -16,7 +16,7 @@
  * Pure module (no db/env/network) so scripts/test-drive-tree-access.ts covers it.
  */
 import { DRIVE_FILE_KINDS, kindForMimeType } from './driveFileKinds';
-import { DRIVE_SERVICE, DRIVE_ACTION_TYPES, FOLDER_MIME } from './driveTreeAccess';
+import { DRIVE_SERVICE, DRIVE_ACTION_TYPES, FOLDER_MIME, AGENT_CREATED_RULE_PREFIX } from './driveTreeAccess';
 
 export interface CreatedDriveFile {
   id: string;
@@ -39,6 +39,11 @@ export function agentCreatedGrant(mimeType: string | null, treeActive: boolean):
   }
   if (!treeActive) return null;
   return { service: DRIVE_SERVICE, actionType: DRIVE_ACTION_TYPES.write, targetKind: mimeType === FOLDER_MIME ? 'folder' : 'file' };
+}
+
+/** The rule name of an auto-grant — the marker the dashboard and "Clear overrides" key on. */
+export function agentCreatedRuleName(name: string | null, id: string): string {
+  return `${AGENT_CREATED_RULE_PREFIX}${name || id}`;
 }
 
 /** The created file named by a Drive `files.create` / `files.copy` response body, or null. */

@@ -17,7 +17,7 @@ import {
   type DriveDefault, type DriveSetting,
 } from '@/lib/driveTreeAccess';
 import {
-  agentCreatedGrant, createdDriveFileFromBody, isResumableInitiation, injectCreateId,
+  agentCreatedGrant, agentCreatedRuleName, createdDriveFileFromBody, isResumableInitiation, injectCreateId,
   classifyProxyDriveCall, legacyUnruledDriveDecision, createMetadataMimeType,
 } from '@/lib/agentCreatedFiles';
 import { resolveDriveLineage, resolveLineageFrom, parseDriveFileMeta, driveMetaUrl, LineageError, MAX_LINEAGE_HOPS, type MetaFetcher } from '@/lib/driveLineage';
@@ -432,7 +432,7 @@ async function grantProxyCreatedFile(
     if (!grant) return;
     const [rule] = await db.insert(accessRules).values({
       userId,
-      ruleName: `Agent-created: ${name || file.id}`,
+      ruleName: agentCreatedRuleName(name, file.id),
       service: grant.service,
       actionType: grant.actionType,
       targetResourceId: file.id,
