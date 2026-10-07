@@ -178,13 +178,20 @@ export const TOOL_DEFS = {
 
 export type ToolName = keyof typeof TOOL_DEFS;
 
-/** MCP ToolAnnotations for a definition. */
+/**
+ * MCP ToolAnnotations for a definition.
+ *
+ * All three hints are always explicit booleans: OpenAI's plugin review rejects
+ * a tool whose readOnlyHint / destructiveHint / openWorldHint is absent, and
+ * the MCP spec defaults an absent openWorldHint to true — which would claim
+ * every mailbox read reaches the open world. Tools only touch the user's own
+ * accounts unless they declare `openWorld` (sending mail to outside recipients).
+ */
 export function toolAnnotations(def: FgacToolDef) {
   return {
     title: def.title,
-    ...(def.readOnly
-      ? { readOnlyHint: true as const }
-      : { destructiveHint: def.destructive ?? true }),
-    ...(def.openWorld !== undefined ? { openWorldHint: def.openWorld } : {}),
+    readOnlyHint: def.readOnly,
+    destructiveHint: def.readOnly ? false : (def.destructive ?? true),
+    openWorldHint: def.openWorld ?? false,
   };
 }

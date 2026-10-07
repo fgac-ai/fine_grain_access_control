@@ -1,0 +1,105 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "fgac",
+  "version": "1.0.0",
+  "description": "Rule-enforced access to Gmail, Google Sheets, Docs and Slides: you decide which recipients, files and messages an AI agent can reach, and every request is checked before it reaches Google.",
+  "author": {
+    "name": "FGAC.ai",
+    "email": "support@fgac.ai",
+    "url": "https://fgac.ai"
+  },
+  "homepage": "https://fgac.ai",
+  "repository": "https://github.com/fgac-ai/fine_grain_access_control",
+  "keywords": ["gmail", "email", "access control", "guardrails", "google sheets", "google docs", "google slides", "approvals", "delegation", "security"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "FGAC.ai",
+        "shortDescription": "Guardrails for Gmail and Docs",
+        "longDescription": "FGAC.ai puts rules you set between an AI agent and your Google account. Every request the agent makes is checked against those rules before it reaches Google, and anything the rules do not allow is refused with a plain explanation.\n\nWhat you control:\n- Who the agent may email. Sending is limited to the recipients and domains on your send list. A send to anyone else is refused, nothing is delivered, and the refusal carries a one-click approval link for the account owner.\n- What mail it may read. Read-block rules withhold messages by label or by content pattern, such as verification codes, password resets or anything labeled Confidential. Withheld messages are never returned to the agent.\n- Which files it may open or edit. Google Sheets, Docs and Slides are reachable only when you expose that specific file, read-only or read and write. Files the agent creates are granted to it automatically.\n- Which inboxes it may use. Connect more than one Google account, or accept an inbox a teammate delegates to you from their own dashboard. Each account and delegation carries its own rules and can be revoked in one click.\n- Nothing can be deleted. FGAC never forwards a delete; trash and labels stay recoverable.\n\nWhat you can ask:\n- Summarize unread mail across your connected accounts, with sensitive messages withheld.\n- Draft and send replies to approved recipients.\n- Read a spreadsheet, append rows or update cells on a sheet you exposed for editing.\n- Read or edit a Google Doc or Slides deck you exposed, and read or add comments.\n- Ask what the agent is currently allowed to do; it lists the accounts, rules and files that apply.\n- Request a new permission. The agent returns an approval link; nothing changes until the account owner approves it.\n\nWho it is for: people who want an AI assistant working in their email and documents without handing it the whole account, and teams that share an inbox or an executive's mailbox with an assistant under separate rules.\n\nLimitations: Google accounts only (personal Gmail or Google Workspace). Calendar, Contacts and Tasks are not available. Very large attachments and uploads over about 1 MB cannot pass through a chat tool call. Rules are managed on the FGAC.ai dashboard, not inside the chat.",
+        "developerName": "FGAC.ai",
+        "category": "Security",
+        "capabilities": [
+          "Send email only to approved recipients",
+          "Withhold sensitive mail by label or content rule",
+          "Per-file access to Google Sheets, Docs and Slides",
+          "Read and edit only the files you expose",
+          "Multiple Google accounts in one connection",
+          "Delegated inboxes with their own rules",
+          "One-click approval links for new permissions",
+          "No delete operations are ever forwarded",
+          "Shows the rules that apply to the agent"
+        ],
+        "websiteURL": "https://fgac.ai",
+        "supportURL": "https://fgac.ai/docs",
+        "privacyPolicyURL": "https://fgac.ai/privacy",
+        "termsOfServiceURL": "https://fgac.ai/terms",
+        "defaultPrompt": [
+          "Summarize my unread email and tell me which messages my rules withheld.",
+          "What am I allowing you to do with my Google account?",
+          "Add a row to the Tracking tab of my Team Budget sheet: today, 42."
+        ],
+        "brandColor": "#2563EB",
+        "brandColorDark": "#60A5FA",
+        "composerIcon": "./assets/logo.png",
+        "logo": "./assets/logo.png"
+      },
+      "review": {
+        "test_cases": {
+          "positive": [
+            {
+              "description": "Inbox summary with rule-withheld messages. The demo inbox holds ordinary mail plus one verification-code email and one message labeled Confidential; both are blocked by read rules.",
+              "prompt": "Summarize my unread email.",
+              "tools_triggered": "gmail_list, gmail_read",
+              "expected_behavior": "Summaries of the ordinary demo messages (meeting notes, newsletter, shipping notice). The verification-code email and the Confidential message are not summarized; the reply says FGAC rules withheld them, naming the rule."
+            },
+            {
+              "description": "Show the rules that govern this connection.",
+              "prompt": "What am I allowing you to do with my Google account?",
+              "tools_triggered": "get_my_permissions, list_accounts",
+              "expected_behavior": "Lists the connected demo account, the send list (support@fgac.ai only), the two read-block rules (verification codes, Confidential label) and the Team Budget (Demo) spreadsheet exposed read and write."
+            },
+            {
+              "description": "Read an exposed spreadsheet.",
+              "prompt": "What's in the Budget tab of my Team Budget spreadsheet?",
+              "tools_triggered": "sheets_get_spreadsheet, sheets_read_range",
+              "expected_behavior": "Returns the category-by-month table from the Budget tab of Team Budget (Demo)."
+            },
+            {
+              "description": "Write to an exposed spreadsheet (confirmation expected, the tool is a write).",
+              "prompt": "Add a row to the Tracking tab of my Team Budget sheet: today's date, 42.",
+              "tools_triggered": "sheets_append_rows",
+              "expected_behavior": "After the user confirms, one row with today's date and 42 is appended below the Tracking header; existing cells are unchanged."
+            },
+            {
+              "description": "Send to an approved recipient (confirmation expected, the tool sends email).",
+              "prompt": "Email support@fgac.ai with the subject \"Review test\" saying the plugin review test succeeded.",
+              "tools_triggered": "gmail_send",
+              "expected_behavior": "After the user confirms, the email is sent from the demo account (support@fgac.ai is on the send list) and the reply confirms it was sent."
+            }
+          ],
+          "negative": [
+            {
+              "description": "Reading a one-time code. A read-block rule withholds verification-code mail, so the plugin must not return the code; expected result is a refusal naming the FGAC rule, with no code shown.",
+              "prompt": "Find the email with my verification code and tell me the code."
+            },
+            {
+              "description": "Sending to a recipient that is not approved. The send list allows only support@fgac.ai; expected result is that nothing is sent and the reply says the recipient is not approved (FGAC treats example.com as a placeholder and asks for a real address; any other unapproved address returns a one-click approval link for the account owner).",
+              "prompt": "Email stranger@example.com and say hello."
+            },
+            {
+              "description": "Deleting mail. FGAC never forwards delete operations; expected result is that nothing is deleted and the reply says deletion is not available (moving to Trash is the most it can do, and only if asked).",
+              "prompt": "Permanently delete every email in my inbox."
+            }
+          ]
+        },
+        "demo_recording_url": "https://REPLACE-WITH-UNLISTED-VIDEO-URL",
+        "commerce": false,
+        "commerce_description": "This plugin does not sell products or process payments."
+      },
+      "publication": {
+        "release_notes": "Initial release: rule-enforced Gmail reading and sending, per-file Google Sheets, Docs and Slides access, comments, multiple and delegated accounts, approval links."
+      }
+    }
+  }
+}
