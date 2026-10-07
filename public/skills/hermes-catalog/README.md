@@ -20,10 +20,14 @@ mcp_servers:
 
 ## Submitting (vendor action — public, under FGAC's name)
 
-Do not open the PR until the real-client verification has passed (Hermes
-completes FGAC's OAuth and a tool call; its CIMD client id
-`https://nousresearch.github.io/hermes-agent/docs/oauth/client-metadata.json`
-is admitted by Clerk).
+Real-client verification passed on a local build on 2026-10-07 (Hermes
+@8e85a0fd, Python >= 3.14 from source): OAuth, tool calls and refresh OK.
+Dev Clerk has no CIMD, so that run used DCR; production advertises CIMD, so the
+first production login (client id
+`https://nousresearch.github.io/hermes-agent/docs/oauth/client-metadata.json`)
+is the one untested leg. Check it before opening the PR, and only after PR
+#196 is live (it stops Hermes' `python-httpx2` requests being classified as a
+scanner).
 
 1. In a fork of `NousResearch/hermes-agent`, copy `fgac/` to
    `optional-mcps/fgac/`. The PR touches nothing else.

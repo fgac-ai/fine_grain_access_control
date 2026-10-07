@@ -47,9 +47,9 @@ suggest:
 
 post_install: |
   On first connection Hermes opens a browser to sign in to FGAC.ai with the
-  Google account you want to protect (or run `hermes mcp login fgac`). The
-  first tool call then reports "pending approval" with a dashboard link:
-  approve the agent there once, then restart the session so the tools load.
+  Google account you want to protect (or run `hermes mcp login fgac`), then
+  restart the session so the tools load. The agent starts read-only; widen
+  or narrow its rules any time on the fgac.ai dashboard.
 
   Re-run the tool checklist any time with:
     hermes mcp configure fgac

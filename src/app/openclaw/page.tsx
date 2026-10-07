@@ -45,22 +45,28 @@ export default function OpenClawPage() {
           body: (
             <>
               OpenClaw prints a sign-in link: open it and sign in to FGAC with
-              the Google account you want the agent to use. Running OpenClaw
-              on a server? Use the <code className="font-mono">--code</code>{" "}
-              fallback the command prints.
+              the Google account you want the agent to use. Finish within
+              about two minutes; if it times out, run the command again.
+              Running OpenClaw on a server? Use the{" "}
+              <code className="font-mono">--code</code> fallback the command
+              prints.
             </>
           ),
           code: "openclaw mcp login fgac",
           codeLabel: "Copy login command",
         },
         {
-          title: "Approve the agent",
+          title: "Start using it",
           body: (
             <>
-              The first tool call reports <strong>pending approval</strong>{" "}
-              with a dashboard link. Approve OpenClaw there and pick its
-              rules. It starts read-only by default. Then ask it to{" "}
-              <em>&ldquo;summarize my unread email from today&rdquo;</em>.
+              Ask OpenClaw to{" "}
+              <em>&ldquo;summarize my unread email from today&rdquo;</em>. It
+              starts read-only. Open your{" "}
+              <Link href="/dashboard" className="text-primary underline underline-offset-2">
+                FGAC dashboard
+              </Link>{" "}
+              to let it send, edit, or see more, and to hide mail it
+              shouldn&apos;t read.
             </>
           ),
         },

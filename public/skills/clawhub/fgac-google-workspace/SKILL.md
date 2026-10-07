@@ -27,7 +27,8 @@ skill ships no code: it only connects OpenClaw to `https://fgac.ai/api/mcp`.
 
 2. Run `openclaw mcp login fgac` and give the user the sign-in link
    privately. They sign in to FGAC.ai with the Google account they want you
-   to use. The loopback callback must reach the machine running OpenClaw; if
+   to use, and must finish within about two minutes; if login times out,
+   run it again. The loopback callback must reach the machine running OpenClaw; if
    it cannot, use the fallback the command prints
    (`openclaw mcp login fgac --code <code>`) and treat that code as a
    credential. Tokens stay in OpenClaw's managed store.
@@ -40,9 +41,10 @@ skill ships no code: it only connects OpenClaw to `https://fgac.ai/api/mcp`.
    (read-only). Report a live read separately from "configured" — a saved
    definition alone does not prove access.
 
-4. If `list_accounts` reports **pending approval**, show the user the
-   dashboard link it returns and stop. The owner approves this agent once on
-   fgac.ai and picks its rules; retry after they say it is done. If the tools
+4. A new connection starts read-only. To let you send, edit or see more,
+   the owner changes this agent's rules on the fgac.ai dashboard. If
+   `list_accounts` ever reports **pending approval**, show the user the
+   dashboard link it returns and stop until they say it is done. If the tools
    have not appeared after login, check again on a fresh turn before changing
    configuration.
 

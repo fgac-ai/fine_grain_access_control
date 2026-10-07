@@ -39,19 +39,22 @@ export default function HermesPage() {
         },
         {
           title: "Sign in",
-          body: <>Start a session (or run the command below). Hermes opens a browser: sign in to FGAC with the Google account you want the agent to use.</>,
+          body: <>Start a session (or run the command below). Hermes opens a browser: sign in to FGAC with the Google account you want the agent to use. Finish within a few minutes; if it times out, run the command again.</>,
           code: "hermes mcp login fgac",
           codeLabel: "Copy login command",
         },
         {
-          title: "Approve the agent",
+          title: "Start using it",
           body: (
             <>
-              The first tool call reports <strong>pending approval</strong>{" "}
-              with a dashboard link. Approve Hermes there and pick its rules.
-              It starts read-only by default. Restart the
-              session so the tools load, then ask it to{" "}
+              Restart the session so the tools load, then ask Hermes to{" "}
               <em>&ldquo;summarize my unread email from today&rdquo;</em>.
+              It starts read-only. Open your{" "}
+              <Link href="/dashboard" className="text-primary underline underline-offset-2">
+                FGAC dashboard
+              </Link>{" "}
+              to let it send, edit, or see more, and to hide mail it
+              shouldn&apos;t read.
             </>
           ),
         },

@@ -9,10 +9,12 @@ script-based `public/skills/open-claw/` and `docs/skills/fgac/`.
 
 ## Publishing (vendor action — public, under FGAC's name)
 
-Do not publish until the real-client verification has passed: OpenClaw
-completes FGAC's OAuth (DCR `client_name` "OpenClaw MCP", redirect
-`http://127.0.0.1:8989/oauth/callback`, fallback `localhost:8989`) and a tool
-call succeeds.
+Real-client verification passed on a local build on 2026-10-07 (OpenClaw
+2026.9.8, which needs Node >= 24.16): DCR `client_name` "OpenClaw MCP",
+clientInfo `openclaw-bundle-mcp`, redirect `http://127.0.0.1:8989/oauth/callback`
+accepted first try, tool calls and refresh OK. Publish only after PR #196 is
+live in production: it serves the RFC 9728 resource-metadata path that
+OpenClaw also probes (one probe hung for 60 s without it).
 
 1. Sign in with a GitHub account at least 14 days old (ClawHub refuses
    younger accounts): `clawhub login`. Decide the owner — personal account or
