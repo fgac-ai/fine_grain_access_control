@@ -16,8 +16,9 @@
  *
  *  2. VERIFY the shipped claims (src/lib/notifyClaimLock.ts: per-owner
  *     advisory lock, then the UPDATE, in one transaction) hold under N-way
- *     concurrency on N rows: one link reminder per turn, one refusal notice
- *     per episode, the daily cap exact across mailboxes.
+ *     concurrency on N rows: one link reminder per turn, one link reminder
+ *     and one refusal notice per owner per episode, the daily cap exact
+ *     across mailboxes.
  *
  * Fixtures are a throwaway user on example.com plus one profile key,
  * deleted (cascade) at the end, whatever happened.
@@ -118,6 +119,29 @@ function check(name: string, cond: boolean, detail?: unknown) {
       const stamped = await db.select({ n: sql<number>`count(*)` }).from(approvalRequests)
         .where(sql`${approvalRequests.userId} = ${user.id} AND ${approvalRequests.notifiedAt} IS NOT NULL`);
       check('ledger holds exactly one stamp for the owner', Number(stamped[0].n) === 1, stamped[0]);
+    }
+    await clearStamps();
+
+    console.log('2b. verify — link reminders, one per owner per 14-day episode across links');
+    {
+      // The owner-A shape (production, 2026-10-01 → 10-06): a link emailed
+      // days ago, then the agent asks again for a DIFFERENT file.
+      const [earlier, later, muchLater] = await linkRows(3, 'episode-link');
+      await db.update(approvalRequests).set({ notifiedAt: sql`now() - interval '3 days'` })
+        .where(sql`${approvalRequests.requestId} = ${earlier}`);
+      const inEpisode = await claimApprovalNotification(later, user.id, NOTIFY_MAX_PER_DAY, user.email);
+      check('a new link 3 days after another link was emailed → no email, reason episode',
+        !inEpisode.claimed && inEpisode.reason === 'episode', inEpisode);
+      await db.update(approvalRequests).set({ notifiedAt: sql`now() - interval '15 days'` })
+        .where(sql`${approvalRequests.requestId} = ${earlier}`);
+      const afterEpisode = await claimApprovalNotification(muchLater, user.id, NOTIFY_MAX_PER_DAY, user.email);
+      check('a new link after a 14-day quiet gap → emailed again', afterEpisode.claimed, afterEpisode);
+      const [refusalId] = await refusalRows(1, 'episode-refusal');
+      await clearStamps();
+      await db.update(accountRefusals).set({ notifiedAt: sql`now() - interval '1 day'` })
+        .where(sql`${accountRefusals.id} = ${refusalId}`);
+      const otherTrigger = await claimApprovalNotification(later, user.id, NOTIFY_MAX_PER_DAY, user.email);
+      check('a refusal email does not open a link episode (separate events)', otherTrigger.claimed, otherTrigger);
     }
     await clearStamps();
 

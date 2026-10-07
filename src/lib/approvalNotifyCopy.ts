@@ -30,8 +30,10 @@ export type NotifyStatus =
   | 'skipped_rate_capped'
   /** Dead-grant notice only: the global hourly circuit breaker tripped. */
   | 'skipped_global_capped'
-  /** Account-refusal notice only: the owner was already emailed about a
-   * refused account inside the current episode (ACCOUNT_REFUSAL_EPISODE_GAP_MS). */
+  /** The owner was already emailed by this trigger inside the current
+   * episode — about a refused account (ACCOUNT_REFUSAL_EPISODE_GAP_MS) or,
+   * for the link reminder, about ANY of their approval links
+   * (APPROVAL_LINK_EPISODE_GAP_MS). The denial text is unchanged. */
   | 'skipped_episode'
   /** The recipient address is on the bounce ledger (`email_bounces`): a
    * previous notice came back as a permanent DSN, so nothing is sent and no
@@ -123,6 +125,19 @@ export const NOTIFY_MAX_PER_DAY = 3;
  * 42 people, one 4-a-day; 5 min → 42 / 29, max 2 a day; 10 min → 37 / 27. */
 export const NOTIFY_MIN_GAP_MS = 5 * 60_000;
 
+/** One link-reminder email per OWNER per episode, across all their links.
+ * The per-link stamp plus the daily cap let an agent that keeps asking for
+ * new files earn a fresh email per file: one owner got 5 in 5 days and 7 in
+ * 14 (production, 2026-09-28 → 10-06), 3 inside 24 h with the cap holding
+ * exactly, and opened none of the later ones. Across all recipients in those
+ * 14 days, the 10 second-or-later emails produced no email-sourced open the
+ * first email had not already produced; the 24 first emails produced 5.
+ * The chat link still arrives on every refusal; the owner is emailed once,
+ * and again only after a fortnight with no reminder in between. Same gap as
+ * the refusal and dead-grant episodes. Ken, 2026-09-21: one email per event,
+ * no repeat cadence. */
+export const APPROVAL_LINK_EPISODE_GAP_MS = 14 * 24 * 60 * 60_000;
+
 /** Header-safe, single-line, bounded. */
 export function sanitizeLine(value: string, max = 120): string {
   const oneLine = value.replace(/[\r\n\t]+/g, ' ').replace(/[\x00-\x1f\x7f]/g, '').trim();
@@ -179,6 +194,8 @@ export function approvalEmailBody(opts: {
   lines.push(
     '',
     'If you intentionally do not want the agent to have this access, do nothing — it stays blocked. Or reply to this email to let us know, and we will not remind you about this request again.',
+    '',
+    'This is the only reminder of this kind FGAC will email you for the next 14 days. If the agent asks for other access in that time, it still gets its own approval link in the chat.',
     '',
     `Rules and connected agents: ${opts.dashboardUrl.trim().replace(/\/+$/, '')}/dashboard`,
     signatureLine(),
