@@ -1,0 +1,55 @@
+# Nous-approved MCP catalog entry.
+# Presence in this directory = approval. Merged via PR review.
+manifest_version: 1
+
+name: fgac
+description: >-
+  Gmail, Google Docs, Sheets, Slides and Drive under owner-set rules: read
+  rules hide sensitive mail, send whitelists limit outbound mail, per-file
+  rules expose only chosen documents, and denied calls return an approval link.
+source: https://fgac.ai/hermes
+
+# Official vendor-hosted remote MCP (URL-only — Hermes never spawns a local
+# process for this entry). Native OAuth 2.1 with PKCE (S256); the
+# authorization server accepts Client ID Metadata Documents and Dynamic Client
+# Registration. Hermes's MCP client + mcp_oauth_manager handle discovery,
+# token exchange, and refresh. The user's Google grant stays with FGAC; the
+# client only ever holds an FGAC token scoped to the rules its owner approved.
+transport:
+  type: http
+  url: https://fgac.ai/api/mcp
+
+auth:
+  type: oauth
+
+# Off by default, opt in from `hermes mcp configure fgac`:
+# - google_api_modify: rule-checked write access to the wider Google API
+#   surface (threads, labels, Drive moves) — powerful, so the user chooses it.
+# - gmail_send: outbound mail. FGAC enforces per-profile send whitelists
+#   server-side, but sending stays an explicit opt-in.
+# - create_temporary_api_key: short-lived key for files too large for a tool
+#   call; only needed for bulk transfers.
+tools:
+  default_excluded:
+    - google_api_modify
+    - gmail_send
+    - create_temporary_api_key
+
+suggest:
+  keywords:
+    - fgac
+  hosts:
+    - fgac.ai
+  examples:
+    - Summarize my unread work email from today
+    - Add these receipts as rows in my expenses sheet
+    - What can you access in my Google account?
+
+post_install: |
+  On first connection Hermes opens a browser to sign in to FGAC.ai with the
+  Google account you want to protect (or run `hermes mcp login fgac`). The
+  first tool call then reports "pending approval" with a dashboard link:
+  approve the agent there once, then restart the session so the tools load.
+
+  Re-run the tool checklist any time with:
+    hermes mcp configure fgac
