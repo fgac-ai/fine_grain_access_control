@@ -103,6 +103,24 @@ async function main() {
     ),
   );
 
+  // RFC 9728 path-insertion location for resource /api/mcp. Clients that
+  // ignore the 401's resource_metadata pointer probe here (OpenClaw does on
+  // every login); it 404'd until 2026-10-07.
+  results.push(
+    await probe(
+      'oauth-resource-metadata-rfc9728-path',
+      '/.well-known/oauth-protected-resource/api/mcp',
+      { method: 'GET', headers: { 'user-agent': PROBE_USER_AGENT } },
+      async (res) => {
+        if (res.status !== 200) return `expected 200, got ${res.status}`;
+        const body = await res.json().catch(() => null);
+        if (!body || typeof body.resource !== 'string') return 'metadata missing resource field';
+        if (!body.resource.endsWith('/api/mcp')) return `resource ${body.resource} does not name /api/mcp`;
+        return null;
+      },
+    ),
+  );
+
   const proxyKey = process.env.PROBE_PROXY_KEY;
   if (proxyKey) {
     results.push(

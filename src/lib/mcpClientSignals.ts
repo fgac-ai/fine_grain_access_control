@@ -218,8 +218,8 @@ export async function parseInitializeClientInfo(req: Request): Promise<McpClient
  *                  Within it, `client_class_signal = 'ua:stock-runtime-no-name'`
  *                  marks a request from a bare HTTP runtime (`Bun/1.1.45`,
  *                  `Python/3.11 aiohttp/…`, `Go-http-client/2.0`, `node`,
- *                  `undici`, `python-httpx/…`) that carried NO `clientInfo`
- *                  — nothing to name it by. Still `direct` (a stock runtime is
+ *                  `undici`, `python-httpx/…`, `python-httpx2/…`) that carried
+ *                  NO `clientInfo` — nothing to name it by. Still `direct` (a stock runtime is
  *                  not evidence of a crawler: the Python and TypeScript MCP
  *                  SDKs run on exactly these), but a tokenless one is not an
  *                  SDK install flow either — every SDK's first request is an
@@ -230,7 +230,7 @@ export async function parseInitializeClientInfo(req: Request): Promise<McpClient
  *                  and none of the UAs had authenticated in 14 days.
  *                  Since 2026-09-25 a `direct` row can instead carry
  *                  `client_class_signal = 'product:<name>'`: a third-party
- *                  MCP product real people use (Grok, Cursor — see
+ *                  MCP product real people use (Grok, Cursor, OpenClaw, Hermes — see
  *                  `PRODUCT_CLIENTS`). Still `direct` (the 7.5 install
  *                  funnel counts Claude products only), but named, so it
  *                  leaves the unlabelled remainder of 7.21e and the
@@ -318,7 +318,14 @@ const CLAUDE_UA_PREFIXES = ['Claude-User', 'claude-code/'];
  *     standing probe would recur. It is part of a person's add, so it
  *     carries the product signal, not `scanner`.
  */
-const PRODUCT_CLIENTS: ReadonlyArray<{ product: string; names: string[]; userAgents: string[] }> = [
+const PRODUCT_CLIENTS: ReadonlyArray<{
+  product: string;
+  names: string[];
+  userAgents: string[];
+  /** OAuth `client_id` prefixes — a Client ID Metadata Document URL names its
+   * product deterministically (the authorization server fetched it). */
+  clientIdPrefixes?: string[];
+}> = [
   {
     product: 'grok',
     names: ['connectors-manager', 'grok-validator'],
@@ -328,6 +335,29 @@ const PRODUCT_CLIENTS: ReadonlyArray<{ product: string; names: string[]; userAge
     product: 'cursor',
     names: ['cursor', 'cursor mcp availability'],
     userAgents: ['Cursor/', 'CursorServer/'],
+  },
+  {
+    // OpenClaw 2026.9.8 — measured against a local build 2026-10-07: every
+    // initialize reports `openclaw-bundle-mcp` 0.0.0 on the bare `undici`
+    // user agent (it sets none), DCR client_name "OpenClaw MCP". The UA alone
+    // is a stock runtime, so the name is the only product signal.
+    product: 'openclaw',
+    names: ['openclaw-bundle-mcp', 'openclaw mcp'],
+    userAgents: [],
+  },
+  {
+    // Hermes Agent (NousResearch) @ 8e85a0fd — measured 2026-10-07: the MCP
+    // session reports the Python SDK DEFAULT clientInfo `mcp` 0.1.0 on
+    // `python-httpx2/2.7.0` (the SDK's transport), so neither says Hermes.
+    // What does: OAuth discovery carries `Hermes-Agent/<ver>`, a content-type
+    // preflight initialize is `hermes-probe` (which the vocabulary would
+    // otherwise read as a crawler), the transport fallback name is
+    // `hermes-agent`, and against an authorization server that supports
+    // CIMD (production Clerk) the client_id IS its metadata document URL.
+    product: 'hermes',
+    names: ['hermes-agent', 'hermes-probe'],
+    userAgents: ['Hermes-Agent/'],
+    clientIdPrefixes: ['https://nousresearch.github.io/hermes-agent/'],
   },
 ];
 
@@ -371,9 +401,10 @@ const SCANNER_CLIENT_NAMES = new Set([
   'mcpdd',
 ]);
 const SCANNER_UA_PREFIXES = [
-  // Not the real httpx UA (`python-httpx/`): the junk-bearer sender that was
-  // every non-probe invalid_token on 2026-09-10.
-  'python-httpx2/',
+  // `python-httpx2/` was here (2026-09-10: the junk-bearer sender behind every
+  // non-probe invalid_token that day). Removed 2026-10-07: httpx2 is now the
+  // MCP Python SDK's own transport, so it is what every current Python MCP
+  // client sends — Hermes Agent included. It is a stock runtime (below).
   'mcp-selection-lab-',
   'directory-admin-dashboard-inspection',
   'Mozilla/5.0 (compatible)', // the bare "compatible" UA is a bot convention
@@ -422,7 +453,7 @@ const SELF_LINK = /\(\+(https?:\/\/|mailto:|[a-z])/i;
  * `curl`/`wget` are deliberately not here: those are tools a person runs.
  */
 const STOCK_RUNTIME_UA = new RegExp(
-  '^(?:Bun|node-fetch|axios|Deno|python-httpx|python-requests|Python-urllib|Python|aiohttp'
+  '^(?:Bun|node-fetch|axios|Deno|python-httpx2?|python-requests|Python-urllib|Python|aiohttp'
   + '|Go-http-client|okhttp|Java|Apache-HttpClient|GuzzleHttp|reqwest|Dart|ReactorNetty|libcurl)/'
   + '|^(?:node|undici)$',
 );
@@ -462,17 +493,42 @@ function prefixHit(s: string | undefined, prefixes: readonly string[]): string |
   return prefixes.find((p) => s.startsWith(p));
 }
 
-function productHit(ua: string | undefined, lname: string | undefined): string | undefined {
+function productHit(ua: string | undefined, lname: string | undefined, clientId?: string): string | undefined {
   for (const p of PRODUCT_CLIENTS) {
     if (lname && p.names.includes(lname)) return p.product;
     if (ua && p.userAgents.some((u) => (u.endsWith('/') ? ua.startsWith(u) : ua === u))) return p.product;
+    if (clientId && p.clientIdPrefixes?.some((c) => clientId.startsWith(c))) return p.product;
   }
   return undefined;
+}
+
+/**
+ * Default `clientInfo` names the MCP SDKs send when the embedding product sets
+ * none — they name the library, not the product, so they are no evidence of
+ * who is calling. The Python SDK's is `mcp` (Hermes Agent sends it).
+ */
+const SDK_DEFAULT_CLIENT_NAMES = new Set(['mcp']);
+
+/**
+ * The product name to record for a connection: the client's own name, unless
+ * that is an SDK default (or absent) and the OAuth client_id identifies the
+ * product — then the product's canonical name. Without this a production
+ * Hermes connection (CIMD client_id) would carry `mcp` on every tool call.
+ */
+const PRODUCT_CANONICAL_NAMES: Record<string, string> = { hermes: 'hermes-agent', openclaw: 'openclaw-bundle-mcp' };
+
+export function productClientName(name: string | undefined, clientId: string | undefined): string | undefined {
+  const trimmed = name?.trim() || undefined;
+  if (trimmed && !SDK_DEFAULT_CLIENT_NAMES.has(trimmed.toLowerCase())) return trimmed;
+  const product = clientId ? productHit(undefined, undefined, clientId) : undefined;
+  return (product && PRODUCT_CANONICAL_NAMES[product]) ?? trimmed;
 }
 
 export function classifyMcpClient(input: {
   userAgent?: string;
   clientName?: string;
+  /** OAuth client_id when known (authenticated requests). */
+  clientId?: string;
 }): McpClientClassification {
   const ua = input.userAgent?.trim() || undefined;
   const name = input.clientName?.trim() || undefined;
@@ -490,7 +546,7 @@ export function classifyMcpClient(input: {
     return { client_class: 'claude', client_class_signal: `name:${lname}` };
   }
 
-  const product = productHit(ua, lname);
+  const product = productHit(ua, lname, input.clientId?.trim() || undefined);
   if (product) return { client_class: 'direct', client_class_signal: `product:${product}` };
 
   if (lname && SCANNER_CLIENT_NAMES.has(lname)) {
