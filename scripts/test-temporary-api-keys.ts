@@ -129,6 +129,20 @@ async function main() {
   check('recipe names the base URL on the serving host', recipe.includes('https://preview.example.com/api/proxy'));
   check('recipe states the cap it applied', recipe.includes('granted 60 of the 120 requested'));
   check('recipe states the 4 MB chunk rule and resume step', recipe.includes('4 MB') && recipe.includes('bytes */TOTAL'));
+  // Key handling: a private temp file is the sanctioned hand-off (an inline
+  // key in command text is what auto-mode classifiers block), so no example
+  // may use a bare $KEY and the recipe must not forbid files.
+  const allRecipes = (['download', 'upload', 'send_attachment', 'bulk_calls', 'other'] as const).map(purpose =>
+    temporaryKeyRecipe({ key: TEMP.key, baseUrl: 'https://preview.example.com', purpose, ttlGranted: 15, capped: false, expiresAt: minutesFromNow(15) }));
+  check('every recipe reads the key from a private file, never a bare $KEY',
+    allRecipes.every(r => r.includes('umask 077') && r.includes('rm -f "$KEY_FILE"') && !/\$KEY\b(?!_FILE)/.test(r)));
+  check('recipe allows the temp file and forbids only what leaves the session',
+    allRecipes.every(r => r.includes('private temp file (chmod 600)') && !r.includes('write it to a file')));
+  check('recipe explains users/me vs users/<address>', allRecipes.every(r => r.includes('users/me is your FGAC sign-in address') && r.includes('list_accounts')));
+  const send = allRecipes[2];
+  const [iRaw, iMedia, iResumable] = ['{"raw":', 'uploadType=media', 'uploadType=resumable'].map(s => send.indexOf(s));
+  check('send_attachment recipe is ordered by size: JSON raw, then media, then resumable',
+    iRaw >= 0 && iRaw < iMedia && iMedia < iResumable && send.includes('~3 MB'));
 
   installFetch();
   const { db } = await import('../src/db');
