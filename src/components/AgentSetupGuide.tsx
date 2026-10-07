@@ -65,15 +65,17 @@ export function AgentSetupGuide({
                   <h3 className="mb-1.5 font-semibold text-foreground">{step.title}</h3>
                   <div className="text-sm leading-relaxed text-muted-foreground">{step.body}</div>
                   {step.code && (
-                    <div className="mt-3 overflow-x-auto rounded-sm bg-surface-inverse p-4 font-mono text-sm text-surface-inverse-foreground">
-                      <div className="flex min-w-0 items-start justify-between gap-4">
+                    <div className="mt-3 flex items-start gap-3 rounded-sm bg-surface-inverse p-4 font-mono text-sm text-surface-inverse-foreground">
+                      {/* Copy button sits outside the scroller so long
+                          commands never push it out of view. */}
+                      <div className="min-w-0 flex-1 overflow-x-auto">
                         <code className="whitespace-pre text-primary">{step.code}</code>
-                        <CopyButton
-                          value={step.code}
-                          label={step.codeLabel ?? `Copy ${step.title}`}
-                          className="rounded-sm bg-foreground/10 p-1.5 text-muted-foreground hover:text-surface-inverse-foreground"
-                        />
                       </div>
+                      <CopyButton
+                        value={step.code}
+                        label={step.codeLabel ?? `Copy ${step.title}`}
+                        className="shrink-0 rounded-sm bg-foreground/10 p-1.5 text-muted-foreground hover:text-surface-inverse-foreground"
+                      />
                     </div>
                   )}
                 </div>
@@ -90,7 +92,7 @@ export function AgentSetupGuide({
             Why not a full-access Google skill?
           </h2>
           <p className="mb-4 text-sm leading-relaxed text-muted-foreground">
-            The popular Google Workspace skills hand {agentName} your whole
+            The popular Google Workspace skills hand {agentName}{" "}your whole
             account. That&apos;s a lot to trust to an always-on agent that reads
             untrusted email all day: one injected instruction is enough to
             forward your inbox somewhere else.
