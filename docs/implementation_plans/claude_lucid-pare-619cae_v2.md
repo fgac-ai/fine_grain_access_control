@@ -69,7 +69,7 @@ Two layers, both added in this revision:
   week later and 90 days later are both "not due"), breaker constant, new
   closing line, `skipped_global_capped` adds no agent-facing line. `tsc`,
   eslint, `mcp:lint` green.
-- v1 QA (capability 18 A12/A13, 16 A29) exercised the first-notice path, the
+- v1 QA (capability 18 A12/A13, 16 A32) exercised the first-notice path, the
   ledger, the per-(owner, mailbox) suppression on the delegated leg, and the
   preview as USER_A. v2 changes the second-notice path (now unreachable) and
   the copy's closing line; the preview redeploys from this commit. The breaker

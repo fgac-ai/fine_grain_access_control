@@ -135,7 +135,7 @@ reconnect on the Accounts page as before.
 - Migration generated, renamed, journal tag fixed, `npm run db:migrate` applied
   on the branch DB (`claude-lucid-pare-619cae`).
 - Local QA: capability 18 A13 (own + delegated legs, ledger, cap, never-cases)
-  and 16 A29, with USER_A as the stand-in sender — results in the PR.
+  and 16 A32, with USER_A as the stand-in sender — results in the PR.
 - Preview: `/deploy-pr-preview`; note (cap 18 A12) that every delegated mailbox
   on a preview reads `owner_not_found` (production Clerk ids against the dev
   instance), which is NOT a reconnect-repairable class and must not notify.
