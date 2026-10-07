@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Card, CardHeader, Badge, EmptyState, buttonPrimary, buttonSecondary, buttonDanger } from '@/components/ui';
-import { assignRulesToKey, unassignRuleFromKey, revokeProxyKey, revokeTemporaryKey, setSheetRulePermission, exposeFilesFromPicker, applyRecommendedSecurityRules, enableSendToAnyone } from './actions';
+import { assignRulesToKey, unassignRuleFromKey, revokeProxyKey, revokeTemporaryKey, setSheetRulePermission, exposeFilesFromPicker, applyRecommendedSecurityRules, enableSendToAnyone, addMailboxToProfile } from './actions';
 import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, kindForService, type DriveFileKind } from '@/lib/driveFileKinds';
 import { useGooglePicker, PickedSheet } from './useGooglePicker';
 import { DriveAccessCard } from './DriveAccessCard';
@@ -1245,12 +1245,37 @@ function GmailAccessCard({
   accessibleEmails: AccessibleEmail[];
   hasCompleteGoogleAccess: boolean;
 }) {
+  const [adding, setAdding] = useState<string | null>(null);
+  const [addError, setAddError] = useState<string | null>(null);
+  // Mailboxes the user can reach that this profile cannot. Before this list a
+  // profile created with no mailbox was unrepairable — every proxy call 403'd
+  // (PR #185 preview QA, 2026-10-05) — and one whose only delegated mailbox
+  // was revoked still lands here.
+  const attached = new Set(profile.emailAccess.map(e => e.toLowerCase()));
+  const addable = accessibleEmails.filter(ae => !attached.has(ae.email.toLowerCase()));
+
+  async function add(email: string) {
+    setAdding(email);
+    setAddError(null);
+    try {
+      const result = await addMailboxToProfile(profile.id, email);
+      if (!result.ok) setAddError(result.error);
+    } catch {
+      setAddError('Something went wrong adding that mailbox. Please try again.');
+    } finally {
+      setAdding(null);
+    }
+  }
+
   return (
     <Card>
       <CardHeader title="Gmail Account Access" subtitle="Mailboxes this profile can reach" />
       <div className="px-5 pb-5 space-y-2">
         {profile.emailAccess.length === 0 ? (
-          <EmptyState>This profile has no mailbox access.</EmptyState>
+          <EmptyState>
+            This profile has no mailbox access, so every request it makes is refused.
+            {addable.length > 0 && ' Add a mailbox below.'}
+          </EmptyState>
         ) : (
           profile.emailAccess.map(email => {
             const meta = accessibleEmails.find(e => e.email === email);
@@ -1271,12 +1296,37 @@ function GmailAccessCard({
             );
           })
         )}
+        {addable.map(ae => {
+          // Same gate as the new-profile dialog: an own mailbox whose Google
+          // grant is incomplete would be attached but unusable.
+          const unlinked = ae.type === 'own' && ae.hasCompleteGoogleAccess === false;
+          return (
+            <div
+              key={ae.email}
+              className="flex items-center justify-between gap-2 rounded-sm border border-dashed border-border px-3 py-2"
+            >
+              <span className="min-w-0 truncate text-[13px] text-muted-foreground">{ae.email}</span>
+              <button
+                type="button"
+                className={buttonSecondary}
+                disabled={adding !== null || unlinked}
+                title={unlinked ? 'Connect your Google account in Account Settings first.' : undefined}
+                onClick={() => add(ae.email)}
+              >
+                {adding === ae.email ? 'Adding…' : 'Add'}
+              </button>
+            </div>
+          );
+        })}
+        {addError && (
+          <p className="rounded-sm border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{addError}</p>
+        )}
         <p className="pt-1 text-xs leading-relaxed text-subtle">
           {/* Legacy default keys are only flagged at their next MCP connection
               (ensureDefaultProfile adoption), so match on the label too. */}
           {profile.isDefault || profile.label === 'Default Profile'
             ? 'Inboxes other people delegate to you are added here automatically.'
-            : 'Mailboxes are chosen when a profile is created; inboxes delegated to you attach to your Default Profile automatically.'}{' '}
+            : 'Inboxes delegated to you attach to your Default Profile automatically; add them here to use them from this profile.'}{' '}
           <Link
             href="/use-cases/multiple-gmail-accounts"
             className="text-primary underline underline-offset-2 hover:opacity-80"

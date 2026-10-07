@@ -2,8 +2,8 @@
 
 import { db } from "@/db";
 import { users, proxyKeys, emailDelegations, keyEmailAccess, accessRules, keyRuleAssignments, temporaryApiKeys } from "@/db/schema";
-import { eq, and, desc, isNull, inArray } from "drizzle-orm";
-import { DRIVE_SERVICE, DRIVE_TARGET_KINDS, actionTypeForAccess, accessLabel, type DriveAccess, type DriveDefault, type DriveNodeKind } from "@/lib/driveTreeAccess";
+import { eq, and, or, desc, isNull, inArray } from "drizzle-orm";
+import { DRIVE_SERVICE, DRIVE_TARGET_KINDS, actionTypeForAccess, isClearableDriveOverride, isAgentCreatedRule, accessLabel, type DriveAccess, type DriveDefault, type DriveNodeKind } from "@/lib/driveTreeAccess";
 import { findActiveDelegation } from "@/db/delegationQueries";
 import { syncDefaultProfileDelegatedAccess } from "@/db/defaultProfile";
 import { currentUser, clerkClient } from "@clerk/nextjs/server";
@@ -13,7 +13,7 @@ import { revalidatePath } from "next/cache";
 import { validateRulePattern, patternKind, assertStorablePattern } from "@/lib/rulePatterns";
 import { slugifyProfileLabel } from "@/lib/profileSlugs";
 import type { ApprovalSearchParams, ApprovalPayload } from "@/lib/approvalLinks";
-import { DRIVE_FILE_KINDS, kindForService, kindForActionType, kindForApprovalAction, type DriveFileKind } from "@/lib/driveFileKinds";
+import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, kindForService, kindForActionType, kindForApprovalAction, type DriveFileKind } from "@/lib/driveFileKinds";
 import { grantActiveForApproval } from "@/lib/approvalGrantState";
 import { maskEmail } from "@/lib/maskEmail";
 import { isDelegateTarget, type DelegationVia } from "@/lib/secondAccount";
@@ -366,6 +366,64 @@ export async function dismissPendingApproval(requestId: string) {
 
 // ─── Proxy Keys ─────────────────────────────────────────────────────────────
 
+/**
+ * May `ownerEmail`'s user attach `email` to one of their keys? Their own
+ * address always; any other address only through an ACTIVE delegation, whose
+ * id is recorded on the key_email_access row so revoking the delegation tears
+ * the access down again. Shared by profile creation and the profile page's
+ * "Add mailbox" so the two cannot drift. Returns null when not allowed.
+ */
+async function resolveMailboxGrant(
+  email: string,
+  ownerEmail: string,
+): Promise<{ email: string; delegationId: string | null } | null> {
+  if (email.toLowerCase() === ownerEmail.toLowerCase()) return { email, delegationId: null };
+  // Matched on both emails: the previous `.limit(1)` lookup of the owner row
+  // picked arbitrarily among duplicate rows for the same address, so a real
+  // delegation could come back empty. A miss must refuse — inserting the row
+  // with a null delegationId granted access that no delegation backed, that
+  // revocation could not remove, and that looked like the user's own mailbox
+  // to every downstream check.
+  const delegation = await findActiveDelegation(email, ownerEmail);
+  return delegation ? { email, delegationId: delegation.id } : null;
+}
+
+export type MailboxActionResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * Attach one more mailbox to an existing profile — the profile page's repair
+ * for a key that has none (created before mailboxes were required, or whose
+ * only delegated mailbox was revoked) and the way to widen a profile later.
+ */
+export async function addMailboxToProfile(keyId: string, email: string): Promise<MailboxActionResult> {
+  const dbUser = await getDbUser();
+  const key = await db.select().from(proxyKeys).where(eq(proxyKeys.id, keyId)).limit(1).then(res => res[0]);
+  if (!key || key.userId !== dbUser.id || key.revokedAt) {
+    return { ok: false, error: "That profile no longer exists." };
+  }
+
+  const grant = await resolveMailboxGrant(email.trim(), dbUser.email);
+  if (!grant) return { ok: false, error: `No active delegation grants you access to ${email}.` };
+
+  const inserted = await db.insert(keyEmailAccess).values({
+    proxyKeyId: key.id,
+    delegationId: grant.delegationId,
+    targetEmail: grant.email,
+  }).onConflictDoNothing().returning({ id: keyEmailAccess.id });
+
+  if (inserted.length > 0) {
+    const { captureServerEvent } = await import("@/lib/posthogServer");
+    captureServerEvent(dbUser.clerkUserId, "account_linked", {
+      target_email: grant.email,
+      delegated: !!grant.delegationId,
+      via: "profile_page",
+    });
+  }
+
+  revalidateDashboard();
+  return { ok: true };
+}
+
 export async function createProxyKey(formData: FormData) {
   const dbUser = await getDbUser();
   const label = formData.get("label") as string;
@@ -409,33 +467,26 @@ export async function createProxyKey(formData: FormData) {
     };
   }
 
+  // A key with no key_email_access row is dead on arrival: every proxy call
+  // 403s and, before the profile page grew an "Add" control, nothing could
+  // repair it (PR #185 preview QA, 2026-10-05). The dialog pre-ticks a mailbox
+  // and disables submit on zero; this catches anything that bypasses it.
+  if (emailAddresses.length === 0) {
+    await profileEvent('agent_profile_create_failed', { reason: 'no_mailbox', existing_profiles: existingKeys.length });
+    return { error: "Select at least one mailbox for this profile." };
+  }
+
   // Resolve the delegation backing every non-own address BEFORE creating the
   // key: a refusal after the insert used to leave an orphaned key with partial
-  // access. Every non-own address must be backed by an ACTIVE delegation,
-  // recorded on the row so revocation can tear it down again.
+  // access.
   const grants: { email: string; delegationId: string | null }[] = [];
   for (const email of emailAddresses) {
-    let delegationId: string | null = null;
-
-    if (email.toLowerCase() !== dbUser.email.toLowerCase()) {
-      // Matched on both emails: the previous `.limit(1)` lookup of the owner
-      // row picked arbitrarily among duplicate rows for the same address, so a
-      // real delegation could come back empty.
-      const delegation = await findActiveDelegation(email, dbUser.email);
-
-      if (!delegation) {
-        // Previously this fell through and inserted the row with a null
-        // delegationId — granting access that no delegation backed, that
-        // revocation could not remove, and that looked like the user's own
-        // mailbox to every downstream check.
-        await profileEvent('agent_profile_create_failed', { reason: 'no_delegation', existing_profiles: existingKeys.length });
-        return { error: `No active delegation grants you access to ${email}.` };
-      }
-
-      delegationId = delegation.id;
+    const grant = await resolveMailboxGrant(email, dbUser.email);
+    if (!grant) {
+      await profileEvent('agent_profile_create_failed', { reason: 'no_delegation', existing_profiles: existingKeys.length });
+      return { error: `No active delegation grants you access to ${email}.` };
     }
-
-    grants.push({ email, delegationId });
+    grants.push(grant);
   }
 
   // Generate RSA Keypair for Service Account compatibility
@@ -1560,11 +1611,14 @@ export async function setDriveNodeAccess(
   const name = (node.name || node.id).slice(0, 300);
   const key = await ownedActiveKey(dbUser.id, keyId);
 
-  const candidates = await db.select().from(accessRules).where(and(
+  // The agent's create auto-grant on this node is never edited or removed
+  // here: a user setting outranks it while present (decidingSettings), and
+  // Inherit hands the node back to it, so the agent's output is not stranded.
+  const candidates = (await db.select().from(accessRules).where(and(
     eq(accessRules.userId, dbUser.id),
     eq(accessRules.service, DRIVE_SERVICE),
     eq(accessRules.targetResourceId, node.id),
-  ));
+  ))).filter(r => !isAgentCreatedRule(r));
   const assignments = candidates.length > 0
     ? await db.select().from(keyRuleAssignments).where(inArray(keyRuleAssignments.accessRuleId, candidates.map(r => r.id)))
     : [];
@@ -1585,6 +1639,27 @@ export async function setDriveNodeAccess(
   const { captureServerEvent } = await import("@/lib/posthogServer");
 
   if (access === 'inherit') {
+    // A file's legacy per-file rules (Picker, approval links) are settings on
+    // the file too — the card and the guard both read them at file level — so
+    // Inherit clears them with the tree rules. Leaving them made the file snap
+    // back to the legacy access the moment the page revalidated. The agent's
+    // per-kind create auto-grant is excluded, as above: Inherit hands the
+    // file back to it.
+    if (node.kind === 'file') {
+      const legacy = (await db.select().from(accessRules).where(and(
+        eq(accessRules.userId, dbUser.id),
+        inArray(accessRules.service, ACTIVE_DRIVE_FILE_KINDS.map(k => DRIVE_FILE_KINDS[k].service)),
+        or(eq(accessRules.targetResourceId, node.id), and(isNull(accessRules.targetResourceId), eq(accessRules.regexPattern, node.id))),
+      ))).filter(r => !isAgentCreatedRule(r));
+      if (legacy.length > 0) {
+        const legacyAssignments = await db.select().from(keyRuleAssignments)
+          .where(inArray(keyRuleAssignments.accessRuleId, legacy.map(r => r.id)));
+        candidates.push(...legacy);
+        assignments.push(...legacyAssignments);
+        forThisKey.push(...legacy.filter(r => assignmentsOf(r.id).some(a => a.proxyKeyId === key.id)));
+        globals.push(...legacy.filter(r => assignmentsOf(r.id).length === 0));
+      }
+    }
     for (const r of forThisKey) await detachFromThisKey(r.id);
     if (globals.length > 0) {
       const others = (await db.select({ id: proxyKeys.id }).from(proxyKeys)
@@ -1634,25 +1709,46 @@ export async function setDriveNodeAccess(
   return { ruleId };
 }
 
-/** Remove every Drive tree setting this profile holds (its own rules are deleted, shared ones detached). */
+/**
+ * "Clear overrides": remove every Drive tree setting the user made that
+ * applies to this profile — exactly the set the card counts as overrides
+ * (countDriveSettings). The profile's own rules are deleted, shared ones
+ * detached, and a global one is pinned to the other active profiles so it
+ * stops applying here only (the same handling as setting a node to Inherit).
+ * Agent-created auto-grants and legacy per-file rules are kept: the first is
+ * the agent's own output, which a Read default would otherwise strand.
+ */
 export async function clearDriveOverrides(keyId: string) {
   const dbUser = await getDbUser();
   const key = await ownedActiveKey(dbUser.id, keyId);
-  const mine = await db.select({ ruleId: keyRuleAssignments.accessRuleId })
-    .from(keyRuleAssignments)
-    .innerJoin(accessRules, eq(accessRules.id, keyRuleAssignments.accessRuleId))
-    .where(and(eq(keyRuleAssignments.proxyKeyId, key.id), eq(accessRules.service, DRIVE_SERVICE), eq(accessRules.userId, dbUser.id)));
-  for (const { ruleId } of mine) {
-    const others = await db.select().from(keyRuleAssignments)
-      .where(and(eq(keyRuleAssignments.accessRuleId, ruleId)));
-    if (others.every(a => a.proxyKeyId === key.id)) {
-      await db.delete(keyRuleAssignments).where(eq(keyRuleAssignments.accessRuleId, ruleId));
-      await db.delete(accessRules).where(eq(accessRules.id, ruleId));
+  const driveRules = (await db.select().from(accessRules)
+    .where(and(eq(accessRules.userId, dbUser.id), eq(accessRules.service, DRIVE_SERVICE))))
+    .filter(isClearableDriveOverride);
+  const assignments = driveRules.length > 0
+    ? await db.select().from(keyRuleAssignments).where(inArray(keyRuleAssignments.accessRuleId, driveRules.map(r => r.id)))
+    : [];
+  const assignmentsOf = (ruleId: string) => assignments.filter(a => a.accessRuleId === ruleId);
+  const mine = driveRules.filter(r => assignmentsOf(r.id).some(a => a.proxyKeyId === key.id));
+  const globals = driveRules.filter(r => assignmentsOf(r.id).length === 0);
+
+  for (const r of mine) {
+    if (assignmentsOf(r.id).every(a => a.proxyKeyId === key.id)) {
+      await db.delete(keyRuleAssignments).where(eq(keyRuleAssignments.accessRuleId, r.id));
+      await db.delete(accessRules).where(eq(accessRules.id, r.id));
     } else {
-      await db.delete(keyRuleAssignments).where(and(eq(keyRuleAssignments.accessRuleId, ruleId), eq(keyRuleAssignments.proxyKeyId, key.id)));
+      await db.delete(keyRuleAssignments).where(and(eq(keyRuleAssignments.accessRuleId, r.id), eq(keyRuleAssignments.proxyKeyId, key.id)));
+    }
+  }
+  if (globals.length > 0) {
+    const others = (await db.select({ id: proxyKeys.id }).from(proxyKeys)
+      .where(and(eq(proxyKeys.userId, dbUser.id), isNull(proxyKeys.revokedAt))))
+      .filter(k => k.id !== key.id);
+    for (const r of globals) {
+      if (others.length === 0) await db.delete(accessRules).where(eq(accessRules.id, r.id));
+      else await db.insert(keyRuleAssignments).values(others.map(k => ({ proxyKeyId: k.id, accessRuleId: r.id })));
     }
   }
   const { captureServerEvent } = await import("@/lib/posthogServer");
-  captureServerEvent(dbUser.clerkUserId, "drive_tree_settings_cleared", { count: mine.length, profile_default: key.isDefault });
+  captureServerEvent(dbUser.clerkUserId, "drive_tree_settings_cleared", { count: mine.length + globals.length, profile_default: key.isDefault });
   revalidateDashboard();
 }

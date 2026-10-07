@@ -51,6 +51,8 @@ export interface DriveSetting {
   ruleId: string;
   /** 'drive' = a tree rule (any level); 'legacy' = a per-file sheet/doc/slide rule (file level only). */
   source: 'drive' | 'legacy';
+  /** The create auto-grant (either source): the agent's own file, never an override. */
+  agentCreated?: boolean;
   name?: string | null;
   createdAt?: Date;
 }
@@ -102,8 +104,30 @@ export function actionTypeForAccess(access: DriveAccess): string {
   return access === 'write' ? DRIVE_ACTION_TYPES.write : access === 'block' ? DRIVE_ACTION_TYPES.block : DRIVE_ACTION_TYPES.read;
 }
 
+/**
+ * The rule-name prefix every agent-created auto-grant carries (MCP and REST
+ * proxy, every kind). It is the only marker those rows have, and existing
+ * rows already use it, so it is the contract: changing it orphans them.
+ */
+export const AGENT_CREATED_RULE_PREFIX = 'Agent-created: ';
+
+export function isAgentCreatedRule(rule: { ruleName?: string | null }): boolean {
+  return (rule.ruleName ?? '').startsWith(AGENT_CREATED_RULE_PREFIX);
+}
+
+/**
+ * A rule "Clear overrides" removes: a tree setting the user made. The
+ * agent's own files keep their grant (clearing it would strand the agent's
+ * output under a Read default) and legacy per-file rules are not tree
+ * settings, so neither is an override.
+ */
+export function isClearableDriveOverride(rule: { service: string; ruleName?: string | null }): boolean {
+  return rule.service === DRIVE_SERVICE && !isAgentCreatedRule(rule);
+}
+
 export type RuleLike = {
   id: string;
+  ruleName?: string | null;
   service: string;
   actionType: string;
   targetResourceId: string | null;
@@ -127,10 +151,62 @@ export function settingsFromRules(rules: RuleLike[]): Map<string, DriveSetting[]
     const nodeId = r.targetResourceId || r.regexPattern;
     if (!access || !nodeId) continue;
     const list = map.get(nodeId) ?? [];
-    list.push({ nodeId, access, ruleId: r.id, source: isDrive ? 'drive' : 'legacy', name: r.resourceName, createdAt: r.createdAt });
+    list.push({ nodeId, access, ruleId: r.id, source: isDrive ? 'drive' : 'legacy', agentCreated: isAgentCreatedRule(r), name: r.resourceName, createdAt: r.createdAt });
     map.set(nodeId, list);
   }
   return map;
+}
+
+export type DriveSettingClass = 'override' | 'agent_created' | 'per_file';
+
+/**
+ * What a node's settings are, for the card's counts and row tags. A node the
+ * user set on the card is an override even if the agent also created it
+ * (the user's setting is the one Clear removes); otherwise an agent-created
+ * grant marks it as the agent's own file; anything else is a legacy per-file
+ * rule (Picker, approval link).
+ */
+export function classifyDriveSettings(list: DriveSetting[]): DriveSettingClass | null {
+  if (list.length === 0) return null;
+  if (list.some(s => s.source === 'drive' && !s.agentCreated)) return 'override';
+  if (list.some(s => s.agentCreated)) return 'agent_created';
+  return 'per_file';
+}
+
+/** Nodes per class. `overrides` is exactly what "Clear overrides" removes. */
+export function countDriveSettings(settings: Map<string, DriveSetting[]>): { overrides: number; agentCreated: number; perFile: number } {
+  const out = { overrides: 0, agentCreated: 0, perFile: 0 };
+  for (const list of settings.values()) {
+    const c = classifyDriveSettings(list);
+    if (c === 'override') out.overrides++;
+    else if (c === 'agent_created') out.agentCreated++;
+    else if (c === 'per_file') out.perFile++;
+  }
+  return out;
+}
+
+/** The settings left after "Clear overrides": the agent's own files and legacy per-file rules. */
+export function settingsAfterClear(settings: Map<string, DriveSetting[]>): Map<string, DriveSetting[]> {
+  const next = new Map<string, DriveSetting[]>();
+  for (const [id, list] of settings) {
+    const kept = list.filter(s => s.source !== 'drive' || s.agentCreated);
+    if (kept.length) next.set(id, kept);
+  }
+  return next;
+}
+
+/**
+ * The settings that decide on one node. A tree setting the user made is the
+ * newer, explicit model: it outranks the agent's create auto-grant and
+ * legacy per-file rules on the same node (so the user can narrow the agent's
+ * own file, and Inherit hands it back to the auto-grant); then a tree
+ * auto-grant outranks legacy rules; otherwise all of them combine.
+ */
+export function decidingSettings(list: DriveSetting[]): DriveSetting[] {
+  const user = list.filter(s => s.source === 'drive' && !s.agentCreated);
+  if (user.length > 0) return user;
+  const tree = list.filter(s => s.source === 'drive');
+  return tree.length > 0 ? tree : list;
 }
 
 /** Combine several settings on one node: a block wins, then write, then read. */
@@ -155,11 +231,7 @@ export function effectiveDriveAccess(
     const node = lineage[i];
     const all = (settings.get(node.id) ?? []).filter(s => i === 0 || s.source === 'drive');
     if (all.length === 0) continue;
-    // A tree setting the user made on this node is the newer, explicit
-    // model: it outranks legacy per-file rules on the same node (which the
-    // dashboard still shows as the file's setting until one is made).
-    const tree = all.filter(s => s.source === 'drive');
-    const here = tree.length > 0 ? tree : all;
+    const here = decidingSettings(all);
     return {
       access: combine(here),
       level: node.kind,

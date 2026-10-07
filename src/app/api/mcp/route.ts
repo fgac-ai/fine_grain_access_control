@@ -21,7 +21,7 @@ import { z } from 'zod';
 import { db } from '@/db';
 import {
   agentConnections, users, proxyKeys, keyEmailAccess,
-  accessRules, keyRuleAssignments, emailDelegations, temporaryApiKeys,
+  accessRules, keyRuleAssignments, temporaryApiKeys,
 } from '@/db/schema';
 import { eq, and, isNull, gt, sql } from 'drizzle-orm';
 import {
@@ -29,6 +29,7 @@ import {
   clampTtlMinutes, expectedBytesBucket, generateTemporaryKey, requestOrigin, temporaryKeyRecipe,
 } from '@/lib/temporaryApiKeys';
 import { filterLiveDelegatedAccess } from '@/db/delegationQueries';
+import { findActiveDelegationOwner } from '@/db/delegationOwner';
 import { delegateLinkPath } from '@/lib/secondAccount';
 import { clerkClient } from '@clerk/nextjs/server';
 import { resolveDbUser } from '@/db/userHelpers';
@@ -46,6 +47,7 @@ import { notifyOwnerOfAccountRefusal, notifyOwnerOfApprovalLinks, notifyOwnerOfD
 import { deadGrantDenialLine, type DeadGrantReason, type ScopeMissingReason } from '@/lib/googleGrantNotifyCopy';
 import { lookupUndeliverable } from '@/lib/emailBounces';
 import { accountRefusalDenialLine, notifyDenialLine } from '@/lib/approvalNotifyCopy';
+import { buildTextMessageRaw } from '@/lib/mimeText';
 import { agentLabel as buildAgentLabel } from '@/lib/agentLabel';
 import { normalizeRequestedEmail } from '@/lib/accountRefusals';
 import { classifyPlaceholderEmail } from '@/lib/placeholderEmail';
@@ -77,10 +79,10 @@ import {
 } from '@/lib/googleTokenFailure';
 import { liveTokenScopes, reconcileScopes } from '@/lib/googleTokenScopes';
 import { driveTreeFlagOn } from '@/lib/featureFlags';
-import { agentCreatedGrant } from '@/lib/agentCreatedFiles';
+import { agentCreatedGrant, agentCreatedRuleName } from '@/lib/agentCreatedFiles';
 import {
   resolveDriveTreeAccess, effectiveDriveAccess, settingsFromRules, normalizeDriveDefault, driveDefaultLabel,
-  driveDenialText, widenListFields, DRIVE_SERVICE, type DriveDefault, type DriveSetting,
+  driveDenialText, widenListFields, DRIVE_SERVICE, countDriveSettings, type DriveDefault, type DriveSetting,
   classifyDriveDiscovery, driveDiscoveryRefusal, sharedDriveAccess, filterSharedDrives, sharedDriveBlockedText,
   driveScopeUnconfined, isDriveApiPath, unconfinedDriveDenialText,
 } from '@/lib/driveTreeAccess';
@@ -492,22 +494,11 @@ async function getGoogleToken(
   if (targetEmail.toLowerCase() === keyOwner.email.toLowerCase()) {
     tokenOwnerClerkId = keyOwner.clerkUserId;
   } else {
-    // Delegated email — find the email owner
-    const emailOwner = await db.select().from(users)
-      .where(eq(users.email, targetEmail))
-      .limit(1).then(r => r[0]);
+    // Delegated email — the owner row that actively delegated to the key
+    // owner (an address can have several users rows; see delegationOwner.ts).
+    const emailOwner = (await findActiveDelegationOwner(targetEmail, keyOwner.id))?.owner;
 
-    // Verify active delegation
-    const delegation = emailOwner
-      ? await db.select().from(emailDelegations)
-          .where(and(
-            eq(emailDelegations.ownerUserId, emailOwner.id),
-            eq(emailDelegations.delegateUserId, keyOwner.id),
-            eq(emailDelegations.status, 'active'),
-          )).limit(1).then(r => r[0])
-      : undefined;
-
-    if (emailOwner && delegation) {
+    if (emailOwner) {
       tokenOwnerClerkId = emailOwner.clerkUserId;
       tokenOwner = { id: emailOwner.id, email: emailOwner.email, clerkUserId: emailOwner.clerkUserId };
     } else {
@@ -1645,9 +1636,11 @@ async function driveDefaultsForPermissions(conn: ConnectionApproved): Promise<Re
   const token = await getGoogleToken(conn.user.email, conn.user, { quiet: true });
   if ('failure' in token || token.hasDriveFullScope !== true) return legacy;
   const { driveDefault, settings } = await loadDriveTreeSettings(conn.user.id, conn.proxyKeyId);
-  const overrides = [...settings.values()].flat().filter(st => st.source === 'drive').length;
+  // Same count as the dashboard card's "N overrides" (countDriveSettings):
+  // the agent's own auto-granted files are not the user's settings.
+  const counts = countDriveSettings(settings);
   return {
-    drive: `${driveDefaultLabel(driveDefault).toUpperCase()} — this profile's default for every file in the user's Google Drive (My Drive, Shared with me, Shared drives), covering Sheets, Docs, Slides and every other file kind. Folder and file settings in the rules below override it for everything inside them; the nearest setting wins. Blocked files are invisible (reads denied too). ${overrides} folder/file setting(s) apply to this key. Files this agent creates are Read & write for it.`,
+    drive: `${driveDefaultLabel(driveDefault).toUpperCase()} — this profile's default for every file in the user's Google Drive (My Drive, Shared with me, Shared drives), covering Sheets, Docs, Slides and every other file kind. Folder and file settings in the rules below override it for everything inside them; the nearest setting wins. Blocked files are invisible (reads denied too). ${counts.overrides} folder/file setting(s) made by the user apply to this key. Files this agent creates are Read & write for it unless the user sets them otherwise.`,
   };
 }
 
@@ -2536,7 +2529,7 @@ async function autoGrantAgentCreatedFile(
   try {
     const [rule] = await db.insert(accessRules).values({
       userId: conn.user.id,
-      ruleName: `Agent-created: ${title || fileId}`,
+      ruleName: agentCreatedRuleName(title, fileId),
       service: d.service,
       actionType: d.actionTypes.readWrite,
       targetResourceId: fileId,
@@ -2595,7 +2588,7 @@ async function grantDriveCreatedFile(
   try {
     const [rule] = await db.insert(accessRules).values({
       userId: conn.user.id,
-      ruleName: `Agent-created: ${name || id}`,
+      ruleName: agentCreatedRuleName(name, id),
       service: grant.service,
       actionType: grant.actionType,
       targetResourceId: id,
@@ -3416,10 +3409,11 @@ function registerFgacTools(server: FgacMcpServer) {
         const denial = checkSendWhitelist(rules, [to]);
         if (denial) return sendDenialWithLinks(conn, resolved.proxyKeyId, denial);
 
-        // Build RFC 2822 message
-        const raw = Buffer.from(
-          `To: ${to}\r\nSubject: ${subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${body}`
-        ).toString('base64url');
+        // RFC 5322 message via src/lib/mimeText.ts: the plain text plus an HTML
+        // alternative generated from it, both quoted-printable. Gmail re-folds
+        // text-only bodies at ~72 columns on delivery whatever their encoding,
+        // so long paragraphs reached phones ragged; the HTML part survives.
+        const raw = buildTextMessageRaw({ to, subject, body });
 
         const result = await gmailFetch(resolved.token, resolved.targetEmail, 'messages/send', 'POST', JSON.stringify({ raw }));
         if (!result.ok) return errorResult(result.error);
