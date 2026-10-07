@@ -3,39 +3,47 @@ import { config } from 'dotenv'
 import { execSync } from 'child_process'
 import fs from 'fs'
 import path from 'path'
-import { neonctl } from './lib/neonctl'
+import { runNeonctl, runNeonctlJson, neonctlHint, type NeonctlFailure } from './lib/neonctl'
 
 // Load environment variables from .env.local
 config({ path: '.env.local' })
 
+/** Read-side call (retried on transient failures); exits with an honest
+ * diagnosis on failure instead of the old blanket "Are you authenticated?". */
 function runNeonCmd(cmd: string) {
-  try {
-    return JSON.parse(execSync(neonctl(`${cmd} -o json`), { encoding: 'utf-8' }));
-  } catch (error: any) {
-    console.error(`❌ Neon CLI error. Are you authenticated?`);
+  const r = runNeonctlJson(cmd);
+  if (r.error !== undefined) {
+    console.error(`❌ Neon CLI error (${r.kind}) running \`neonctl ${cmd}\`:\n   ${r.error}`);
+    console.error(`   ${neonctlHint(r.kind!)}`);
     process.exit(1);
   }
+  return r.result;
 }
 
 /** Like runNeonCmd, but returns the failure instead of exiting — for callers
- * that can recover (e.g. branch-limit → cleanup → retry). */
-function tryNeonCmd(cmd: string): { result?: any; error?: string } {
-  try {
-    return { result: JSON.parse(execSync(neonctl(`${cmd} -o json`), { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] })) };
-  } catch (error: any) {
-    const stderr = error?.stderr?.toString?.() ?? '';
-    return { error: (stderr || error?.message || 'unknown neonctl error').trim() };
-  }
+ * that can recover (e.g. branch-limit → cleanup → retry). Not retried: a create
+ * whose response was lost may already have happened, so the caller reconciles. */
+function tryNeonCmd(cmd: string): { result?: any; error?: string; kind?: NeonctlFailure } {
+  return runNeonctlJson(cmd, { retries: 0 });
 }
 
 /** Plain-text neonctl output (commands whose `-o json` is not JSON, e.g. `connection-string`). */
 function tryNeonText(cmd: string): { result?: string; error?: string } {
-  try {
-    return { result: execSync(neonctl(cmd), { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim() };
-  } catch (error: any) {
-    const stderr = error?.stderr?.toString?.() ?? '';
-    return { error: (stderr || error?.message || 'unknown neonctl error').trim() };
+  const r = runNeonctl(cmd);
+  return r.error !== undefined ? { error: r.error } : { result: (r.stdout ?? '').trim() };
+}
+
+async function adoptExistingBranch(projectId: string | undefined, branchName: string) {
+  console.log(`🌿 Branch '${branchName}' already exists — adopting it.`);
+  const cs = tryNeonText(`connection-string --branch ${branchName} --project-id ${projectId} --pooled`);
+  const uri = typeof cs.result === 'string' ? cs.result.trim() : '';
+  if (cs.error || !/^postgres(ql)?:\/\//.test(uri)) {
+    console.error(`❌ Could not fetch the branch's connection string: ${cs.error || 'unexpected output'}`);
+    console.error('   Retrieve it from the Neon console and set neon__POSTGRES_URL in .env.local.');
+    process.exit(1);
   }
+  await updateEnvLocal(uri);
+  console.log(`🎉 Ready! Local environment connected to existing branch: ${branchName}`);
 }
 
 async function getGitBranch() {
@@ -129,9 +137,20 @@ async function main() {
     // once. Note the idle floor: if every branch was touched in the last 6h the
     // prune frees nothing and the retry fails with the message below.
     let created = tryNeonCmd(`branches create --project-id ${projectId} --name ${branchName} --compute`);
+    if (created.error && created.kind === 'transient') {
+      // The create may have landed even though its response was lost. Look
+      // before retrying, so a retry cannot fail on "already exists".
+      console.log(`⚠️ Branch create failed transiently (${created.error.split('\n')[0]}) — checking whether it landed...`);
+      if (runNeonCmd(`branches list --project-id ${projectId}`).some((b: any) => b.name === branchName)) {
+        await adoptExistingBranch(projectId, branchName);
+        return;
+      }
+      created = tryNeonCmd(`branches create --project-id ${projectId} --name ${branchName} --compute`);
+    }
     if (created.error) {
       if (!/limit/i.test(created.error)) {
-        console.error(`❌ Neon CLI error: ${created.error}`);
+        console.error(`❌ Neon CLI error (${created.kind}): ${created.error}`);
+        console.error(`   ${neonctlHint(created.kind!)}`);
         process.exit(1);
       }
       console.log('⚠️ Neon branch limit reached — running stale-branch cleanup and retrying...');
@@ -159,16 +178,7 @@ async function main() {
     // `neonctl connection-string` returns the pooled URI with the role
     // password, so the existing branch can be adopted instead of leaving the
     // guard hook to block every schema step (2026-09-16).
-    console.log(`🌿 Branch '${branchName}' already exists — adopting it.`);
-    const cs = tryNeonText(`connection-string --branch ${branchName} --project-id ${projectId} --pooled`);
-    const uri = typeof cs.result === 'string' ? cs.result.trim() : '';
-    if (cs.error || !/^postgres(ql)?:\/\//.test(uri)) {
-      console.error(`❌ Could not fetch the branch's connection string: ${cs.error || 'unexpected output'}`);
-      console.error('   Retrieve it from the Neon console and set neon__POSTGRES_URL in .env.local.');
-      process.exit(1);
-    }
-    await updateEnvLocal(uri);
-    console.log(`🎉 Ready! Local environment connected to existing branch: ${branchName}`);
+    await adoptExistingBranch(projectId, branchName);
   }
 }
 

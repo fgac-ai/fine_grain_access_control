@@ -2,7 +2,7 @@
 import { config } from 'dotenv'
 import { execSync } from 'child_process'
 import { sanitize } from './lib/neon-branch-classifier'
-import { neonctl } from './lib/neonctl'
+import { runNeonctlJson, neonctlHint } from './lib/neonctl'
 
 config({ path: '.env.local' })
 
@@ -59,13 +59,14 @@ const isDocsPath = (f: string) =>
   f.endsWith('.md') || DOCS_FILES.includes(f) || DOCS_PREFIXES.some(p => f.startsWith(p));
 
 function runNeonCmd(cmd: string) {
-  try {
-    return JSON.parse(execSync(neonctl(`${cmd} -o json`), { encoding: 'utf-8' }));
-  } catch (error: any) {
-    console.error(`❌ Neon CLI error executing: ${cmd}`);
-    console.error(error.message);
+  const r = runNeonctlJson(cmd);
+  if (r.error !== undefined) {
+    console.error(`❌ Neon CLI error (${r.kind}) executing: ${cmd}`);
+    console.error(r.error);
+    console.error(neonctlHint(r.kind!));
     process.exit(1);
   }
+  return r.result;
 }
 
 interface PrInfo { number: number; docsOnly: boolean; state: string }
