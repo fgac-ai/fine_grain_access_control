@@ -480,6 +480,15 @@ review-ready hand-back. Never end a turn after the push or the release PR asking
 to deploy the preview or run QA. The only stops are the existing hard ones (a password /
 2FA wall, the destroy-and-recreate reconnect branch, `/deploy-prod` — which stays Ken's).
 
+**Group the train's sessions in the sidebar (Ken, 2026-10-07).** As the first step of
+building a train, create a Code-tab sidebar group named `Train <date>` (matching
+`integration/<date>`) with the `ccd_sidebar` tools, and move into it this session plus
+every session that produced a landed branch. Find them with `list_sessions` (match
+`branch` / `prNumber`; a session whose worktree branch differs from the pushed branch is
+matched by `git -C <cwd> log -1` against the landed SHA). Add sessions for branches landed
+later, and fix-and-retest sessions, as they join. A branch whose session can't be found
+is noted in the train plan, not a blocker.
+
 ## Review-Ready Summary
 
 When work is complete and ready for the user to review (a PR is open and validated,
