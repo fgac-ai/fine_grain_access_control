@@ -47,17 +47,36 @@ type ResultRow = {
 
 // ── Inventory: capability id → assertion ids ────────────────────────────────
 const inventory = new Map<string, Set<string>>();
+// Duplicate-id guard (ADR-002, Landing step 2): two features landing on one train
+// can each take the same next `A<n>`. A Set would silently collapse them into one
+// slot and one assertion would never be counted — fail loudly instead.
+const duplicateIds: string[] = [];
 
 for (const file of readdirSync(CAPS_DIR).sort()) {
   const m = file.match(/^(\d{2})_.*\.md$/);
   if (!m) continue; // README.md etc.
   const cap = m[1];
   const assertions = new Set<string>();
-  for (const line of readFileSync(join(CAPS_DIR, file), 'utf8').split('\n')) {
+  const lines = readFileSync(join(CAPS_DIR, file), 'utf8').split('\n');
+  lines.forEach((line, i) => {
     const a = line.match(/^###\s+(A\d+)\s*:/);
-    if (a) assertions.add(a[1]);
-  }
+    if (!a) return;
+    if (assertions.has(a[1])) {
+      duplicateIds.push(`${join(CAPS_DIR, file)}:${i + 1}: duplicate assertion id ${a[1]} (already defined earlier in this file)`);
+      return;
+    }
+    assertions.add(a[1]);
+  });
   if (assertions.size > 0) inventory.set(cap, assertions);
+}
+
+if (duplicateIds.length > 0) {
+  console.error(
+    `Duplicate assertion ids in ${CAPS_DIR} — the coverage check cannot count them separately.\n` +
+    `Renumber the later heading to the next free A<n> and update its cross-references (docs/adr/002_integration_trains.md, Landing step 2):\n` +
+    duplicateIds.map((d) => `  - ${d}`).join('\n'),
+  );
+  process.exit(2);
 }
 
 const totalAssertions = [...inventory.values()].reduce((n, s) => n + s.size, 0);

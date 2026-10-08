@@ -471,6 +471,24 @@ candidate table** before building anything — Ken asked for this format on
 
 End with the recommendation and ask before building the train.
 
+**Once Ken approves the train, building it includes validating it — do not stop to ask
+again (Ken, 2026-10-07).** The approval of the candidate table covers the whole sequence:
+land each branch, unit checks on the train head, write the plan, push, open the release
+PR, `/deploy-pr-preview` against it, dispatch `qa-env-runner`s scoped to the plan's QA
+scope (sequentially), `qa-coverage-auditor`, fix-and-retest rounds (max 3), then the
+review-ready hand-back. Never end a turn after the push or the release PR asking whether
+to deploy the preview or run QA. The only stops are the existing hard ones (a password /
+2FA wall, the destroy-and-recreate reconnect branch, `/deploy-prod` — which stays Ken's).
+
+**Group the train's sessions in the sidebar (Ken, 2026-10-07).** As the first step of
+building a train, create a Code-tab sidebar group named `Train <date>` (matching
+`integration/<date>`) with the `ccd_sidebar` tools, and move into it this session plus
+every session that produced a landed branch. Find them with `list_sessions` (match
+`branch` / `prNumber`; a session whose worktree branch differs from the pushed branch is
+matched by `git -C <cwd> log -1` against the landed SHA). Add sessions for branches landed
+later, and fix-and-retest sessions, as they join. A branch whose session can't be found
+is noted in the train plan, not a blocker.
+
 ## Review-Ready Summary
 
 When work is complete and ready for the user to review (a PR is open and validated,

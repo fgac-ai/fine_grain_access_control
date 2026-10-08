@@ -18,8 +18,10 @@
  *   - Due only on a repeat: the request must have been minted before, the
  *     current mint must be at least NOTIFY_MIN_GAP_MS after the first, and
  *     the approve page must never have been opened for it.
- *   - AT MOST one email per request id, one per owner per agent turn, and
- *     at most NOTIFY_MAX_PER_DAY per person per rolling 24 h.
+ *   - AT MOST one email per request id, one per owner per 14-day episode
+ *     across all links (APPROVAL_LINK_EPISODE_GAP_MS, since 2026-10-06 —
+ *     before it, one per owner per agent turn), and at most
+ *     NOTIFY_MAX_PER_DAY per person per rolling 24 h across all triggers.
  *     `claimApprovalNotification` flips `approval_requests.notified_at`
  *     atomically — cap and same-turn rule in the same statement — before
  *     anything is sent, so a concurrent mint or a job re-minting hourly
@@ -235,6 +237,9 @@ async function attempt(opts: NotifyOwnerOpts, primary: NotifyLink, sender: Sende
     // turn): one email per turn. The row keeps notified_at NULL, so a later
     // turn's repeat can still email this link.
     if (claim.reason === 'burst') return { status: 'skipped_burst', notifiedAt: null };
+    // Another of this owner's links was emailed inside the episode: no
+    // second email and no 📧 line — the denial still carries this link.
+    if (claim.reason === 'episode') return { status: 'skipped_episode', notifiedAt: null };
     if (claim.reason === 'capped') return { status: 'skipped_rate_capped', notifiedAt: null };
     if (claim.reason === 'undeliverable') return { status: 'skipped_undeliverable', notifiedAt: null };
     return { status: 'failed', notifiedAt: null };

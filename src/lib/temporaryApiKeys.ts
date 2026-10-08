@@ -96,45 +96,60 @@ export function temporaryKeyRecipe(opts: {
     `base_url: ${api}`,
     '',
     'It carries exactly this connection\'s FGAC permissions (same rules, same refusals). It is not a Google token. ' +
-      'Use it only from code you run; never show it to the user, write it to a file, or put it in a URL.',
+      'This key works for any Google REST call this connection\'s rules allow; the main uses are large email ' +
+      'attachments and Drive uploads, and the recipes below are examples.',
+    'Keep the key out of anything that leaves this session: don\'t show it to the user, put it in a URL or query ' +
+      'string, log it, or commit it. Hand it to your script through a private temp file (chmod 600) or an ' +
+      'environment variable, and delete the file when done. The examples read it from KEY_FILE:',
+    '  Best: write api_key into KEY_FILE with your file-writing tool, then chmod 600 it, so the key never appears in command text. Or from a shell:',
+    '  KEY_FILE=<your scratch dir>/fgac_key; (umask 077; printf %s \'<api_key>\' > "$KEY_FILE")',
+    '  ... curl -H "Authorization: Bearer $(cat "$KEY_FILE")" ... ; rm -f "$KEY_FILE"   # when done',
     `The proxy speaks the Google REST API: replace https://www.googleapis.com with ${api} ` +
       '(and sheets/docs/slides.googleapis.com with the same base plus sheets/v4, docs/v1, slides/v1). ' +
       'Send the key as "Authorization: Bearer <api_key>". Google client libraries work by overriding their root URL.',
+    'Gmail paths take the mailbox (MAILBOX below): users/me is your FGAC sign-in address; for any other mailbox ' +
+      '(a linked or delegated one) use users/<address> — list_accounts names them.',
     'Limits: each request body must be 4 MB or less (larger requests are refused with 413). ' +
       'Each request must finish within ~55 s; for very large downloads use HTTP Range requests.',
   ];
+  const auth = '-H "Authorization: Bearer $(cat "$KEY_FILE")"';
   const recipes: Record<TempKeyPurpose, string[]> = {
     download: [
       'Download a Drive file (any size, one request, streamed):',
-      `  curl -sS -H "Authorization: Bearer $KEY" -o out.bin "${api}/drive/v3/files/FILE_ID?alt=media"`,
+      `  curl -sS ${auth} -o out.bin "${api}/drive/v3/files/FILE_ID?alt=media"`,
       'Download a Gmail attachment (returns Gmail JSON; base64url-decode `data`):',
-      `  curl -sS -H "Authorization: Bearer $KEY" "${api}/gmail/v1/users/me/messages/MSG_ID/attachments/ATT_ID"`,
+      `  curl -sS ${auth} "${api}/gmail/v1/users/MAILBOX/messages/MSG_ID/attachments/ATT_ID"`,
     ],
     upload: [
       'Upload a file to Drive with a resumable upload in 4 MB chunks:',
-      `  1. curl -sS -i -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \\`,
+      `  1. curl -sS -i -X POST ${auth} -H "Content-Type: application/json" \\`,
       `       -H "X-Upload-Content-Length: TOTAL_BYTES" -d '{"name":"report.pdf"}' \\`,
       `       "${api}/upload/drive/v3/files?uploadType=resumable"     # Location header = SESSION_URL`,
-      '  2. PUT each 4 MB slice to SESSION_URL with "Authorization: Bearer $KEY" and',
+      '  2. PUT each 4 MB slice to SESSION_URL with the same Authorization header and',
       '     "Content-Range: bytes START-END/TOTAL"; 308 = keep going, 200/201 = done (body has the file id).',
       'Python: googleapiclient build("drive","v3", credentials=None, ...) with client_options={"api_endpoint": BASE_URL} ' +
-        'and MediaFileUpload(path, resumable=True, chunksize=4*1024*1024), sending the key as a Bearer header.',
+        'and MediaFileUpload(path, resumable=True, chunksize=4*1024*1024), sending the key (read from KEY_FILE) as a Bearer header.',
       'To overwrite an existing file, PATCH .../upload/drive/v3/files/FILE_ID?uploadType=resumable instead of POST.',
     ],
     send_attachment: [
-      'Send an email with a large attachment (Gmail allows 25 MB of attachments):',
-      '  Build the full RFC 822 message (To/Cc/Bcc/Subject headers FIRST, then the MIME body).',
-      `  1. curl -sS -i -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \\`,
-      `       -H "X-Upload-Content-Type: message/rfc822" -H "X-Upload-Content-Length: TOTAL_BYTES" -d '{}' \\`,
-      `       "${api}/upload/gmail/v1/users/me/messages/send?uploadType=resumable"   # Location = SESSION_URL`,
-      '  2. PUT the message in 4 MB slices with "Content-Range: bytes START-END/TOTAL". The FIRST slice must',
-      '     contain every header: FGAC checks all recipients against the send whitelist there.',
-      'Messages under 4 MB can go in one request: POST the RFC 822 bytes to',
-      `  ${api}/upload/gmail/v1/users/me/messages/send?uploadType=media  (Content-Type: message/rfc822)`,
+      'Send an email with a large attachment (Gmail allows 25 MB of attachments). Build the full RFC 822 message ' +
+        '(To/Cc/Bcc/Subject headers FIRST, then the MIME body), then pick by message size:',
+      '  Up to ~3 MB — JSON with the base64url message (base64 adds ~33%, the request must stay under 4 MB):',
+      `    curl -sS -X POST ${auth} -H "Content-Type: application/json" \\`,
+      `      --data-binary @body.json "${api}/gmail/v1/users/MAILBOX/messages/send"   # body.json = {"raw":"<base64url>"}`,
+      '  Up to 4 MB — the raw bytes in one request:',
+      `    curl -sS -X POST ${auth} -H "Content-Type: message/rfc822" \\`,
+      `      --data-binary @message.eml "${api}/upload/gmail/v1/users/MAILBOX/messages/send?uploadType=media"`,
+      '  Above 4 MB — resumable:',
+      `    1. curl -sS -i -X POST ${auth} -H "Content-Type: application/json" \\`,
+      `         -H "X-Upload-Content-Type: message/rfc822" -H "X-Upload-Content-Length: TOTAL_BYTES" -d '{}' \\`,
+      `         "${api}/upload/gmail/v1/users/MAILBOX/messages/send?uploadType=resumable"   # Location = SESSION_URL`,
+      '    2. PUT the message in 4 MB slices with "Content-Range: bytes START-END/TOTAL". The FIRST slice must',
+      '       contain every To/Cc/Bcc header: FGAC checks all recipients against the send whitelist there.',
     ],
     bulk_calls: [
       'Make the calls you need in a loop with this key as the Bearer token, e.g.',
-      `  curl -sS -H "Authorization: Bearer $KEY" "${api}/gmail/v1/users/me/messages?q=from:example"`,
+      `  curl -sS ${auth} "${api}/gmail/v1/users/MAILBOX/messages?q=from:example"`,
     ],
     other: [
       `Call ${api}/<google api path> exactly as you would call https://www.googleapis.com/<path>.`,

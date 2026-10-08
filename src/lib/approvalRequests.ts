@@ -16,7 +16,7 @@ import { db } from '@/db';
 import { accountRefusals, approvalRequests, googleGrantFailures } from '@/db/schema';
 import { and, eq, isNotNull, isNull, sql } from 'drizzle-orm';
 import { recipientUndeliverableSql } from './emailBounces';
-import { NOTIFY_MIN_GAP_MS } from './approvalNotifyCopy';
+import { APPROVAL_LINK_EPISODE_GAP_MS, NOTIFY_MIN_GAP_MS } from './approvalNotifyCopy';
 import { claimSerialized } from './notifyClaimLock';
 
 /**
@@ -164,20 +164,36 @@ function recentLinkReminderForOtherRequestSql(userId: string, requestId: string)
                        AND burst_rows.notified_at > now() - ${sql.raw(`interval '${gapSeconds} seconds'`)})`;
 }
 
+/** Has ANOTHER request of this owner been emailed inside the current
+ * episode (APPROVAL_LINK_EPISODE_GAP_MS)? One link reminder per owner per
+ * episode, whatever the file: an agent asking for a new file each day used
+ * to earn a new email each day (production, 2026-10-01 → 10-06). Strictly
+ * wider than the same-turn burst window, which stays as the diagnosis for a
+ * claim refused within it. */
+function ownerLinkEpisodeNotifiedSql(userId: string, requestId: string) {
+  const gapSeconds = Math.round(APPROVAL_LINK_EPISODE_GAP_MS / 1000);
+  return sql`EXISTS (SELECT 1 FROM ${approvalRequests} AS episode_links
+                     WHERE episode_links.user_id = ${userId}
+                       AND episode_links.request_id <> ${requestId}
+                       AND episode_links.notified_at > now() - ${sql.raw(`interval '${gapSeconds} seconds'`)})`;
+}
+
 /**
  * Claim the right to email this request's link: flips `notified_at` from
  * NULL to now(), and only while (a) no other request of this owner was
- * emailed inside the same-turn window and (b) the owner is under `maxPerDay`
- * emails in the last 24 h (all three ledgers). Cap and claim are ONE
+ * emailed inside the current episode (which includes the same-turn window)
+ * and (b) the owner is under `maxPerDay` emails in the last 24 h (all three
+ * ledgers). Cap and claim are ONE
  * statement, run under the owner's advisory lock so concurrent claims on
  * different rows cannot each pass a separate count (notifyClaimLock.ts).
  * Returns the stamp when claimed; otherwise says why (already emailed, a
- * same-turn burst, capped, no ledger row, or a DB error — the last two are
+ * same-turn burst, the owner's episode, capped, no ledger row, or a DB
+ * error — the last two are
  * delivery failures, never "already emailed").
  */
 export async function claimApprovalNotification(requestId: string, userId: string, maxPerDay: number, recipient: string): Promise<
   { claimed: true; notifiedAt: Date | null }
-  | { claimed: false; notifiedAt: Date | null; reason: 'already' | 'burst' | 'capped' | 'undeliverable' | 'missing' | 'error' }
+  | { claimed: false; notifiedAt: Date | null; reason: 'already' | 'burst' | 'episode' | 'capped' | 'undeliverable' | 'missing' | 'error' }
 > {
   try {
     const [row] = await claimSerialized(userId, db.update(approvalRequests)
@@ -188,7 +204,7 @@ export async function claimApprovalNotification(requestId: string, userId: strin
         // A recipient whose earlier notice bounced permanently (email_bounces)
         // is never emailed again — by any of the three triggers.
         sql`NOT ${recipientUndeliverableSql(recipient)}`,
-        sql`NOT ${recentLinkReminderForOtherRequestSql(userId, requestId)}`,
+        sql`NOT ${ownerLinkEpisodeNotifiedSql(userId, requestId)}`,
         sql`${recentNotificationCountSql(userId)} < ${maxPerDay}`,
       ))
       .returning({ notifiedAt: approvalRequests.notifiedAt }));
@@ -196,6 +212,7 @@ export async function claimApprovalNotification(requestId: string, userId: strin
     const existing = await db.select({
       notifiedAt: approvalRequests.notifiedAt,
       burst: recentLinkReminderForOtherRequestSql(userId, requestId),
+      episode: ownerLinkEpisodeNotifiedSql(userId, requestId),
       undeliverable: recipientUndeliverableSql(recipient),
     })
       .from(approvalRequests)
@@ -205,6 +222,7 @@ export async function claimApprovalNotification(requestId: string, userId: strin
     if (existing.notifiedAt) return { claimed: false, notifiedAt: existing.notifiedAt, reason: 'already' };
     if (existing.undeliverable === true || existing.undeliverable === 't') return { claimed: false, notifiedAt: null, reason: 'undeliverable' };
     if (existing.burst === true || existing.burst === 't') return { claimed: false, notifiedAt: null, reason: 'burst' };
+    if (existing.episode === true || existing.episode === 't') return { claimed: false, notifiedAt: null, reason: 'episode' };
     return { claimed: false, notifiedAt: null, reason: 'capped' };
   } catch (err) {
     console.error('[approvalRequests] notification claim failed:', err);

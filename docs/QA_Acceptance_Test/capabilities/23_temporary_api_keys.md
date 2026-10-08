@@ -29,7 +29,11 @@ an expiry 15 min (±1 min) after the call, `base_url`, and a download recipe (`c
 `base_url` is **the host that served the MCP call** (the preview URL on a preview, localhost
 locally), never a hard-coded fgac.ai.
 The text says the key carries this connection's permissions, needs code execution with network
-access, and must not be shown to the user. No Google token appears anywhere in the response.
+access, and must not be shown to the user, put in a URL, logged, or committed. Its curl examples read
+the key with `$(cat "$KEY_FILE")` from a private (umask 077 / chmod 600) temp file that is deleted
+afterwards — never a bare `$KEY` inline in the command — and it states that `users/me` is the FGAC
+sign-in address while other mailboxes take `users/<address>`. No Google token appears anywhere in
+the response.
 
 ### A2: TTL bounds are enforced and reported
 
@@ -97,7 +101,8 @@ to reuse its current key (`live_temp_keys` = 10). Revoking one frees a slot.
 
 `tools/list` includes `create_temporary_api_key` with the description's four elements: when to
 use it (over ~1 MB / scripted loops), the code-execution requirement and the windowed-tool
-fallback, the 15/60-minute lifetime with resume-after-expiry, and "never show the key". The
+fallback, the 15/60-minute lifetime with resume-after-expiry, and the key-handling rule ("keep the key out of
+anything that leaves this session" — private temp file or env var allowed). The
 `initialize` instructions contain the large-file sentence. `gmail_get_attachment`,
 `gmail_send`, and `google_api_modify` descriptions each point to the tool.
 
@@ -106,7 +111,9 @@ fallback, the 15/60-minute lifetime with resume-after-expiry, and "never show th
 Prompt, with no mention of keys or scripts: "Save the ~2 MB attachment on <subject> to
 `./qa-out/` and tell me its SHA-256." Pass when the agent calls `create_temporary_api_key`,
 downloads via the proxy in ≤ 2 requests (not windowed tool calls), the saved file's hash
-matches the sent file, and **the key does not appear in the agent's final reply**. Record the
+matches the sent file, and **the key does not appear in the agent's final reply**. A key handed to the
+script through a chmod-600 temp file is the intended path, not a failure; record whether the agent's
+harness blocked any step (e.g. an auto-mode classifier refusing an inline key). Record the
 number of tool calls taken. Runtimes without code execution: `skip` by design.
 
 ### A13: Mint-to-use is measurable

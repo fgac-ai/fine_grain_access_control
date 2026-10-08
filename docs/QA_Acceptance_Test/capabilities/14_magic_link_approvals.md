@@ -214,8 +214,12 @@
   mailbox (that address appears only in From / Reply-To). A second request
   re-minted to a due repeat within 5 minutes of that email sends NOTHING:
   its mint carries `notify_status: 'skipped_burst'`, no 📧 line, and its
-  ledger row keeps `notified_at` NULL (one email per agent turn; the link
-  is still emailed on a later turn's repeat).
+  ledger row keeps `notified_at` NULL. The same request repeated on a
+  LATER turn (more than 5 minutes on) still sends nothing — its mint carries
+  `notify_status: 'skipped_episode'` and no 📧 line, because the owner was
+  already emailed about one link in the current 14-day episode (since
+  2026-10-06: one link-reminder email per owner per episode, whatever the
+  file). The email body says it is the only such reminder for 14 days.
   A FOURTH denial says the link was emailed "at <date HH:MM UTC>" and no
   further email is sent; the mailbox still holds one message. Opening the
   emailed link resolves and approves exactly like the chat link (A2), and

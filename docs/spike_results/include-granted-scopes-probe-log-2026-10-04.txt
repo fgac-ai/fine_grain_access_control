@@ -1,0 +1,451 @@
+# Probe log — include_granted_scopes spike, dev Clerk instance, 2026-10-03/04 (UTC)
+# Source: scripts/google-scope-probe.ts (read-only). Labels only; no addresses, ids or tokens.
+# Entries labelled 'watch' are the 5-minute background polls. See docs/implementation_plans/claude_wizardly-shamir-8304cf_v1.md for the reading of each entry.
+
+# T0 baseline before any action
+USER_A  2026-10-04T01:16:36.541Z
+  last_sign_in_at           2026-10-03T20:09:19.561Z
+  verification.status       verified
+  record updated_at         2026-10-03T20:12:09.303Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3599s  (client project 627660126377)
+  record and token agree
+USER_B  2026-10-04T01:16:37.402Z
+  last_sign_in_at           2026-10-03T16:52:45.415Z
+  verification.status       verified
+  record updated_at         2026-10-03T16:52:45.347Z
+  record approved_scopes    drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3599s  (client project 627660126377)
+  record and token agree
+# T1 USER_A right after plain sign-in WITH include_granted_scopes=true (hook+modal)
+USER_A  2026-10-04T01:33:35.831Z
+  last_sign_in_at           2026-10-04T01:28:48.307Z
+  verification.status       verified
+  record updated_at         2026-10-04T01:32:39.566Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3542s  (client project 627660126377)
+  record and token agree
+# watch USER_A (after arm-1 sign-in 01:32Z, token expires ~02:32Z)
+USER_A  2026-10-04T01:45:15.875Z
+  last_sign_in_at           2026-10-04T01:45:06.258Z
+  verification.status       unverified
+  record updated_at         2026-10-04T01:45:06.191Z
+  record approved_scopes    drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token                     unavailable (HTTP 200)
+# watch USER_A (after arm-1 sign-in 01:32Z, token expires ~02:32Z)
+USER_A  2026-10-04T01:50:17.545Z
+  last_sign_in_at           2026-10-04T01:45:06.258Z
+  verification.status       verified
+  record updated_at         2026-10-04T01:45:37.853Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3318s  (client project 627660126377)
+  record and token agree
+# watch USER_A (after arm-1 sign-in 01:32Z, token expires ~02:32Z)
+USER_A  2026-10-04T01:55:19.233Z
+  last_sign_in_at           2026-10-04T01:45:06.258Z
+  verification.status       verified
+  record updated_at         2026-10-04T01:45:37.853Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3016s  (client project 627660126377)
+  record and token agree
+# watch USER_A (after arm-1 sign-in 01:32Z, token expires ~02:32Z)
+USER_A  2026-10-04T02:00:21.007Z
+  last_sign_in_at           2026-10-04T01:45:06.258Z
+  verification.status       verified
+  record updated_at         2026-10-04T01:45:37.853Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      2714s  (client project 627660126377)
+  record and token agree
+# watch USER_A (after arm-1 sign-in 01:32Z, token expires ~02:32Z)
+USER_A  2026-10-04T02:05:23.751Z
+  last_sign_in_at           2026-10-04T01:45:06.258Z
+  verification.status       verified
+  record updated_at         2026-10-04T01:45:37.853Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      2412s  (client project 627660126377)
+  record and token agree
+# watch USER_A (after arm-1 sign-in 01:32Z, token expires ~02:32Z)
+USER_A  2026-10-04T02:10:25.563Z
+  last_sign_in_at           2026-10-04T01:45:06.258Z
+  verification.status       verified
+  record updated_at         2026-10-04T01:45:37.853Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      2110s  (client project 627660126377)
+  record and token agree
+# watch USER_A (after arm-1 sign-in 01:32Z, token expires ~02:32Z)
+USER_A  2026-10-04T02:15:27.323Z
+  last_sign_in_at           2026-10-04T01:45:06.258Z
+  verification.status       verified
+  record updated_at         2026-10-04T01:45:37.853Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      1808s  (client project 627660126377)
+  record and token agree
+# watch USER_A (after arm-1 sign-in 01:32Z, token expires ~02:32Z)
+USER_A  2026-10-04T02:20:28.810Z
+  last_sign_in_at           2026-10-04T01:45:06.258Z
+  verification.status       verified
+  record updated_at         2026-10-04T01:45:37.853Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      1507s  (client project 627660126377)
+  record and token agree
+# watch USER_A (after arm-1 sign-in 01:32Z, token expires ~02:32Z)
+USER_A  2026-10-04T02:25:30.369Z
+  last_sign_in_at           2026-10-04T01:45:06.258Z
+  verification.status       verified
+  record updated_at         2026-10-04T01:45:37.853Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      1206s  (client project 627660126377)
+  record and token agree
+# watch USER_A (after arm-1 sign-in 01:32Z, token expires ~02:32Z)
+USER_A  2026-10-04T02:30:32.311Z
+  last_sign_in_at           2026-10-04T01:45:06.258Z
+  verification.status       verified
+  record updated_at         2026-10-04T01:45:37.853Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3598s  (client project 627660126377)
+  record and token agree
+# pre-M2 baseline (spike run start)
+USER_A  2026-10-04T02:36:09.717Z
+  last_sign_in_at           2026-10-04T02:34:19.600Z
+  verification.status       verified
+  record updated_at         2026-10-04T02:34:19.535Z
+  record approved_scopes    drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3488s  (client project 627660126377)
+  record and token agree
+# M2 control: narrow reauthorize select_account, no param
+USER_A  2026-10-04T02:37:29.088Z
+  last_sign_in_at           2026-10-04T02:34:19.600Z
+  verification.status       verified
+  record updated_at         2026-10-04T02:37:06.181Z
+  record approved_scopes    drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3575s  (client project 627660126377)
+  record and token agree
+# M1r restore: narrow reauthorize select_account + include_granted_scopes=true
+USER_A  2026-10-04T02:38:51.500Z
+  last_sign_in_at           2026-10-04T02:34:19.600Z
+  verification.status       verified
+  record updated_at         2026-10-04T02:38:29.347Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3576s  (client project 627660126377)
+  record and token agree
+# M3 consent: narrow reauthorize prompt=consent + include_granted_scopes=true
+USER_A  2026-10-04T02:41:30.197Z
+  last_sign_in_at           2026-10-04T02:34:19.600Z
+  verification.status       unverified
+  record updated_at         2026-10-04T02:40:55.538Z
+  record approved_scopes    
+  token                     unavailable (HTTP 200)
+# post-M3 confirm (no further UI action taken)
+USER_A  2026-10-04T02:42:21.177Z
+  last_sign_in_at           2026-10-04T02:34:19.600Z
+  verification.status       unverified
+  record updated_at         2026-10-04T02:40:55.538Z
+  record approved_scopes    
+  token                     unavailable (HTTP 200)
+# pre-repair state
+USER_A  2026-10-04T02:47:41.658Z
+  last_sign_in_at           2026-10-04T02:34:19.600Z
+  verification.status       verified
+  record updated_at         2026-10-04T02:43:25.363Z
+  record approved_scopes    drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3342s  (client project 627660126377)
+  record and token agree
+# pre-repair state (re-check after client reload)
+USER_A  2026-10-04T02:49:22.011Z
+  last_sign_in_at           2026-10-04T02:34:19.600Z
+  verification.status       verified
+  record updated_at         2026-10-04T02:43:25.363Z
+  record approved_scopes    drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3242s  (client project 627660126377)
+  record and token agree
+# pre-M5 state
+USER_A  2026-10-04T02:52:57.447Z
+  last_sign_in_at           2026-10-04T02:34:19.600Z
+  verification.status       verified
+  record updated_at         2026-10-04T02:43:25.363Z
+  record approved_scopes    drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3026s  (client project 627660126377)
+  record and token agree
+# M5: narrow reauthorize select_account + include_granted_scopes=true over a narrow refresh token
+USER_A  2026-10-04T02:56:03.983Z
+  last_sign_in_at           2026-10-04T02:34:19.600Z
+  verification.status       unverified
+  record updated_at         2026-10-04T02:55:46.212Z
+  record approved_scopes    
+  token                     unavailable (HTTP 200)
+# M5 recheck after concurrent flow seen in console log
+USER_A  2026-10-04T02:59:39.557Z
+  last_sign_in_at           2026-10-04T02:34:19.600Z
+  verification.status       verified
+  record updated_at         2026-10-04T02:56:50.512Z
+  record approved_scopes    drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3429s  (client project 627660126377)
+  record and token agree
+# M5: narrow reauthorize select_account + include_granted_scopes=true over a narrow refresh token
+USER_A  2026-10-04T03:02:39.243Z
+  last_sign_in_at           2026-10-04T02:34:19.600Z
+  verification.status       verified
+  record updated_at         2026-10-04T03:02:33.603Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3593s  (client project 627660126377)
+  record and token agree
+# M5 +60s
+USER_A  2026-10-04T03:03:41.540Z
+  last_sign_in_at           2026-10-04T02:34:19.600Z
+  verification.status       verified
+  record updated_at         2026-10-04T03:02:33.603Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3530s  (client project 627660126377)
+  record and token agree
+# watch USER_A (after M5 pass 03:02:33Z over a narrow refresh token; first refresh expected ~03:48Z)
+USER_A  2026-10-04T03:10:41.949Z
+  last_sign_in_at           2026-10-04T02:34:19.600Z
+  verification.status       verified
+  record updated_at         2026-10-04T03:02:33.603Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3110s  (client project 627660126377)
+  record and token agree
+# watch USER_A (after M5 pass 03:02:33Z over a narrow refresh token; first refresh expected ~03:48Z)
+USER_A  2026-10-04T03:15:43.845Z
+  last_sign_in_at           2026-10-04T02:34:19.600Z
+  verification.status       verified
+  record updated_at         2026-10-04T03:02:33.603Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      2808s  (client project 627660126377)
+  record and token agree
+# watch USER_A (after M5 pass 03:02:33Z over a narrow refresh token; first refresh expected ~03:48Z)
+USER_A  2026-10-04T03:20:45.593Z
+  last_sign_in_at           2026-10-04T03:17:31.870Z
+  verification.status       verified
+  record updated_at         2026-10-04T03:17:31.814Z
+  record approved_scopes    drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3404s  (client project 627660126377)
+  record and token agree
+# pre-UI-reconnect state
+USER_A  2026-10-04T03:23:45.278Z
+  last_sign_in_at           2026-10-04T03:17:31.870Z
+  verification.status       verified
+  record updated_at         2026-10-04T03:17:31.814Z
+  record approved_scopes    drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3224s  (client project 627660126377)
+  record and token agree
+# UI Reconnect Google (consent, requests drive.file) with the shipped include_granted_scopes=true
+USER_A  2026-10-04T03:27:54.136Z
+  last_sign_in_at           2026-10-04T03:17:31.870Z
+  verification.status       verified
+  record updated_at         2026-10-04T03:27:14.183Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3559s  (client project 627660126377)
+  record and token agree
+# UI reconnect +60s
+USER_A  2026-10-04T03:28:55.751Z
+  last_sign_in_at           2026-10-04T03:17:31.870Z
+  verification.status       verified
+  record updated_at         2026-10-04T03:27:14.183Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3497s  (client project 627660126377)
+  record and token agree
+# pre-preview-A17 state
+USER_A  2026-10-04T03:31:22.239Z
+  last_sign_in_at           2026-10-04T03:17:31.870Z
+  verification.status       verified
+  record updated_at         2026-10-04T03:27:14.183Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3350s  (client project 627660126377)
+  record and token agree
+# pre-preview sign-in state
+USER_A  2026-10-04T03:35:16.332Z
+  last_sign_in_at           2026-10-04T03:17:31.870Z
+  verification.status       verified
+  record updated_at         2026-10-04T03:27:14.183Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3116s  (client project 627660126377)
+  record and token agree
+# preview: right after plain Google sign-in (control, no parameter)
+USER_A  2026-10-04T03:39:13.606Z
+  last_sign_in_at           2026-10-04T03:38:14.642Z
+  verification.status       verified
+  record updated_at         2026-10-04T03:38:14.559Z
+  record approved_scopes    drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3539s  (client project 627660126377)
+  record and token agree
+# preview A17: Reconnect Google (consent, requests drive.file) with include_granted_scopes=true
+USER_A  2026-10-04T03:45:56.694Z
+  last_sign_in_at           2026-10-04T03:38:14.642Z
+  verification.status       verified
+  record updated_at         2026-10-04T03:45:00.894Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3542s  (client project 627660126377)
+  record and token agree
+# preview A17 +60s
+USER_A  2026-10-04T03:48:10.448Z
+  last_sign_in_at           2026-10-04T03:38:14.642Z
+  verification.status       verified
+  record updated_at         2026-10-04T03:45:00.894Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3408s  (client project 627660126377)
+  record and token agree
+# preview A17 second pass (URL captured at the click): after return
+USER_A  2026-10-04T03:50:36.647Z
+  last_sign_in_at           2026-10-04T03:38:14.642Z
+  verification.status       verified
+  record updated_at         2026-10-04T03:49:50.968Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3552s  (client project 627660126377)
+  record and token agree
+# watch USER_A (after preview Reconnect pass 2 (consent + include_granted_scopes) 03:49:50Z; first refresh expected ~04:35Z)
+USER_A  2026-10-04T03:57:38.853Z
+  last_sign_in_at           2026-10-04T03:38:14.642Z
+  verification.status       verified
+  record updated_at         2026-10-04T03:49:50.968Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3130s  (client project 627660126377)
+  record and token agree
+# watch USER_A (after preview Reconnect pass 2 (consent + include_granted_scopes) 03:49:50Z; first refresh expected ~04:35Z)
+USER_A  2026-10-04T04:02:40.809Z
+  last_sign_in_at           2026-10-04T03:38:14.642Z
+  verification.status       verified
+  record updated_at         2026-10-04T03:49:50.968Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      2828s  (client project 627660126377)
+  record and token agree
+# watch USER_A (after preview Reconnect pass 2 (consent + include_granted_scopes) 03:49:50Z; first refresh expected ~04:35Z)
+USER_A  2026-10-04T04:07:42.478Z
+  last_sign_in_at           2026-10-04T03:38:14.642Z
+  verification.status       verified
+  record updated_at         2026-10-04T03:49:50.968Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      2526s  (client project 627660126377)
+  record and token agree
+# watch USER_A (after preview Reconnect pass 2 (consent + include_granted_scopes) 03:49:50Z; first refresh expected ~04:35Z)
+USER_A  2026-10-04T04:12:44.431Z
+  last_sign_in_at           2026-10-04T03:38:14.642Z
+  verification.status       verified
+  record updated_at         2026-10-04T03:49:50.968Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      2224s  (client project 627660126377)
+  record and token agree
+# watch USER_A (after preview Reconnect pass 2 (consent + include_granted_scopes) 03:49:50Z; first refresh expected ~04:35Z)
+USER_A  2026-10-04T04:17:46.341Z
+  last_sign_in_at           2026-10-04T03:38:14.642Z
+  verification.status       verified
+  record updated_at         2026-10-04T03:49:50.968Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      1922s  (client project 627660126377)
+  record and token agree
+# watch USER_A (after preview Reconnect pass 2 (consent + include_granted_scopes) 03:49:50Z; first refresh expected ~04:35Z)
+USER_A  2026-10-04T04:22:48.468Z
+  last_sign_in_at           2026-10-04T03:38:14.642Z
+  verification.status       verified
+  record updated_at         2026-10-04T03:49:50.968Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      1620s  (client project 627660126377)
+  record and token agree
+# watch USER_A (after preview Reconnect pass 2 (consent + include_granted_scopes) 03:49:50Z; first refresh expected ~04:35Z)
+USER_A  2026-10-04T04:27:50.382Z
+  last_sign_in_at           2026-10-04T03:38:14.642Z
+  verification.status       verified
+  record updated_at         2026-10-04T03:49:50.968Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      1318s  (client project 627660126377)
+  record and token agree
+# watch USER_A (after preview Reconnect pass 2 (consent + include_granted_scopes) 03:49:50Z; first refresh expected ~04:35Z)
+USER_A  2026-10-04T04:32:51.821Z
+  last_sign_in_at           2026-10-04T03:38:14.642Z
+  verification.status       verified
+  record updated_at         2026-10-04T03:49:50.968Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      1017s  (client project 627660126377)
+  record and token agree
+# watch USER_A (after preview Reconnect pass 2 (consent + include_granted_scopes) 03:49:50Z; first refresh expected ~04:35Z)
+USER_A  2026-10-04T04:37:53.261Z
+  last_sign_in_at           2026-10-04T03:38:14.642Z
+  verification.status       verified
+  record updated_at         2026-10-04T03:49:50.968Z
+  record approved_scopes    drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  token endpoint scopes     drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo scopes          drive drive.file email gmail.modify openid profile userinfo.email userinfo.profile
+  tokeninfo expires_in      3598s  (client project 627660126377)
+  record and token agree

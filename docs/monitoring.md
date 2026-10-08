@@ -2397,9 +2397,10 @@ GROUP BY delivery
 ```
 
 ```sql
--- 7.26b — volume and the cap (7 d): reminders per person per day. Anything
--- at 3 is the cap doing its job; a person at 3 on several days is an agent
--- asking for many files repeatedly — look at 7.22 for who.
+-- 7.26b — volume and the cap (7 d): reminders per person per day. Since
+-- 2026-10-06 (7.26f) a person should appear on ONE day per 14 days; a second
+-- row for the same `who` inside 14 d is a broken episode guard, not an
+-- agent asking for many files — check 7.26c for `skipped_episode`.
 SELECT toDate(timestamp) AS d, cityHash64(toString(person_id)) % 100000 AS who,
        count() AS reminders, uniq(properties.request_id) AS requests,
        max(properties.mint_count) AS max_asks
@@ -2419,7 +2420,9 @@ GROUP BY d, who ORDER BY reminders DESC, d DESC LIMIT 20
 -- `skipped_rate_capped` = the daily cap engaged; `skipped_burst` (since
 -- 2026-09-24) = a due link NOT emailed because another of the owner's links
 -- was emailed inside the 5-minute same-turn window — expected on multi-file
--- turns, and the link is still eligible on a later turn. The sends themselves are
+-- turns; `skipped_episode` (since 2026-10-06, 7.26f) = due, but another of
+-- the owner's links was emailed inside the last 14 days — the agent still
+-- got the link in chat, the owner gets no second email. The sends themselves are
 -- `proxy_request` rows under the support key — exclude that key's
 -- proxy_key_id (or the support address's account_email) from customer
 -- usage counts.
@@ -2498,6 +2501,41 @@ requests, 30 re-minted). The reminder cannot reach the other 131; if
 `opened_via_email` stays near zero after a month while 7.26c shows `sent`
 rows, the email is not being read either and the next lever is the
 dashboard, not more mail.
+
+**7.26f — one link-reminder email per owner per 14-day episode (since
+2026-10-06).** The per-link stamp and the 3-a-day cap let an agent that kept
+asking for NEW files earn a fresh email per file. Before (production, 14 d to
+2026-10-06, external accounts): 34 reminder emails to 24 people; 5 people
+got more than one; one owner ("owner A") got 7 in 14 days and 5 in the 5
+days 10-01 → 10-06 — 3 inside 24 h with the cap holding exactly — while
+their agent minted request_access bursts for 26 distinct Docs/Sheets.
+Conversion by email ordinal per recipient: the 24 first emails produced 5
+email-sourced opens of the emailed link; the 10 second-or-later emails
+produced one, and that one was a pair sent 13 s apart counting the same open
+twice. Later emails added nothing, so the rule is a plain one-per-episode
+(the "one email listing every pending link" variant was not needed).
+Since then `claimApprovalNotification` also refuses while ANY other
+request of the owner carries a `notified_at` inside 14 days (reason
+`episode`, `notify_status: 'skipped_episode'` on the mint; same per-owner
+advisory lock as the refusal trigger; the refusal and dead-grant episodes
+are separate events and do not block it). The chat link and denial text are
+unchanged. Expected after: ≤ 1 `approval_link_notified` per person per 14 d,
+i.e. emails = distinct recipients: 24 per 14 d instead of 34 on the
+before window (~12/week, down from ~17).
+
+```sql
+-- 7.26f — people with more than one reminder email in 14 d. Expect zero
+-- rows for emails sent after the deploy; any row = the episode guard leaked
+-- (two users rows behind one person, or a release that bypassed the claim).
+SELECT cityHash64(toString(person_id)) % 100000 AS who, count() AS emails,
+       min(timestamp) AS first, max(timestamp) AS last,
+       dateDiff('hour', min(timestamp), max(timestamp)) AS span_h
+FROM events
+WHERE event = 'approval_link_notified' AND properties.environment = 'production'
+  AND timestamp > now() - INTERVAL 14 DAY
+  AND person.properties.email NOT IN (/* internal + QA accounts */)
+GROUP BY who HAVING emails > 1 ORDER BY emails DESC
+```
 
 **7.27 — Slides adoption and the SERVICE_DISABLED cliff.** Added 2026-09-17
 with the Slides per-file feature (`docs/implementation_plans/claude_practical-meninsky-d8c66c_v1.md`).
