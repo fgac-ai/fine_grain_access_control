@@ -6,16 +6,18 @@
 
 ## Distribution Packages
 
-We ship **4 distinct packages**, each designed for a different client and use case:
+We ship **8 distinct packages**, each designed for a different client and use case:
 
 | # | Package | Auth Mechanism | What Ships | Target Client |
 |---|---------|---------------|------------|---------------|
 | 1 | **Hosted MCP Server** | OAuth (Clerk DCR → Pending Approval) | Nothing — hosted at `/api/mcp` | Any MCP-compatible agent |
-| 2 | **OpenClaw Skill** | OAuth baked into local scripts | `SKILL.md` + local scripts (`auth.js`, `gmail.js`, etc.) | OpenClaw |
+| 2 | **OpenClaw Skill (legacy)** — superseded by #8; zero successful production calls since `proxy_request` tracking began 2026-08-06, retire once #8 is verified with a real client | OAuth baked into local scripts | `SKILL.md` + local scripts (`auth.js`, `gmail.js`, etc.) | OpenClaw |
 | 3 | **Claude Code MCP Plugin** | OAuth (via hosted MCP server) | `claude mcp add` command | Claude Code (MCP users) |
 | 4 | **Claude Code CLI Plugin** | OAuth baked into local scripts (shared w/ #2) | `SKILL.md` + local scripts | Claude Code (CLI users) |
 | 5 | **Partner Handoff** | Pre-registered OAuth app → FGAC consent interstitial (consent-time provisioning, no pending step) | Nothing — `/oauth/authorize` + `/api/auth/partner-token`; optional signed webhooks | Third-party web apps with server-side agents |
 | 6 | **Hosted MCP Plugin** (Grok Build, Grok Bot, Cursor, Claude Code) | OAuth (via hosted MCP server, same as #1) | `public/skills/fgac-mcp/` — manifests + `.mcp.json`/`mcp.json` pointing at `/api/mcp`, one skill, no code | Plugin marketplaces: `xai-org/plugin-marketplace`, Cursor Marketplace, Claude Code `/plugin` |
+| 7 | **Hermes Agent MCP catalog entry** | OAuth (hosted MCP; Hermes uses CIMD, DCR fallback) | `public/skills/hermes-catalog/fgac/manifest.yaml` — staging copy of `optional-mcps/fgac/manifest.yaml`; manual config on `/hermes` until merged | Hermes Agent (`hermes mcp install fgac`) |
+| 8 | **ClawHub skill `fgac-google-workspace`** | OAuth (hosted MCP via `openclaw mcp add … --auth oauth`) | `public/skills/clawhub/fgac-google-workspace/SKILL.md` — instructions only, no scripts or env | OpenClaw (`clawhub` / `openclaw skill install`); landing page `/openclaw` |
 
 ## Key Design Principles
 
@@ -24,7 +26,7 @@ The OpenClaw skill and Claude Code CLI plugin use the **same underlying scripts*
 
 ### Hosted MCP vs Local Scripts — when to use which
 - **Hosted MCP** (#1, #3): Best for native MCP clients. Agent gets structured tools. Least code to ship. But it's an opaque remote server — limits agent's ability to innovate.
-- **Local Scripts** (#2, #4): Best for code-first agents. Agent can read, modify, and extend scripts. Full Gmail API surface via REST proxy. Better ClawHub trust score (all code visible to scanners).
+- **Local Scripts** (#2, #4): Best for code-first agents. Agent can read, modify, and extend scripts. Full Gmail API surface via REST proxy. (The earlier claim that scripts earn a better ClawHub trust score is obsolete: ClawHub's audit scores whether declared metadata matches content, so an instructions-only skill with no scripts or env vars — #8 — is the cleaner profile.)
 
 ### Auth flow comparison
 

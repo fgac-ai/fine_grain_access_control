@@ -193,6 +193,17 @@ export default function SetupPage() {
             </div>
           </div>
 
+          <p className="text-center text-sm text-muted-foreground">
+            Running a self-hosted agent?{" "}
+            <Link href="/openclaw" className="text-primary underline underline-offset-2">
+              OpenClaw guide
+            </Link>{" "}
+            ·{" "}
+            <Link href="/hermes" className="text-primary underline underline-offset-2">
+              Hermes Agent guide
+            </Link>
+          </p>
+
           <p className="text-center text-xs text-subtle">
             FGAC uses <strong>MCP Streamable HTTP</strong> with OAuth 2.1 (DCR +
             PKCE). Your client handles authentication automatically.
