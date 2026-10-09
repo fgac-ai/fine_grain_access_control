@@ -24,11 +24,13 @@ process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = process.env.CLERK_PUBLISHABLE_KE
 delete process.env.NEXT_PUBLIC_POSTHOG_KEY;
 delete process.env.NEXT_PUBLIC_POSTHOG_HOST;
 
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { NextRequest } from 'next/server';
 import {
   clampTtlMinutes, expectedBytesBucket, generateTemporaryKey, hashTemporaryKey, isTemporaryKey,
   temporaryKeyRecipe, hashUploadId, TEMP_KEY_PREFIX, PROXY_MAX_REQUEST_BYTES, PING_OK,
-  deploymentHostCopy, deploymentOrigin,
+  deploymentHostCopy, deploymentOrigin, reachabilityFallback, sanitizeCheckOutput, TEMP_KEY_REACHABILITY,
 } from '../src/lib/temporaryApiKeys';
 import { TOOL_DEFS } from '../src/app/api/mcp/toolDefs';
 
@@ -152,7 +154,9 @@ async function main() {
       && r.includes('allowing preview.example.com')));
   const desc = TOOL_DEFS.create_temporary_api_key.description;
   check('tool description gives a no-key reachability check before minting', desc.includes('https://fgac.ai/api/proxy/ping')
-    && desc.includes(PING_OK) && desc.includes('do not create a key') && desc.includes('offset+limit'));
+    && desc.includes(PING_OK) && desc.includes('does not create a key') && desc.includes('offset+limit'));
+  check('tool description asks for the check result as reachability, naming all three values',
+    TEMP_KEY_REACHABILITY.every(r => desc.includes(r)) && desc.includes('pass what happened as reachability'));
   check('attachment pointer conditions on reaching fgac.ai, not on "network access"',
     !TOOL_DEFS.gmail_get_attachment.description.includes('network access') && TOOL_DEFS.gmail_get_attachment.description.includes('reach fgac.ai'));
   // Tool copy follows the serving deployment (train QA 2026-10-08, A12: an agent on a
@@ -162,11 +166,39 @@ async function main() {
   check('production copy is unchanged', deploymentHostCopy(desc, 'https://fgac.ai') === desc);
   check('preview copy pings the preview, never fgac.ai', previewDesc.includes(`${preview}/api/proxy/ping`)
     && !/fgac\.ai/.test(previewDesc.replace(/fgac-proxy-ok/g, '')));
-  check('preview copy names the preview host to allow', previewDesc.includes('allowing fine-grain-access-control-abc.vercel.app in'));
+  check('preview copy names the preview host to reach', previewDesc.includes('can reach fine-grain-access-control-abc.vercel.app:'));
   check('host rewrite leaves other copy alone', deploymentHostCopy('FGAC rules; fgac-proxy-ok; gmail.fgac.ai/x', preview) === 'FGAC rules; fgac-proxy-ok; gmail.fgac.ai/x');
   check('deploymentOrigin: production → fgac.ai', deploymentOrigin({ VERCEL_ENV: 'production', VERCEL_URL: 'x.vercel.app' }) === 'https://fgac.ai');
   check('deploymentOrigin: preview → its deployment URL', deploymentOrigin({ VERCEL_ENV: 'preview', VERCEL_URL: 'x.vercel.app' }) === 'https://x.vercel.app');
   check('deploymentOrigin: local → localhost:PORT', deploymentOrigin({ PORT: '52330' }) === 'http://localhost:52330' && deploymentOrigin({}) === 'http://localhost:3000');
+  // Reachability reports (2026-10-09): the agent says why a check failed, because a
+  // blocked sandbox and a refused command both look like silence from our side.
+  const net = reachabilityFallback('unreachable', preview, false);
+  const denied = reachabilityFallback('command_denied', preview, false);
+  check('unreachable: no key, sandbox network fix, preview host named', net.startsWith('No key was created.')
+    && net.includes("sandbox's network") && net.includes('fine-grain-access-control-abc.vercel.app') && net.includes('offset and limit'));
+  check('command_denied: no key, permission fix, says the network was never tried', denied.startsWith('No key was created.')
+    && denied.includes('permission rules') && denied.includes('network was never tried') && !denied.includes("sandbox's network"));
+  check('after a mint, the reply also says stop using the key and do not mint again',
+    reachabilityFallback('unreachable', preview, true).includes('do not create another one this session') && !net.includes('do not create another'));
+  check('check_output: first non-empty line only', sanitizeCheckOutput('\n  curl: (6) Could not resolve host  \nmore') === 'curl: (6) Could not resolve host');
+  check('check_output: key-shaped strings redacted', sanitizeCheckOutput('Bearer sk_proxy_tmp_abc123 failed sk_proxy_live_x')
+    === 'Bearer [redacted] failed sk_proxy_[redacted]');
+  check('check_output: capped at 160 chars, absent stays absent', sanitizeCheckOutput('x'.repeat(500))?.length === 160
+    && sanitizeCheckOutput(undefined) === undefined && sanitizeCheckOutput('  \n ') === undefined);
+  check('every recipe asks for a reachability report when the keyed check fails', allRecipes.every(r =>
+    r.includes('reachability "unreachable"') && r.includes('"command_denied"')));
+  {
+    const route = readFileSync(join(__dirname, '..', 'src', 'app', 'api', 'mcp', 'route.ts'), 'utf8');
+    const handler = route.slice(route.indexOf('TOOL_DEFS.create_temporary_api_key.name'), route.indexOf('// ── get_my_permissions'));
+    check('route: a failed report is captured and returns before any key is inserted',
+      handler.indexOf("'temp_api_key_check_failed'") > -1 && handler.indexOf("'temp_api_key_check_failed'") < handler.indexOf('db.insert(temporaryApiKeys)')
+      && /reachability && reachability !== 'ok'/.test(handler));
+    check('route: mints record the reported reachability (not_reported when absent)', /reachability: reachability \?\? 'not_reported'/.test(handler));
+    const pingSrc = readFileSync(join(__dirname, '..', 'src', 'app', 'api', 'proxy', 'ping', 'route.ts'), 'utf8');
+    check('ping: the keyless check is counted anonymously, without a person profile',
+      pingSrc.includes("'proxy_ping_checked'") && pingSrc.includes('$process_person_profile: false'));
+  }
   const send = allRecipes[2];
   const [iRaw, iMedia, iResumable] = ['{"raw":', 'uploadType=media', 'uploadType=resumable'].map(s => send.indexOf(s));
   check('send_attachment recipe is ordered by size: JSON raw, then media, then resumable',

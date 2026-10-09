@@ -110,6 +110,44 @@ export function hashUploadId(uploadId: string): string {
 }
 
 /**
+ * What the agent saw when it ran the reachability check, reported back on
+ * create_temporary_api_key. The server cannot see a check that never arrives,
+ * so this is the only way to tell a sandbox that blocks fgac.ai (`unreachable`)
+ * from an agent whose own permission rules refused to run the command
+ * (`command_denied`) — the first is fixed in the sandbox's network settings,
+ * the second by approving or allowing the command.
+ */
+export const TEMP_KEY_REACHABILITY = ['ok', 'unreachable', 'command_denied'] as const;
+export type TempKeyReachability = (typeof TEMP_KEY_REACHABILITY)[number];
+
+/** First line of what the check printed, short, with anything key-shaped removed (it goes to analytics). */
+export function sanitizeCheckOutput(output: string | undefined): string | undefined {
+  const line = output?.split('\n').map(l => l.trim()).find(Boolean);
+  if (!line) return undefined;
+  return line
+    .replace(/sk_proxy_\S+/g, 'sk_proxy_[redacted]')
+    .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
+    .slice(0, 160);
+}
+
+/** Reply to a failed check: no key, the fallback, and the user-side fix for this cause. */
+export function reachabilityFallback(reachability: Exclude<TempKeyReachability, 'ok'>, baseUrl: string, afterMint: boolean): string {
+  const host = new URL(baseUrl).host;
+  const cause = reachability === 'unreachable'
+    ? `Your code cannot reach ${host}: the sandbox's network blocks it. Tell the user that allowing ${host} ` +
+      'in their sandbox\'s network (egress) settings enables large transfers.'
+    : 'Your environment\'s permission rules refused to run the command; the network was never tried. Tell the ' +
+      `user that approving the command, or allowing network commands to ${host} in their agent's permission ` +
+      'settings, enables large transfers.';
+  return [
+    `No key was created.${afterMint ? ' Stop using the key you already have and do not create another one this session.' : ''}`,
+    cause,
+    'Until then, keep going with the tools: gmail_get_attachment / gmail_read with offset and limit for large ' +
+      'reads, google_api_get, and google_api_modify for bodies under ~1 MB.',
+  ].join('\n');
+}
+
+/**
  * The guidance returned with a minted key: what it is, how to use it for the
  * stated purpose, and how to recover. Plain text; the agent reads it once.
  */
@@ -150,6 +188,9 @@ export function temporaryKeyRecipe(opts: {
       'session. Keep going with the tools instead: gmail_get_attachment / gmail_read with offset and limit for ' +
       'large reads, google_api_get, and google_api_modify for bodies under ~1 MB. Tell the user that allowing ' +
       `${new URL(opts.baseUrl).host} in their sandbox's network settings enables large transfers.`,
+    '  - If this check failed, or your environment refused to run it, call create_temporary_api_key once more with ' +
+      'reachability "unreachable" (error or other reply) or "command_denied" (refused to run). It creates no key ' +
+      'and tells you exactly what to tell the user.',
     `  - ${PING_OK} key-invalid: the script is not sending the key you were given. Re-write api_key into KEY_FILE exactly.`,
   ];
   const auth = '-H "Authorization: Bearer $(cat "$KEY_FILE")"';

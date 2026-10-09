@@ -26,7 +26,8 @@ import {
 import { eq, and, isNull, gt, sql } from 'drizzle-orm';
 import {
   TEMP_KEY_PURPOSES, TEMP_KEY_MAX_LIVE_PER_CONNECTION, TEMP_KEY_MAX_TTL_MINUTES, type TempKeyPurpose,
-  clampTtlMinutes, deploymentHostCopy, deploymentOrigin, expectedBytesBucket, generateTemporaryKey, requestOrigin, temporaryKeyRecipe,
+  clampTtlMinutes, deploymentHostCopy, deploymentOrigin, expectedBytesBucket, generateTemporaryKey, reachabilityFallback, requestOrigin,
+  sanitizeCheckOutput, TEMP_KEY_REACHABILITY, temporaryKeyRecipe,
 } from '@/lib/temporaryApiKeys';
 import { filterLiveDelegatedAccess } from '@/db/delegationQueries';
 import { findActiveDelegationOwner } from '@/db/delegationOwner';
@@ -4005,10 +4006,12 @@ function registerFgacTools(server: FgacMcpServer) {
         purpose: z.enum(TEMP_KEY_PURPOSES).optional().describe('What the script will do: upload (file to Drive), download (Drive file or Gmail attachment), send_attachment (email with a large attachment), bulk_calls, or other. Selects the recipe returned with the key. Default other.'),
         ttl_minutes: z.number().optional().describe(`Key lifetime in minutes, 1–${TEMP_KEY_MAX_TTL_MINUTES} (default 15). Ask for more only when a transfer will take longer; an expired upload can be resumed with a new key.`),
         expected_bytes: z.number().optional().describe('Approximate size of the file or payload, if known (used for usage statistics only).'),
+        reachability: z.enum(TEMP_KEY_REACHABILITY).optional().describe('Result of the no-key check (curl -sS <host>/api/proxy/ping): ok = it printed fgac-proxy-ok (mints the key); unreachable = a connection error or any other reply; command_denied = your environment refused to run the command. unreachable and command_denied create no key.'),
+        check_output: z.string().optional().describe('The first line the check printed, or the refusal message, if it failed. Never include a key.'),
       }),
-      async ({ purpose, ttl_minutes, expected_bytes }, { authInfo }) => {
+      async ({ purpose, ttl_minutes, expected_bytes, reachability, check_output }, { authInfo }) => {
         const chosen: TempKeyPurpose = purpose ?? 'other';
-        addToolCallProps({ temp_key_purpose: chosen });
+        addToolCallProps({ temp_key_purpose: chosen, temp_key_reachability: reachability ?? 'not_reported' });
         const conn = await requireApproval(authInfo);
         if ('content' in conn) {
           const userId = authInfo?.extra?.userId as string | undefined;
@@ -4019,20 +4022,35 @@ function registerFgacTools(server: FgacMcpServer) {
           captureServerEvent(conn.user.clerkUserId, 'temp_api_key_refused', { reason: 'no_profile', purpose: chosen, client_id: conn.clientId });
           return textResult('❌ This connection is not bound to an agent profile yet, so there are no permissions to put on a key. Ask the user to finish approving the connection in the FGAC dashboard.');
         }
-        if (ttl_minutes !== undefined && ttl_minutes < 1) {
-          return textResult(`❌ ttl_minutes must be between 1 and ${TEMP_KEY_MAX_TTL_MINUTES}. Omit it for the 15-minute default. No key was created.`);
-        }
-        const ttl = clampTtlMinutes(ttl_minutes);
+        const baseUrl = (authInfo?.extra?.requestOrigin as string | undefined) ?? DASHBOARD_URL;
         const now = new Date();
-
-        const [{ live }] = await db
+        const liveKeys = () => db
           .select({ live: sql<number>`count(*)::int` })
           .from(temporaryApiKeys)
           .where(and(
             eq(temporaryApiKeys.connectionId, conn.connectionId),
             isNull(temporaryApiKeys.revokedAt),
             gt(temporaryApiKeys.expiresAt, now),
-          ));
+          ))
+          .then(r => r[0].live);
+
+        // A failed reachability check, reported by the agent: no key. This is the only
+        // signal that separates a sandbox blocking fgac.ai from the agent's own permission
+        // rules refusing the command — neither request ever reaches us.
+        if (reachability && reachability !== 'ok') {
+          const afterMint = (await liveKeys()) > 0;
+          captureServerEvent(conn.user.clerkUserId, 'temp_api_key_check_failed', {
+            reachability, after_mint: afterMint, check_output: sanitizeCheckOutput(check_output), purpose: chosen,
+            client_id: conn.clientId, client_name: conn.clientName ?? undefined, connection_id: conn.connectionId,
+          });
+          return textResult(reachabilityFallback(reachability, baseUrl, afterMint));
+        }
+
+        if (ttl_minutes !== undefined && ttl_minutes < 1) {
+          return textResult(`❌ ttl_minutes must be between 1 and ${TEMP_KEY_MAX_TTL_MINUTES}. Omit it for the 15-minute default. No key was created.`);
+        }
+        const ttl = clampTtlMinutes(ttl_minutes);
+        const live = await liveKeys();
         if (live >= TEMP_KEY_MAX_LIVE_PER_CONNECTION) {
           captureServerEvent(conn.user.clerkUserId, 'temp_api_key_refused', {
             reason: 'rate_capped', purpose: chosen, client_id: conn.clientId, live_temp_keys: live,
@@ -4064,11 +4082,11 @@ function registerFgacTools(server: FgacMcpServer) {
           parent_proxy_key_id: conn.proxyKeyId,
           temp_key_id: row.id,
           live_temp_keys: live + 1,
+          reachability: reachability ?? 'not_reported',
         };
         captureServerEvent(conn.user.clerkUserId, 'temp_api_key_created', props);
         addToolCallProps({ temp_key_id: row.id, ttl_granted: ttl.granted });
 
-        const baseUrl = (authInfo?.extra?.requestOrigin as string | undefined) ?? DASHBOARD_URL;
         return textResult(temporaryKeyRecipe({
           key: generated.key, baseUrl, purpose: chosen, ttlGranted: ttl.granted,
           ttlRequested: ttl_minutes, capped: ttl.capped, expiresAt,
