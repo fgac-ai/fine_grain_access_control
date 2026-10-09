@@ -94,7 +94,8 @@ export function runNeonctl(
     attempt++;
     try {
       return { stdout: exec(neonctl(args)), attempts: attempt };
-    } catch (err: any) {
+    } catch (caught) {
+      const err = caught as { stderr?: { toString(): string }; message?: string } | undefined;
       const stderr = err?.stderr?.toString?.() ?? '';
       const error = (stderr || err?.message || 'unknown neonctl error').trim();
       const kind = classifyNeonctlError(error);
@@ -106,7 +107,7 @@ export function runNeonctl(
 }
 
 /** runNeonctl + `-o json` + JSON.parse. A non-JSON stdout counts as transient. */
-export function runNeonctlJson<T = any>(args: string, opts?: Parameters<typeof runNeonctl>[1]): { result?: T; error?: string; kind?: NeonctlFailure } {
+export function runNeonctlJson<T = ReturnType<typeof JSON.parse>>(args: string, opts?: Parameters<typeof runNeonctl>[1]): { result?: T; error?: string; kind?: NeonctlFailure } {
   const r = runNeonctl(`${args} -o json`, opts);
   if (r.error !== undefined) return { error: r.error, kind: r.kind };
   try {
