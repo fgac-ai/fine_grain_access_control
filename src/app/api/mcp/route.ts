@@ -39,7 +39,7 @@ import { runWithToolCallProps, addToolCallProps, getToolCallProps, runWithReques
 import { normalizeToolArguments, unknownArgumentKeys, describeArgumentFailure, rewriteValidationFailureBody, type AliasHit, type ZodIssueLike } from '@/lib/mcpArgumentGuidance';
 import { cleanResourceName } from '@/lib/pickerRecoveryCopy';
 import { GOOGLE_FETCH_TIMEOUT_MS, CLERK_TOKEN_TIMEOUT_MS, withTimeout, isUpstreamTimeout } from '@/lib/upstreamTimeouts';
-import { classifyMcpClient, classifyTransportRejection, installFingerprint, parseInitializeClientInfo, parseRpcEnvelope, parseValidationFailure, normalizeValidationIssue, resourceIdHash, validationFailureProps, type McpClientInfo } from '@/lib/mcpClientSignals';
+import { classifyMcpClient, productClientName, classifyTransportRejection, installFingerprint, parseInitializeClientInfo, parseRpcEnvelope, parseValidationFailure, normalizeValidationIssue, resourceIdHash, validationFailureProps, type McpClientInfo } from '@/lib/mcpClientSignals';
 import { classifyClientNameTransition, nextConnectionClientName, toolCallClientName } from '@/lib/mcpClientName';
 import { recordEagerResolve, shouldSkipEagerResolve } from '@/lib/connectionTouchMemo';
 import { after } from 'next/server';
@@ -4422,12 +4422,22 @@ const verifyMcpAuth = async (req: Request, bearerToken?: string) => {
   // client's name/version exist server-side — and this auth wrapper is the
   // only code that still holds the raw Request. Parsed from a clone;
   // undefined for every other request.
-  const clientInfo = await parseInitializeClientInfo(req);
+  const reportedClientInfo = await parseInitializeClientInfo(req);
+  const verifiedClientId = (authInfo as { clientId?: string } | undefined)?.clientId;
+  // A client that reports only its SDK's default name (`mcp` — Hermes Agent)
+  // is named from its verified OAuth client_id when that is a known product's
+  // metadata-document URL, so its connection row and tool calls carry the
+  // product. The raw report rides along as client_name_reported.
+  const productName = productClientName(reportedClientInfo?.name, verifiedClientId);
+  const clientInfo: McpClientInfo | undefined = reportedClientInfo && productName && productName !== reportedClientInfo.name
+    ? { ...reportedClientInfo, name: productName }
+    : reportedClientInfo;
+  const clientNameReported = clientInfo !== reportedClientInfo ? reportedClientInfo?.name : undefined;
   const userAgent = req.headers.get('user-agent') ?? undefined;
   // Registry crawler / health probe / our own probe / Claude product / other —
   // a measurement label (nothing is authorized or rate-limited on it) that
   // lets the auth alert and the install funnel leave scanner traffic out.
-  const clientClass = classifyMcpClient({ userAgent, clientName: clientInfo?.name });
+  const clientClass = classifyMcpClient({ userAgent, clientName: clientInfo?.name, clientId: verifiedClientId ?? clientIdHint });
   // Set by middleware when the client connected via /api/mcp/<slug>.
   const profileSlug = req.headers.get('x-fgac-profile-slug') ?? undefined;
 
@@ -4521,6 +4531,7 @@ const verifyMcpAuth = async (req: Request, bearerToken?: string) => {
     if (clientInfo && userId) {
       captureServerEvent(userId, 'mcp_client_initialize', {
         client_name: clientInfo.name,
+        client_name_reported: clientNameReported,
         client_version: clientInfo.version,
         client_id: clientId,
         user_agent: userAgent,
