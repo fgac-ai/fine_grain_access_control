@@ -8,7 +8,9 @@
 #
 # Policy (docs/implementation_plans/claude_vercel-build-cost_v1.md; ADR-002):
 #   - production, and anything on main      → always build
-#   - head commit message contains [preview] → build (deliberate opt-in)
+#   - head commit SUBJECT ends with [preview] → build (deliberate opt-in; a message
+#                                              that merely mentions the token does not
+#                                              count — this PR's own first push did)
 #   - integration/* trains                  → build, unless the change since the
 #                                              last successful build is docs-only
 #   - a branch that already has a successful deployment (opted in earlier)
@@ -34,14 +36,17 @@ HEAD_SHA="${VERCEL_GIT_COMMIT_SHA:-HEAD}"
 [ -z "$REF" ] && build "no git ref (CLI or API deployment)"
 [ "$REF" = "main" ] && build "main"
 
-case "$MSG" in *"[preview]"*) build "[preview] in the head commit message" ;; esac
+SUBJECT=$(printf '%s\n' "$MSG" | head -n 1)
+if printf '%s\n' "$SUBJECT" | grep -qE '\[preview\][[:space:]]*$'; then
+  build "head commit subject ends with [preview]"
+fi
 
 case "$REF" in
   integration/*) ;;
   *)
     # VERCEL_GIT_PREVIOUS_SHA is the last *successful* deployment of this branch,
     # so it is only set once the branch has been opted in at least once.
-    [ -z "$PREV" ] && skip "feature branch '$REF' — push a commit with [preview] in its message to get a preview"
+    [ -z "$PREV" ] && skip "feature branch '$REF' — push a commit whose subject ends with [preview] to get a preview"
     ;;
 esac
 

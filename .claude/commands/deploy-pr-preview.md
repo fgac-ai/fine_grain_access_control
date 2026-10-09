@@ -33,7 +33,7 @@ Current branch: !`git branch --show-current`
    The opt-in sticks: once a branch has one successful deployment, later code pushes
    build without the token. On every branch, a push whose changes since the last
    built commit are docs-only (`docs/**`, `.claude/**`, root `*.md`) is skipped and
-   the previous preview URL stays current; put `[preview]` in the message to force a
+   the previous preview URL stays current; end the commit subject with `[preview]` to force a
    rebuild anyway.
 
    ```bash

@@ -151,7 +151,7 @@ to carry.
 `docs/implementation_plans/claude_vercel-build-cost_v1.md`) after the sketch above
 sat unimplemented for two weeks while every feature push kept building — 72 of the
 95 builds in the first eight days of the October billing cycle were `claude/*`
-branches, and the team projected past its $20 Pro credit. Two refinements over the
+branches, and the team projected past its $20 Pro credit. Refinements over the
 sketch:
 
 - **Docs-only pushes skip**, on trains and opted-in branches alike: the diff from
@@ -162,6 +162,10 @@ sketch:
 - **The `[preview]` opt-in is sticky**: a branch with a previous successful
   deployment keeps building code changes without repeating the token, so a
   `/deploy-pr-preview` fix-and-retest loop works unchanged.
+- **The token only counts at the end of the subject line**
+  (`chore: request a preview build [preview]`). The sketch's substring match fired
+  on this change's own first push, whose subject merely *described* "[preview]-opted
+  branches".
 - Uncertainty (missing env, an unfetchable SHA) **builds** — failing open costs
   cents, failing closed hides a preview someone is waiting on.
 

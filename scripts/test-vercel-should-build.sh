@@ -30,6 +30,11 @@ expect 'no ref (CLI deploy) builds'          BUILD VERCEL_ENV=preview
 expect 'claude/* first push skips'           SKIP  VERCEL_ENV=preview VERCEL_GIT_COMMIT_REF=claude/x VERCEL_GIT_COMMIT_SHA=$CODE "VERCEL_GIT_COMMIT_MESSAGE=feat: thing"
 expect 'other feature branch skips'          SKIP  VERCEL_ENV=preview VERCEL_GIT_COMMIT_REF=fix/y VERCEL_GIT_COMMIT_SHA=$CODE
 expect '[preview] token opts a branch in'    BUILD VERCEL_ENV=preview VERCEL_GIT_COMMIT_REF=claude/x VERCEL_GIT_COMMIT_SHA=$CODE "VERCEL_GIT_COMMIT_MESSAGE=chore: request preview [preview]"
+expect '[preview] mid-subject does not count' SKIP VERCEL_ENV=preview VERCEL_GIT_COMMIT_REF=claude/x VERCEL_GIT_COMMIT_SHA=$CODE "VERCEL_GIT_COMMIT_MESSAGE=build: only [preview]-opted branches build"
+expect '[preview] in the body does not count' SKIP VERCEL_ENV=preview VERCEL_GIT_COMMIT_REF=claude/x VERCEL_GIT_COMMIT_SHA=$CODE "VERCEL_GIT_COMMIT_MESSAGE=feat: x
+add a [preview]"
+expect '[preview] with trailing space counts' BUILD VERCEL_ENV=preview VERCEL_GIT_COMMIT_REF=claude/x VERCEL_GIT_COMMIT_SHA=$CODE "VERCEL_GIT_COMMIT_MESSAGE=chore: request preview [preview]  
+body"
 expect '[preview] wins over docs-only'       BUILD VERCEL_ENV=preview VERCEL_GIT_COMMIT_REF=integration/z VERCEL_GIT_PREVIOUS_SHA=$BASE VERCEL_GIT_COMMIT_SHA=$DOCS "VERCEL_GIT_COMMIT_MESSAGE=docs [preview]"
 expect 'integration first push builds'       BUILD VERCEL_ENV=preview VERCEL_GIT_COMMIT_REF=integration/2026-10-08 VERCEL_GIT_COMMIT_SHA=$DOCS
 expect 'integration docs-only skips'         SKIP  VERCEL_ENV=preview VERCEL_GIT_COMMIT_REF=integration/2026-10-08 VERCEL_GIT_PREVIOUS_SHA=$BASE VERCEL_GIT_COMMIT_SHA=$DOCS

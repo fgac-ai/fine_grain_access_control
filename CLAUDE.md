@@ -14,7 +14,7 @@
 6. **Validation**: Validate changes locally, then in the preview branch via `/deploy-pr-preview`, running the applicable `docs/QA_Acceptance_Test` suites before handing back to the user.
    **Pushes do not all build (Ignored Build Step, `scripts/vercel-should-build.sh`).**
    Vercel builds `main` and `integration/*`; a feature branch (`claude/*` etc.) builds
-   only after a commit whose message contains `[preview]` (sticky once it has built).
+   only after a commit whose **subject ends with** `[preview]` (sticky once it has built; merely mentioning the token mid-message does not count).
    Docs-only pushes (`docs/**`, `.claude/**`, root `*.md`) never rebuild, so plan-doc
    revisions on a train cost nothing and the train's preview URL stays current.
    `/deploy-pr-preview` handles the opt-in. Production builds are unaffected.
