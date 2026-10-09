@@ -101,11 +101,15 @@ to reuse its current key (`live_temp_keys` = 10). Revoking one frees a slot.
 
 `tools/list` includes `create_temporary_api_key` with the description's four elements: when to
 use it (over ~1 MB / scripted loops), the reachability pre-check (`curl -sS
-https://fgac.ai/api/proxy/ping` prints `fgac-proxy-ok`; anything else → do not mint) with the
+<serving host>/api/proxy/ping` prints `fgac-proxy-ok`; anything else → do not mint) with the
 windowed-tool fallback named, the 15/60-minute lifetime with resume-after-expiry, and the key-handling rule ("keep the key out of
 anything that leaves this session" — private temp file or env var allowed). The
 `initialize` instructions contain the large-file sentence. `gmail_get_attachment`,
 `gmail_send`, and `google_api_modify` descriptions each point to the tool.
+Every host the copy names is the deployment serving it: `fgac.ai` in production, the
+preview's own host on a preview, `localhost:<port>` locally — never production from a
+non-production build (train QA 2026-10-08: a preview pointing at production made a
+correct agent decline to mint).
 
 ### A12: An agent finds and uses it unprompted (code-execution runtimes)
 
