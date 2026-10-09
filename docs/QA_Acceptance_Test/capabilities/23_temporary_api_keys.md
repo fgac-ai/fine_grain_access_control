@@ -146,3 +146,18 @@ expired key → 401 `fgac-proxy-ok key-expired`; with a made-up `sk_proxy_tmp_` 
 makes a Google request, and a pinged key with no other traffic still counts as never used in
 §7.34 (2). The minted recipe text (A1) contains the authenticated ping as its FIRST command,
 before any Google path, plus the "do not create another one this session" fallback.
+
+### A15: A failed check is reported with its cause, and mints nothing
+
+`create_temporary_api_key` with `reachability: "unreachable"` returns "No key was created",
+names the serving host and the sandbox network setting, and lists the windowed fallback.
+With `"command_denied"` it says the agent's permission rules refused the command and the
+network was never tried, and points the user at approving or allowing the command (no
+network-settings advice). Neither call inserts a key: a following `get_my_permissions` or
+dashboard list shows no new temporary key. Each emits one `temp_api_key_check_failed`
+(`reachability` as sent; `after_mint` false with no live key, true after a mint;
+`check_output` first line with any `sk_proxy_…` redacted). `reachability: "ok"` and an
+omitted value both mint as before, with `temp_api_key_created.reachability` = `ok` /
+`not_reported`. A keyless `GET /api/proxy/ping` emits one anonymous `proxy_ping_checked`
+and creates no person. A real agent (A12 setup) that reaches the host passes `ok`
+unprompted.

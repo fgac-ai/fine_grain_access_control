@@ -3677,3 +3677,47 @@ as everywhere else.
    person), so a mint drop on the no-working-key accounts is the only
    evidence that agents ran it. Read it together with (5): windowed reads on
    those accounts should continue at the same level.
+
+8. **Why the check failed: network vs the agent's own rules** (added
+   2026-10-09). A sandbox that blocks fgac.ai and an agent whose permission
+   rules refuse to run the command look identical from our side: nothing
+   arrives. So the agent reports what happened on `create_temporary_api_key`
+   (`reachability`): `ok` mints; `unreachable` and `command_denied` mint
+   nothing and emit `temp_api_key_check_failed`. The fix differs by cause.
+   `unreachable` needs the user to allow the host in the sandbox's network
+   settings. `command_denied` needs the user to approve or allow the command
+   in the agent's permission settings. `after_mint = true` means the
+   recipe's keyed ping failed after a key was minted, which is the
+   recipe-step version of the same split. `proxy_ping_checked` (anonymous)
+   counts keyless pings that did arrive, to corroborate `ok` reports in
+   aggregate.
+
+   ```sql
+   SELECT properties.client_name AS client,
+          countIf(event = 'temp_api_key_created' AND properties.reachability = 'ok') AS minted_after_ok,
+          countIf(event = 'temp_api_key_created' AND properties.reachability = 'not_reported') AS minted_unreported,
+          countIf(event = 'temp_api_key_check_failed' AND properties.reachability = 'unreachable') AS network_blocked,
+          countIf(event = 'temp_api_key_check_failed' AND properties.reachability = 'command_denied') AS agent_rules_blocked,
+          countIf(event = 'temp_api_key_check_failed' AND properties.after_mint) AS failed_after_mint,
+          uniqIf(person_id, event = 'temp_api_key_check_failed') AS people_reporting_failure
+   FROM events
+   WHERE event IN ('temp_api_key_created', 'temp_api_key_check_failed')
+     AND properties.environment = 'production' AND timestamp > now() - INTERVAL 7 DAY
+   GROUP BY client ORDER BY minted_after_ok + network_blocked + agent_rules_blocked DESC
+   ```
+
+   Corroboration: `SELECT count() FROM events WHERE event = 'proxy_ping_checked'
+   AND properties.environment = 'production' AND timestamp > now() - INTERVAL 7 DAY`
+   should be at least `minted_after_ok`. The keyless ping is anonymous, so the
+   two are compared only as totals. Sample `properties.check_output` (first
+   line, keys redacted) to confirm agents classify correctly. A proxy's
+   `403 Forbidden` is `unreachable`; a harness message such as "permission
+   denied" or "blocked by" is `command_denied`.
+
+   **Before**: none. No failed check was observable until this ships, and
+   `not_reported` is every mint before it. **Reading it**: if
+   `agent_rules_blocked` is a large share, a sandbox allowlist message is the
+   wrong fix. Users need to know how to approve the command. That points
+   at the client's permission defaults, not at our egress. A
+   `minted_unreported` share that stays high means agents are skipping the
+   check; tighten the description.

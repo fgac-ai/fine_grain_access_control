@@ -24,6 +24,9 @@ import { isTemporaryKey, hashTemporaryKey, PING_OK } from '@/lib/temporaryApiKey
  */
 export const dynamic = 'force-dynamic';
 
+/** One shared distinct id; `$process_person_profile: false` keeps it from becoming a person. */
+const ANONYMOUS_PING_ID = 'fgac-anonymous-proxy-ping';
+
 function text(body: string, status = 200) {
   return new NextResponse(`${body}\n`, {
     status,
@@ -33,7 +36,17 @@ function text(body: string, status = 200) {
 
 async function ping(request: NextRequest) {
   const auth = request.headers.get('authorization');
-  if (!auth?.startsWith('Bearer ')) return text(PING_OK);
+  if (!auth?.startsWith('Bearer ')) {
+    // The pre-mint check. Anonymous (the agent's sandbox carries no identity), so it
+    // only corroborates in aggregate: reachability "ok" reports on
+    // create_temporary_api_key should be matched by roughly as many of these.
+    captureServerEvent(ANONYMOUS_PING_ID, 'proxy_ping_checked', {
+      authenticated: false, method: request.method,
+      user_agent: request.headers.get('user-agent')?.slice(0, 120) ?? undefined,
+      $process_person_profile: false,
+    });
+    return text(PING_OK);
+  }
   const keyValue = auth.slice('Bearer '.length).trim();
   if (!isTemporaryKey(keyValue)) return text(`${PING_OK} key-not-temporary`, 401);
 
