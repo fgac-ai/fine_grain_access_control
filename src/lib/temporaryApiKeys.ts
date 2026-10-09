@@ -31,6 +31,13 @@ export type TempKeyPurpose = typeof TEMP_KEY_PURPOSES[number];
 export const PROXY_MAX_REQUEST_BYTES = 4 * 1024 * 1024 + 256 * 1024;
 export const RECOMMENDED_CHUNK_BYTES = 4 * 1024 * 1024;
 
+/**
+ * Body of GET /api/proxy/ping when FGAC itself answered. A sandbox's egress
+ * proxy refusing the host answers with its own text (or the connection
+ * fails), so this exact string is the reachability test agents are given.
+ */
+export const PING_OK = 'fgac-proxy-ok';
+
 export function isTemporaryKey(value: string): boolean {
   return value.startsWith(TEMP_KEY_PREFIX);
 }
@@ -111,6 +118,15 @@ export function temporaryKeyRecipe(opts: {
       '(a linked or delegated one) use users/<address> — list_accounts names them.',
     'Limits: each request body must be 4 MB or less (larger requests are refused with 413). ' +
       'Each request must finish within ~55 s; for very large downloads use HTTP Range requests.',
+    '',
+    'FIRST, check that your code reaches FGAC and reads the key correctly (no Google call is made):',
+    `  curl -sS ${'-H "Authorization: Bearer $(cat "$KEY_FILE")"'} "${api}/ping"    # expect: ${PING_OK} key-valid`,
+    `  - A connection error, or any reply that does not start with ${PING_OK}, means this sandbox cannot reach ` +
+      `${opts.baseUrl} (many allow only listed hosts). Stop using the key and do not create another one this ` +
+      'session. Keep going with the tools instead: gmail_get_attachment / gmail_read with offset and limit for ' +
+      'large reads, google_api_get, and google_api_modify for bodies under ~1 MB. Tell the user that allowing ' +
+      `${new URL(opts.baseUrl).host} in their sandbox's network settings enables large transfers.`,
+    `  - ${PING_OK} key-invalid: the script is not sending the key you were given. Re-write api_key into KEY_FILE exactly.`,
   ];
   const auth = '-H "Authorization: Bearer $(cat "$KEY_FILE")"';
   const recipes: Record<TempKeyPurpose, string[]> = {

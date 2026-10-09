@@ -3622,3 +3622,56 @@ as everywhere else.
    ```
    Pair it with `SELECT count() FROM events WHERE event = 'temp_api_key_refused'
    AND properties.reason = 'rate_capped' AND timestamp > now() - INTERVAL 7 DAY`.
+
+7. **Egress wall: pre-check and ping** (added 2026-10-08,
+   `docs/implementation_plans/claude/temp-key-never-used_v1.md`). The tool
+   description now tells agents to check `https://fgac.ai/api/proxy/ping`
+   before minting, and every recipe opens with an authenticated ping that
+   emits `temp_api_key_pinged`. This splits never-used keys into "the sandbox
+   reached FGAC and the key worked, but the agent did nothing" (pinged) and
+   "never reached FGAC" (not pinged). Exclude keys minted in the last 60
+   minutes so they have had time to be used, and exclude the internal
+   accounts as everywhere else.
+
+   ```sql
+   WITH m AS (SELECT properties.temp_key_id AS k, any(person_id) AS p,
+                     any(properties.client_name) AS client, min(timestamp) AS t
+              FROM events WHERE event = 'temp_api_key_created' AND properties.environment = 'production'
+                AND timestamp > now() - INTERVAL 7 DAY AND timestamp < now() - INTERVAL 60 MINUTE GROUP BY k),
+        u AS (SELECT properties.temp_key_id AS k, count() AS calls FROM events
+              WHERE event = 'proxy_request' AND properties.key_kind = 'temporary'
+                AND timestamp > now() - INTERVAL 8 DAY GROUP BY k),
+        pg AS (SELECT properties.temp_key_id AS k, count() AS pings FROM events
+               WHERE event = 'temp_api_key_pinged' AND timestamp > now() - INTERVAL 8 DAY GROUP BY k),
+        acct AS (SELECT m.p AS p, countIf(u.calls > 0) AS used_keys FROM m LEFT JOIN u ON u.k = m.k GROUP BY m.p)
+   SELECT m.client AS client, count() AS mints,
+          countIf(u.calls = 0) AS never_used, round(countIf(u.calls = 0) / count(), 2) AS never_used_share,
+          countIf(u.calls = 0 AND pg.pings > 0) AS never_used_but_pinged,
+          countIf(acct.used_keys = 0) AS mints_on_accounts_with_no_working_key,
+          uniqIf(m.p, acct.used_keys = 0) AS accounts_with_no_working_key
+   FROM m LEFT JOIN u ON u.k = m.k LEFT JOIN pg ON pg.k = m.k LEFT JOIN acct ON acct.p = m.p
+   GROUP BY client ORDER BY mints DESC
+   ```
+
+   **Before** (7 days to 2026-10-08 ~20:00Z, internal accounts excluded):
+   `claude-code` 109 mints, 56 never used (51%); `Anthropic/ClaudeAI` 30
+   mints, 10 never used (33%). Every never-used key came from the
+   `Claude-User` user agent (the claude.ai-managed connector). The two mints
+   from a direct CLI registration (`claude-code/*`) were both used. 54 of the
+   66 never-used keys sat on 18 accounts (14 `claude-code`, 4
+   `Anthropic/ClaudeAI`) where **no** key ever worked; the
+   top three accounts alone minted 33 (19, 8, 6), one per task, over two
+   days. 13 of 25 never-used `download` keys were followed within 30 minutes
+   by windowed `gmail_get_attachment` calls, against 0 of 12 used ones. Only
+   ~10 proxy 401s in the week (`missing` ×9, `invalid` ×1), so a broken key
+   hand-off is not the cause.
+
+   **Success looks like**: `mints_on_accounts_with_no_working_key` falls
+   (the pre-check stops the mint), without `mints` on accounts that do use
+   keys falling with it. Target: `claude-code` never-used share under 20%
+   within a week of deploy. `never_used_but_pinged` should stay near zero. If
+   it grows, agents reach FGAC and then abandon the key, which is a recipe
+   problem, not egress. The pre-check itself is not captured (no key, no
+   person), so a mint drop on the no-working-key accounts is the only
+   evidence that agents ran it. Read it together with (5): windowed reads on
+   those accounts should continue at the same level.

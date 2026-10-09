@@ -1900,8 +1900,9 @@ const LARGE_FILE_HINT_CHARS = 1_500_000;
 function largeFileHint(totalChars: number, windowChars: number): string {
   addToolCallProps({ large_file_hint_shown: true });
   const calls = Math.ceil(totalChars / windowChars);
-  return `This payload needs about ${calls} windowed calls. If you can run code with network access, ` +
-    `create_temporary_api_key (purpose "download") fetches it in one request instead.`;
+  return `This payload needs about ${calls} windowed calls. If code you run can reach fgac.ai ` +
+    `(check: curl -sS https://fgac.ai/api/proxy/ping prints fgac-proxy-ok), create_temporary_api_key ` +
+    `(purpose "download") fetches it in one request instead; otherwise keep windowing.`;
 }
 
 function windowPayload(payload: string, offset: number, limit: number | undefined) {

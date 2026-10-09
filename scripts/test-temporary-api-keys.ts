@@ -27,8 +27,9 @@ delete process.env.NEXT_PUBLIC_POSTHOG_HOST;
 import { NextRequest } from 'next/server';
 import {
   clampTtlMinutes, expectedBytesBucket, generateTemporaryKey, hashTemporaryKey, isTemporaryKey,
-  temporaryKeyRecipe, hashUploadId, TEMP_KEY_PREFIX, PROXY_MAX_REQUEST_BYTES,
+  temporaryKeyRecipe, hashUploadId, TEMP_KEY_PREFIX, PROXY_MAX_REQUEST_BYTES, PING_OK,
 } from '../src/lib/temporaryApiKeys';
+import { TOOL_DEFS } from '../src/app/api/mcp/toolDefs';
 
 const OWNER_EMAIL = 'owner@example.com';
 const ALLOWED = 'allowed@example.com';
@@ -139,6 +140,20 @@ async function main() {
   check('recipe allows the temp file and forbids only what leaves the session',
     allRecipes.every(r => r.includes('private temp file (chmod 600)') && !r.includes('write it to a file')));
   check('recipe explains users/me vs users/<address>', allRecipes.every(r => r.includes('users/me is your FGAC sign-in address') && r.includes('list_accounts')));
+  // Egress wall (plan claude/temp-key-never-used_v1): half of claude-code's
+  // keys were minted in sandboxes that cannot reach FGAC. The check must come
+  // before the work, and the fallback must be named.
+  check('every recipe starts with an authenticated ping on the serving host, before any Google call',
+    allRecipes.every(r => r.includes('https://preview.example.com/api/proxy/ping') && r.includes(`${PING_OK} key-valid`)
+      && r.indexOf('/api/proxy/ping') < r.indexOf('/api/proxy/', r.indexOf('/api/proxy/ping') + 1)));
+  check('every recipe names the windowed fallback, forbids re-minting, and names the host to allow',
+    allRecipes.every(r => r.includes('offset and limit') && r.includes('do not create another one this session')
+      && r.includes('allowing preview.example.com')));
+  const desc = TOOL_DEFS.create_temporary_api_key.description;
+  check('tool description gives a no-key reachability check before minting', desc.includes('https://fgac.ai/api/proxy/ping')
+    && desc.includes(PING_OK) && desc.includes('do not create a key') && desc.includes('offset+limit'));
+  check('attachment pointer conditions on reaching fgac.ai, not on "network access"',
+    !TOOL_DEFS.gmail_get_attachment.description.includes('network access') && TOOL_DEFS.gmail_get_attachment.description.includes('reach fgac.ai'));
   const send = allRecipes[2];
   const [iRaw, iMedia, iResumable] = ['{"raw":', 'uploadType=media', 'uploadType=resumable'].map(s => send.indexOf(s));
   check('send_attachment recipe is ordered by size: JSON raw, then media, then resumable',
@@ -234,6 +249,29 @@ async function main() {
   reset(); tempKeyRow = {} as Row;
   r = await call('GET', 'gmail/v1/users/me/messages');
   check('an unknown temporary key is refused', r.status === 401 && r.google.length === 0, r);
+
+  console.log('temporary-api-keys — reachability ping:');
+  const ping = await import('../src/app/api/proxy/ping/route');
+  const pingCall = async (key?: string) => {
+    googleCalls = [];
+    const res = await ping.GET(new NextRequest('http://localhost:3000/api/proxy/ping', key ? { headers: { authorization: `Bearer ${key}` } } : {}));
+    return { status: res.status, text: await res.text(), google: googleCalls.length, cache: res.headers.get('cache-control') };
+  };
+  reset();
+  let p = await pingCall();
+  check('ping without a key answers the exact reachability string, uncached', p.status === 200 && p.text.trim() === PING_OK && p.cache === 'no-store', p);
+  p = await pingCall(TEMP.key);
+  check('ping with a live temporary key confirms the hand-off and never calls Google', p.status === 200 && p.text.trim() === `${PING_OK} key-valid` && p.google === 0, p);
+  tempKeyRow.expiresAt = minutesFromNow(-1);
+  p = await pingCall(TEMP.key);
+  check('ping with an expired key still proves reachability but says expired', p.status === 401 && p.text.startsWith(PING_OK) && p.text.includes('key-expired'), p);
+  reset(); tempKeyRow = {} as Row;
+  p = await pingCall(TEMP.key);
+  check('ping with a key FGAC never issued says key-invalid', p.status === 401 && p.text.includes('key-invalid'), p);
+  p = await pingCall('sk_proxy_parent');
+  check('ping refuses to validate a standing profile key', p.status === 401 && p.text.includes('key-not-temporary'), p);
+  const head = await ping.HEAD(new NextRequest('http://localhost:3000/api/proxy/ping', { method: 'HEAD' }));
+  check('HEAD ping answers 200 with no body', head.status === 200 && (await head.text()) === '', head.status);
 
   console.log('temporary-api-keys — size guard:');
   reset();
