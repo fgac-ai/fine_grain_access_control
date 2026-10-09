@@ -28,6 +28,7 @@ import { NextRequest } from 'next/server';
 import {
   clampTtlMinutes, expectedBytesBucket, generateTemporaryKey, hashTemporaryKey, isTemporaryKey,
   temporaryKeyRecipe, hashUploadId, TEMP_KEY_PREFIX, PROXY_MAX_REQUEST_BYTES, PING_OK,
+  deploymentHostCopy, deploymentOrigin,
 } from '../src/lib/temporaryApiKeys';
 import { TOOL_DEFS } from '../src/app/api/mcp/toolDefs';
 
@@ -154,6 +155,18 @@ async function main() {
     && desc.includes(PING_OK) && desc.includes('do not create a key') && desc.includes('offset+limit'));
   check('attachment pointer conditions on reaching fgac.ai, not on "network access"',
     !TOOL_DEFS.gmail_get_attachment.description.includes('network access') && TOOL_DEFS.gmail_get_attachment.description.includes('reach fgac.ai'));
+  // Tool copy follows the serving deployment (train QA 2026-10-08, A12: an agent on a
+  // preview pinged production, got a non-ok answer and correctly declined to mint).
+  const preview = 'https://fine-grain-access-control-abc.vercel.app';
+  const previewDesc = deploymentHostCopy(desc, preview);
+  check('production copy is unchanged', deploymentHostCopy(desc, 'https://fgac.ai') === desc);
+  check('preview copy pings the preview, never fgac.ai', previewDesc.includes(`${preview}/api/proxy/ping`)
+    && !/fgac\.ai/.test(previewDesc.replace(/fgac-proxy-ok/g, '')));
+  check('preview copy names the preview host to allow', previewDesc.includes('allowing fine-grain-access-control-abc.vercel.app in'));
+  check('host rewrite leaves other copy alone', deploymentHostCopy('FGAC rules; fgac-proxy-ok; gmail.fgac.ai/x', preview) === 'FGAC rules; fgac-proxy-ok; gmail.fgac.ai/x');
+  check('deploymentOrigin: production → fgac.ai', deploymentOrigin({ VERCEL_ENV: 'production', VERCEL_URL: 'x.vercel.app' }) === 'https://fgac.ai');
+  check('deploymentOrigin: preview → its deployment URL', deploymentOrigin({ VERCEL_ENV: 'preview', VERCEL_URL: 'x.vercel.app' }) === 'https://x.vercel.app');
+  check('deploymentOrigin: local → localhost:PORT', deploymentOrigin({ PORT: '52330' }) === 'http://localhost:52330' && deploymentOrigin({}) === 'http://localhost:3000');
   const send = allRecipes[2];
   const [iRaw, iMedia, iResumable] = ['{"raw":', 'uploadType=media', 'uploadType=resumable'].map(s => send.indexOf(s));
   check('send_attachment recipe is ordered by size: JSON raw, then media, then resumable',

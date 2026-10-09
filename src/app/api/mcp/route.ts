@@ -26,7 +26,7 @@ import {
 import { eq, and, isNull, gt, sql } from 'drizzle-orm';
 import {
   TEMP_KEY_PURPOSES, TEMP_KEY_MAX_LIVE_PER_CONNECTION, TEMP_KEY_MAX_TTL_MINUTES, type TempKeyPurpose,
-  clampTtlMinutes, expectedBytesBucket, generateTemporaryKey, requestOrigin, temporaryKeyRecipe,
+  clampTtlMinutes, deploymentHostCopy, deploymentOrigin, expectedBytesBucket, generateTemporaryKey, requestOrigin, temporaryKeyRecipe,
 } from '@/lib/temporaryApiKeys';
 import { filterLiveDelegatedAccess } from '@/db/delegationQueries';
 import { findActiveDelegationOwner } from '@/db/delegationOwner';
@@ -107,6 +107,9 @@ function cleanUrl(value: string | undefined | null): string | null {
 const DASHBOARD_URL = cleanUrl(process.env.NEXT_PUBLIC_APP_URL)
   || (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL.trim()}` : null)
   || 'http://localhost:3000';
+
+/** Host agents are told to reach and ping before minting a temporary key (see deploymentHostCopy). */
+const DEPLOYMENT_ORIGIN = deploymentOrigin();
 
 /**
  * One-click reconnect link, bound to the account it is meant to repair. The
@@ -1900,9 +1903,9 @@ const LARGE_FILE_HINT_CHARS = 1_500_000;
 function largeFileHint(totalChars: number, windowChars: number): string {
   addToolCallProps({ large_file_hint_shown: true });
   const calls = Math.ceil(totalChars / windowChars);
-  return `This payload needs about ${calls} windowed calls. If code you run can reach fgac.ai ` +
+  return deploymentHostCopy(`This payload needs about ${calls} windowed calls. If code you run can reach fgac.ai ` +
     `(check: curl -sS https://fgac.ai/api/proxy/ping prints fgac-proxy-ok), create_temporary_api_key ` +
-    `(purpose "download") fetches it in one request instead; otherwise keep windowing.`;
+    `(purpose "download") fetches it in one request instead; otherwise keep windowing.`, DEPLOYMENT_ORIGIN);
 }
 
 function windowPayload(payload: string, offset: number, limit: number | undefined) {
@@ -2936,7 +2939,7 @@ async function executeRawGoogleCall(
 function toolConfig<S extends z.ZodRawShape>(def: FgacToolDef, inputSchema: S) {
   return {
     title: def.title,
-    description: def.description,
+    description: deploymentHostCopy(def.description, DEPLOYMENT_ORIGIN),
     inputSchema,
     annotations: toolAnnotations(def),
   };

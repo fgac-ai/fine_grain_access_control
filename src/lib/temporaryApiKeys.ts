@@ -71,6 +71,30 @@ export function expectedBytesBucket(bytes: number | undefined): string | undefin
   return '35M+';
 }
 
+const PRODUCTION_ORIGIN = 'https://fgac.ai';
+
+/**
+ * Tool copy names fgac.ai as the host an agent's code must reach (and ping)
+ * before minting a key. Right in production; on a preview or local build it is
+ * a different deployment, so an agent that obeys "check first" pings production
+ * and declines to mint (train QA 2026-10-08, capability 23 A12). Point the copy
+ * at the deployment serving it. Production text is returned unchanged.
+ */
+export function deploymentHostCopy(text: string, origin: string): string {
+  if (origin === PRODUCTION_ORIGIN) return text;
+  const host = new URL(origin).host;
+  return text
+    .replace(/https:\/\/fgac\.ai(?=\/)/g, origin)
+    .replace(/(?<![\w./-])fgac\.ai(?![\w/-])/g, host);
+}
+
+/** The origin this deployment serves from, without a request in hand (tool copy). */
+export function deploymentOrigin(env: Record<string, string | undefined> = process.env): string {
+  if (env.VERCEL_ENV === 'production') return PRODUCTION_ORIGIN;
+  if (env.VERCEL_URL) return `https://${env.VERCEL_URL}`;
+  return `http://localhost:${env.PORT ?? 3000}`;
+}
+
 /** The host serving this request (preview, localhost, or production). */
 export function requestOrigin(req: Request): string {
   const url = new URL(req.url);
