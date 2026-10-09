@@ -156,7 +156,8 @@ network was never tried, and points the user at approving or allowing the comman
 network-settings advice). Neither call inserts a key: a following `get_my_permissions` or
 dashboard list shows no new temporary key. Each emits one `temp_api_key_check_failed`
 (`reachability` as sent; `after_mint` false with no live key, true after a mint;
-`check_output` first line with any `sk_proxy_…` redacted). `reachability: "ok"` and an
+`check_output` first line, with any key redacted: `sk_proxy_[redacted]`, or
+`Bearer [redacted]` when it follows `Bearer`). `reachability: "ok"` and an
 omitted value both mint as before, with `temp_api_key_created.reachability` = `ok` /
 `not_reported`. A keyless `GET /api/proxy/ping` emits one anonymous `proxy_ping_checked`
 and creates no person. A real agent (A12 setup) that reaches the host passes `ok`
