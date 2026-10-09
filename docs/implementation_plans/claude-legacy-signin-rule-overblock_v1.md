@@ -42,7 +42,7 @@ mail for production users, and what is the fix?
   the migration target to the template seed and show legacy-vs-seed behaviour.
 - `npm run db:migrate` on Neon branch `claude-legacy-signin-rule-overblock` (copy of
   main): 0022 ran; template rows went 14 `Sign In` + 7 `sign-in` → 21 `sign-in`.
-- Preview: see `/deploy-pr-preview` result on the PR.
+- Preview (commit 74c4761): build log shows `0022_tighten_legacy_sign_in_template_rule.sql complete` against the `preview/` branch; dashboard loads with no console errors. The UI cannot show the rewrite: previews use dev Clerk, so USER_A there is a different user row from the production-copy row holding the legacy rule.
 
 ## After-measure
 PostHog `read_restriction_enforced` where restriction contains
