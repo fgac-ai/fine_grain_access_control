@@ -1,0 +1,1 @@
+{"id":"{{input.messageId}}","headers":{"From":"Jordan Lee <jordan@example.org>","To":"alex@example.com","Subject":"Thursday review","Date":"Wed, 7 Oct 2026 16:40:00 -0400"},"labels":["INBOX"],"body":"Hi Alex, can you make the design review on Thursday at 3pm? If not, Friday morning works too. Jordan","attachments":[]}

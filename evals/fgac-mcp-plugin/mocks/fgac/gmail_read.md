@@ -1,0 +1,1 @@
+{"id":"{{input.messageId}}","account":"{{input.account}}","headers":{"From":"Sam Rivera <sam@example.org>","To":"alex@example.com","Subject":"Lunch on Friday?","Date":"Wed, 7 Oct 2026 09:12:00 -0400"},"labels":["INBOX","UNREAD"],"body":"Hi Alex, are you free for lunch on Friday around noon? Sam","attachments":[]}

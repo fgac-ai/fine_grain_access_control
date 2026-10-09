@@ -1,0 +1,175 @@
+{
+  "tools": [
+    {
+      "name": "list_accounts",
+      "description": "Lists the email accounts this connection can access through FGAC. account_details reports each account's Google scope state: gmail and drive_file are 'granted', 'missing', or 'unknown' ('unknown' means the state could not be determined right now — treat the account as usable and let a real call settle it; never treat 'unknown' as missing). A 'missing' scope means every call needing it will fail until the account is reconnected — the entry's reconnect_url is a one-click fix link to give the user; it is bound to that specific account, so the user must open it while signed in to FGAC as that account. google_token: 'unavailable' with a reconnect_url means the Google grant itself is dead (revoked, expired, or missing) — every call on that account fails until the user opens the link; do not retry, and read next_steps.reconnect first.",
+      "inputSchema": { "type": "object", "properties": {} },
+      "annotations": { "title": "List accessible accounts", "readOnlyHint": true }
+    },
+    {
+      "name": "gmail_list",
+      "description": "Search or list Gmail messages: returns recent message IDs, optionally filtered by a Gmail search query (e.g. \"is:unread\", \"from:alice newer_than:7d\") — this is the Gmail search tool; read a result with gmail_read. Works across every connected or delegated Gmail inbox — pass the \"account\" parameter to target a specific mailbox (see list_accounts). Other Gmail read endpoints (threads, drafts, history, settings) are available via google_api_get.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": { "type": "string", "description": "Email account to use. Defaults to primary." },
+          "max": { "type": "number", "description": "Max messages to return (Gmail maxResults; default: 10). The parameter is named max." },
+          "query": { "type": "string", "description": "Gmail search query (e.g., \"is:unread\")" }
+        }
+      },
+      "annotations": { "title": "Search Gmail", "readOnlyHint": true }
+    },
+    {
+      "name": "gmail_read",
+      "description": "Read a Gmail message by ID — arguments: messageId (required; the \"id\" from gmail_list), account, format, offset, limit. Returns parsed headers, body text, and attachment metadata. Reading is allowed by default; messages matching the user's read-block rules (labels or content patterns), if any, are withheld. Works across every connected or delegated Gmail inbox via the \"account\" parameter. For a full thread use google_api_get with gmail/v1/users/me/threads/{id}. Long messages: pass offset and a limit sized to your tool-result budget (chars, max 200000/call) to window the serialized message with the body UNtruncated — the envelope reports total_chars and next_offset; concatenate data strings in offset order.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": { "type": "string", "description": "Email account to use (see list_accounts; defaults to the primary). Ids are mailbox-specific: an id obtained on one account must be read with that same account passed here." },
+          "format": { "type": "string", "enum": ["full", "metadata", "minimal"], "description": "Response format, lowercase: \"full\" (default) returns parsed headers, body text, and attachment metadata; \"metadata\" and \"minimal\" are the Gmail API equivalents." },
+          "limit": { "type": "integer", "minimum": 1, "description": "Max chars to return in this response (server caps at 200000). Size this to YOUR tool-result budget. Passing offset or limit switches to the windowed envelope." },
+          "messageId": { "type": "string", "description": "Gmail message ID — the \"id\" of an entry returned by gmail_list (not the threadId). The parameter is named messageId." },
+          "offset": { "type": "integer", "minimum": 0, "description": "Start position (chars into the serialized response, body UNtruncated) for a windowed read of a long message. Use the next_offset from the previous response to continue; start at 0." }
+        },
+        "required": ["messageId"]
+      },
+      "annotations": { "title": "Read a Gmail message", "readOnlyHint": true }
+    },
+    {
+      "name": "gmail_get_attachment",
+      "description": "Retrieve an email attachment by message ID plus either attachment ID or filename (allowed unless the parent message matches a read-block rule). Gmail attachment ids go stale when a message is re-indexed — stale ids are healed automatically when unambiguous, and filenames never go stale. Returns Gmail's base64url-encoded data (URL-safe alphabet, padded with \"=\") — decode with a base64url decoder, not standard base64. Files over ~150 KB must be read in windows: pass offset and a limit sized to YOUR tool-result budget (chars of base64url data, max 200000/call); each response reports total_chars and next_offset — concatenate the data strings in offset order, then decode once. Over ~1 MB, if you can run code with network access, create_temporary_api_key downloads it in one request instead.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": { "type": "string", "description": "Email account to use (see list_accounts; defaults to the primary)." },
+          "attachmentId": { "type": "string", "description": "Attachment ID, taken from the `attachments` array of a gmail_read on THIS messageId. Prefer `filename` when you know it — filenames never go stale." },
+          "filename": { "type": "string", "description": "Attachment filename as shown in gmail_read `attachments` (case-insensitive), as an alternative to attachmentId." },
+          "limit": { "type": "integer", "minimum": 1, "description": "Max chars of base64url data to return in this response (server caps at 200000). Passing offset or limit switches to the windowed envelope." },
+          "messageId": { "type": "string", "description": "Gmail message ID containing the attachment" },
+          "offset": { "type": "integer", "minimum": 0, "description": "Start position (chars into the base64url data) for a windowed read of a large attachment. Start at 0." }
+        },
+        "required": ["messageId"]
+      },
+      "annotations": { "title": "Get a Gmail attachment", "readOnlyHint": true }
+    },
+    {
+      "name": "gmail_send",
+      "description": "Send a plain-text email from any connected or delegated account (via the \"account\" parameter). Recipients must match the user's FGAC send whitelist; denied sends include a link the user can use to approve the recipient. The body is plain text; FGAC adds an HTML alternative generated from it (paragraphs, line breaks and links kept) because Gmail re-wraps text-only mail at ~72 columns on delivery. For your own HTML, attachments, or threaded replies, use google_api_modify with Gmail messages/send and a raw RFC 2822 MIME body; the same whitelist applies. Attachments over ~1 MB: use create_temporary_api_key and Gmail's resumable messages/send upload from a script.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": { "type": "string", "description": "Email account to send from." },
+          "body": { "type": "string", "description": "Email body (plain text)" },
+          "subject": { "type": "string", "description": "Email subject line" },
+          "to": { "type": "string", "description": "Recipient email address" }
+        },
+        "required": ["to", "subject", "body"]
+      },
+      "annotations": { "title": "Send an email", "destructiveHint": true }
+    },
+    {
+      "name": "sheets_get_spreadsheet",
+      "description": "Get metadata and sheet tabs for a Google Spreadsheet exposed by the user's FGAC rules — arguments: spreadsheetId (required), account, offset, limit. Large responses: pass offset and a limit sized to your tool-result budget (chars, max 200000/call) — the windowed envelope reports total_chars and next_offset; concatenate data strings in offset order.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": { "type": "string", "description": "Email account to use." },
+          "spreadsheetId": { "type": "string", "description": "Google Spreadsheet ID (e.g. 1BxiMVs0...) — the segment after /d/ in the sheet URL; a full URL is accepted and the id extracted" }
+        },
+        "required": ["spreadsheetId"]
+      },
+      "annotations": { "title": "Get spreadsheet metadata", "readOnlyHint": true }
+    },
+    {
+      "name": "sheets_read_range",
+      "description": "Read cell values from a sheet tab or range in a Google Spreadsheet exposed by the user's FGAC rules — arguments: spreadsheetId and range (both required), account, offset, limit. Prefer narrowing the range; for genuinely large ranges, pass offset and a limit sized to your tool-result budget (chars, max 200000/call) — the windowed envelope reports total_chars and next_offset; concatenate data strings in offset order.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": { "type": "string", "description": "Email account to use." },
+          "range": { "type": "string", "description": "A1 range: 'Tab name'!A1:D20 (single quotes around a tab name with spaces), or a bare tab name for the whole tab. Tab names must match an existing tab exactly — take them from sheets_get_spreadsheet rather than assuming 'Sheet1'." },
+          "spreadsheetId": { "type": "string", "description": "Google Spreadsheet ID" }
+        },
+        "required": ["spreadsheetId", "range"]
+      },
+      "annotations": { "title": "Read a sheet range", "readOnlyHint": true }
+    },
+    {
+      "name": "slides_get_presentation",
+      "description": "Read a Google Slides presentation exposed by the user's FGAC rules. Returns the raw Slides API presentation resource (title, slides, page elements with their text and shapes as structured JSON). Large decks: trim with the optional \"fields\" mask (e.g. \"title,slides(objectId,pageElements(shape(text)))\"), or read in windows by passing offset and a limit. To edit the presentation use slides_edit; comments live in the Drive API — use comments_read.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": { "type": "string", "description": "Email account to use." },
+          "fields": { "type": "string", "description": "Optional Slides API field mask to trim the response." },
+          "presentationId": { "type": "string", "description": "Google Slides presentation ID — the segment after /d/ in the presentation URL; a full URL is accepted and the id extracted" }
+        },
+        "required": ["presentationId"]
+      },
+      "annotations": { "title": "Read a Slides presentation", "readOnlyHint": true }
+    },
+    {
+      "name": "slides_edit",
+      "description": "Apply Google Slides batchUpdate requests to edit presentations — add or delete slides, create shapes, text boxes, images and tables, insert/replace/delete text, restyle text and shapes (https://developers.google.com/slides/api/reference/rest/v1/presentations/batchUpdate). Examples: add a blank slide {\"createSlide\":{\"slideLayoutReference\":{\"predefinedLayout\":\"BLANK\"}}}, replace text everywhere {\"replaceAllText\":{\"containsText\":{\"text\":\"old\",\"matchCase\":true},\"replaceText\":\"new\"}}, or insert text into a shape {\"insertText\":{\"objectId\":\"<shapeId>\",\"text\":\"...\"}} (object ids come from slides_get_presentation). Requires Read & Write FGAC access. Create new presentations with google_api_modify (POST v1/presentations).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": { "type": "string", "description": "Email account to use." },
+          "presentationId": { "type": "string", "description": "Google Slides presentation ID" },
+          "requests": { "type": "array", "minItems": 1, "items": { "type": "object" }, "description": "Slides API batchUpdate request objects, applied in order (e.g. createSlide, createShape, insertText, deleteText, replaceAllText, createImage, updateTextStyle, deleteObject)" }
+        },
+        "required": ["presentationId", "requests"]
+      },
+      "annotations": { "title": "Edit a Slides presentation", "destructiveHint": true }
+    },
+    {
+      "name": "google_api_get",
+      "description": "Perform a read-only GET request against any Google API endpoint by path — the full read surface behind the typed convenience tools. Gmail: messages, threads, drafts, labels, history, settings — reads are allowed by default and filtered by the user's read-block rules if any. Google Sheets, Google Docs, and Google Slides: require a per-file FGAC rule. Drive: listing (drive/v3/files) is never gated; any call addressed to a file by id (metadata, export, revisions, permissions, comments) follows that file's FGAC rule. APIs outside the grant — People/Contacts, Calendar, Tasks, YouTube — can NEVER work through FGAC and are refused; do not probe them. Batch endpoints are denied. Use this whenever no typed read tool covers the endpoint you need.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": { "type": "string", "description": "Email account to use (see list_accounts; defaults to the primary)." },
+          "path": { "type": "string", "description": "API path (e.g. \"gmail/v1/users/me/messages\" or \"v4/spreadsheets/1BxiM.../values/Sheet1\")" }
+        },
+        "required": ["path"]
+      },
+      "annotations": { "title": "Raw Google API read", "readOnlyHint": true }
+    },
+    {
+      "name": "request_access",
+      "description": "Ask the user to grant this agent a specific permission: sending email to a recipient, or read/write access to a Google Spreadsheet, Google Docs document, or Google Slides presentation. Arguments: type (required — one of send, sheets_read, sheets_write, docs_read, docs_write, slides_read, slides_write) plus recipient for send, or spreadsheetId / documentId / presentationId for a file. Returns a permanent approval link for the user — calling this tool grants nothing by itself; the user must open the link and approve. For a spreadsheet, document, or presentation, pass resourceName (the file's title) whenever you know it: the approval page shows it, and without it the user only sees Google's file id while Google's picker lists files by name.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "documentId": { "type": "string", "description": "Google Docs document ID (required for docs types)" },
+          "presentationId": { "type": "string", "description": "Google Slides presentation ID (required for slides types)" },
+          "recipient": { "type": "string", "description": "Email address to whitelist (required for type \"send\")" },
+          "resourceName": { "type": "string", "maxLength": 200, "description": "Title of the spreadsheet, document, or presentation, when you know it. Shown on the approval page so the user can find the file by name in Google's picker." },
+          "spreadsheetId": { "type": "string", "description": "Google Spreadsheet ID (required for sheets types)" },
+          "type": { "type": "string", "enum": ["send", "sheets_read", "sheets_write", "docs_read", "docs_write", "slides_read", "slides_write"], "description": "What to request" }
+        },
+        "required": ["type"]
+      },
+      "annotations": { "title": "Request a permission upgrade", "readOnlyHint": true }
+    },
+    {
+      "name": "create_temporary_api_key",
+      "description": "Create a short-lived FGAC API key so code YOU run can move data too large for tool calls: file uploads to Drive, emails with large attachments, Drive downloads or Gmail attachments over ~1 MB, or many calls in a loop. The key has exactly this connection's permissions, enforced by the same FGAC rules on every request; it is not a Google token. Requires code execution with network access to the returned base_url; without it, keep using the windowed tools (gmail_get_attachment offset/limit) and google_api_modify. Lifetime: ttl_minutes, default 15, maximum 60. purpose (upload, download, send_attachment, bulk_calls, other) selects the step-by-step recipe returned with the key. Keep the key out of anything that leaves this session.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "expected_bytes": { "type": "number", "description": "Approximate size of the file or payload, if known." },
+          "purpose": { "type": "string", "enum": ["upload", "download", "send_attachment", "bulk_calls", "other"], "description": "What the script will do. Selects the recipe returned with the key. Default other." },
+          "ttl_minutes": { "type": "number", "description": "Key lifetime in minutes, 1–60 (default 15)." }
+        }
+      },
+      "annotations": { "title": "Get a short-lived API key for scripts", "destructiveHint": false }
+    },
+    {
+      "name": "get_my_permissions",
+      "description": "Shows the access rules, accessible accounts, proxy key, and default access posture (including implicit Gmail read access) that apply to this connection.",
+      "inputSchema": { "type": "object", "properties": {} },
+      "annotations": { "title": "Show my permissions", "readOnlyHint": true }
+    }
+  ]
+}
