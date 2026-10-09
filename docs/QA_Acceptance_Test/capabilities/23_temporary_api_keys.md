@@ -100,8 +100,9 @@ to reuse its current key (`live_temp_keys` = 10). Revoking one frees a slot.
 ### A11: Agents are told the path exists
 
 `tools/list` includes `create_temporary_api_key` with the description's four elements: when to
-use it (over ~1 MB / scripted loops), the code-execution requirement and the windowed-tool
-fallback, the 15/60-minute lifetime with resume-after-expiry, and the key-handling rule ("keep the key out of
+use it (over ~1 MB / scripted loops), the reachability pre-check (`curl -sS
+https://fgac.ai/api/proxy/ping` prints `fgac-proxy-ok`; anything else → do not mint) with the
+windowed-tool fallback named, the 15/60-minute lifetime with resume-after-expiry, and the key-handling rule ("keep the key out of
 anything that leaves this session" — private temp file or env var allowed). The
 `initialize` instructions contain the large-file sentence. `gmail_get_attachment`,
 `gmail_send`, and `google_api_modify` descriptions each point to the tool.
@@ -130,3 +131,14 @@ In the run window:
 - A7's dashboard revoke emits `temp_api_key_revoked` (`via: 'dashboard'`);
 - runbook query `docs/monitoring.md` §7.34 (1) and (2) return the run's mints, with the
   never-used ones (e.g. A10's surplus keys) counted as never used.
+
+### A14: The reachability ping separates a blocked sandbox from a broken key hand-off
+
+`curl -sS $BASE_URL/api/proxy/ping` with no key → 200, body exactly `fgac-proxy-ok`,
+`Cache-Control: no-store`. With `Authorization: Bearer $TMP` → 200 `fgac-proxy-ok key-valid`
+and one `temp_api_key_pinged` event (`outcome: 'valid'`, `temp_key_id` = the mint's); with an
+expired key → 401 `fgac-proxy-ok key-expired`; with a made-up `sk_proxy_tmp_` key → 401
+`fgac-proxy-ok key-invalid`; with the standing profile key → 401 `key-not-temporary`. No ping
+makes a Google request, and a pinged key with no other traffic still counts as never used in
+§7.34 (2). The minted recipe text (A1) contains the authenticated ping as its FIRST command,
+before any Google path, plus the "do not create another one this session" fallback.
