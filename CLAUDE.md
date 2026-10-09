@@ -335,7 +335,10 @@ user ids are production-instance ids too.
 
 Vercel **Preview deployments run against an isolated Neon branch**, named
 `preview/<git-branch>`, created by the Vercel–Neon integration on the first preview
-deploy of that git branch. Facts that are easy to get wrong:
+deploy of that git branch — **including a deployment the Ignored Build Step then
+cancels** (measured 2026-10-08: the branch appeared ~90 s before the skipped build
+started). Skipping builds saves build minutes, not Neon branches; the pruner reaps
+the unused ones. Facts that are easy to get wrong:
 
 - **`vercel env ls` / `vercel env pull --environment=preview` CANNOT see this.** They
   show the stored project vars, where `POSTGRES_URL` points at production. The

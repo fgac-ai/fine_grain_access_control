@@ -144,8 +144,12 @@ exit 0
 ```
 
 Production and trains always build; feature branches build only on request.
-Fewer previews also means fewer `preview/<branch>` Neon branches for the pruner
-to carry.
+~~Fewer previews also means fewer `preview/<branch>` Neon branches for the pruner
+to carry.~~ **Not so (measured 2026-10-08):** the Vercel–Neon integration creates
+`preview/<branch>` when the deployment is *created*, before the Ignored Build Step
+runs, so a skipped push still makes a (never-used, compute-idle) Neon branch that
+the 24 h pruner reaps. Only `git.deploymentEnabled: false` for a branch pattern
+would prevent the deployment itself, at the cost of the `[preview]` opt-in.
 
 **Shipped 2026-10-08** (`claude/vercel-build-cost`, plan
 `docs/implementation_plans/claude_vercel-build-cost_v1.md`) after the sketch above
