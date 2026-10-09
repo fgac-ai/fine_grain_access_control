@@ -105,7 +105,7 @@ QA execution is delegated to cost-tiered subagents defined in `.claude/agents/`:
 `docs/QA_Acceptance_Test/qa-results.json`; `qa-smoke` and `deploy-watcher` (Haiku) handle
 mechanical polling and smoke checks; `qa-coverage-auditor` (Sonnet) adversarially reviews
 results; `qa-setup-driver` (inherits the session model) drives the browser setup flows.
-Four rules bind this architecture:
+Five rules bind this architecture:
 
 1. **Only the orchestrator (main session) edits source, schema, or config.** Runners
    execute and report; a runner that hits a code problem records it, never fixes it.
@@ -132,6 +132,13 @@ Four rules bind this architecture:
    earlier were unaffected. Every runner prompt states the context plainly: QA of
    FGAC's own Google integration against a local or preview build, using the two test
    accounts we own.
+5. **MCP bearers come from `scripts/qa-mcp-token.ts`, never a per-run consent click.**
+   A refresh token stored once in the main clone's `.secrets/qa-mcp/` yields a fresh
+   USER_A bearer that works on localhost and every preview (dev Clerk tokens carry no
+   `aud`). Runners call `token`/`check`; a fresh DCR client + consent "Allow" per run
+   is what the auto-mode classifier kept denying (2026-10-05/07/08), stalling every
+   train's authenticated QA. Exit 3 = the one-time mint is needed (`start`/`finish`
+   via `qa-setup-driver`, which Ken approves in chat); the script refuses production.
 
 QA environments run sequentially (they share one dev server, one Neon branch, and the QA
 accounts/keys — lifecycle capabilities mutate that shared state). Targeted re-tests
