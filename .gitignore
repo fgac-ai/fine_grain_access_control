@@ -110,3 +110,4 @@ qa-webhook-fail
 
 # QA runner scratch files (large-file transfer fixtures, capability 23)
 qa-out/
+evals/fgac-mcp-plugin-results/

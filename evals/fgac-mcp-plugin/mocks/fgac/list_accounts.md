@@ -1,0 +1,1 @@
+{"accounts":["alex@example.com","alex.work@example.com"],"primary":"alex@example.com","account_details":[{"email":"alex@example.com","role":"owner","gmail":"granted","drive_file":"granted"},{"email":"alex.work@example.com","role":"linked","gmail":"granted","drive_file":"granted"}],"next_steps":{"default":"Pass account to any tool to target a mailbox other than the primary."}}

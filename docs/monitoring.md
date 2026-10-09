@@ -367,7 +367,22 @@ nine hours on crawler traffic alone (7.21). Rows before that deploy carry no
 class; on those days the column is contaminated by whatever crawlers were
 active (a handful/day before the listing).
 
-The usable proxy for "clicked Connect in the directory" is the count of
+**Superseded 2026-10-06: count connect starts from Anthropic's backend probe, not
+from claude.ai initializes.** Every completed directory connect begins with an
+unauthenticated `initialize` from `client_name = 'Anthropic'` (user agent
+`python-httpx`). It is followed within 0–2 min by `mcp_connection_created` and an
+authenticated `Anthropic/Toolbox` inspection (9 of 10 starts on 09-24..25). The
+`Anthropic/ClaudeAI` unauthenticated initializes below come from the same recurring
+egress fingerprints all day and are **not tied to connects**. They doubled after
+2026-09-26 while connect starts fell from ~40/week to ~6, and for 10 days that read
+as "attempts continue, the flow must be broken". The flow was fine (6 of 8
+post-cliff starts completed); discovery had collapsed. Use
+`countIf(event='connector_install_started' AND properties.client_name='Anthropic')`
+(touchpoint `mcp_401`, reason `no_token`) as the start count, and
+`Anthropic/Toolbox` initializes as completions. Analysis:
+`docs/implementation_plans/claude_vigilant-tharp-29e821_v1.md`.
+
+The older proxy for "clicked Connect in the directory" is the count of
 unauthenticated claude.ai `initialize` requests: one per install attempt, plus
 retries, so it is an **upper bound on attempts** (2026-08-28 → 09-08: 91
 requests for 55 Clerk accounts created through the connector, i.e. roughly 1.6

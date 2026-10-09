@@ -1,0 +1,1 @@
+{"api_key":"sk_temp_EXAMPLE_NOT_REAL","base_url":"https://fgac.ai/api/proxy","expires_in_minutes":15,"recipe":"Download a Gmail attachment: GET {base_url}/gmail/v1/users/me/messages/{messageId}/attachments/{attachmentId} with header Authorization: Bearer <key>; decode the base64url data field and write the bytes to disk."}
