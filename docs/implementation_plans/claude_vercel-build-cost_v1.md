@@ -1,0 +1,120 @@
+# Vercel build cost: only trains, main and opted-in branches build — v1
+
+Branch `claude/vercel-build-cost`. Ships the Ignored Build Step that ADR-002
+specified on 2026-09-25 but never landed.
+
+## Problem
+
+The 2026-10-08 analytics review projected **$20.68 of usage against the $20 Pro
+credit** for the Oct 1 – Nov 1 cycle. Build CPU minutes were the biggest line and
+observability events the second; runtime traffic is cheap.
+
+## Measurements (2026-10-08, read-only Vercel API)
+
+Sources: `GET /v6/deployments` (all of them since Sep 1, 297 rows, one project) and
+`POST /v2/billing/costs` grouped by project and product, and then per day.
+
+### Builds by branch, October cycle (Oct 1 → Oct 9 ~01:00 UTC, ~8.1 days)
+
+| branch class | builds | share of build time |
+| --- | ---: | ---: |
+| `claude/*` feature branches | 72 | 75% |
+| `integration/*` trains | 15 | 16% |
+| production (`main`) | 8 | 9% |
+| **total** | **95** | — |
+
+Billed so far this cycle: 740 build CPU-min, $2.59. That works out to **7.8 CPU-min,
+or about $0.027, per build** (4-core standard build machine, `elastic` selection).
+In September (deployment list incomplete before 09-08 and blank 09-26..09-30
+while the repo transfer had unlinked git): 202 builds listed, 1,964 CPU-min, $6.79.
+`claude/*` was 72% of build time.
+
+Diffing each deploy against the previous deploy of the same branch:
+
+| | first push | code change | docs-only change |
+| --- | ---: | ---: | ---: |
+| `claude/*` | 32 | 14 | 26 |
+| `integration/*` | 5 | 2 | **8** |
+| production | 1 | 7 | 0 |
+
+More than half of the train builds were plan-doc revisions.
+
+### Other projects
+
+`circulating-opportunity-finder` drew **$0.04** in September (observability only)
+and $0 in October. FGAC accounts for essentially all of the credit.
+
+### Observability events: driven by traffic, not deploys
+
+| day | deploys | events | invocations |
+| --- | ---: | ---: | ---: |
+| 09-29 | 0 | 145k | 32k |
+| 09-30 | 0 | 156k | 31k |
+| 10-06 | 16 | 166k | 37k |
+| 10-05 | 8 | 60k | 15k |
+
+Every day runs at **≈4.5–5.3 events per function invocation**, and that holds on
+zero-deploy days too. Build changes do not move this line. The team carries the
+`observability` entitlement, billed at $1.20 per 1M events. That is the Observability
+Plus rate, which no longer has a base fee (vercel.com/changelog/no-base-fee-for-observability-plus).
+Projected at about $8 for the cycle. Per Vercel's docs (inferred to apply here, not
+verified in our dashboard), Pro can switch Observability Plus off, or exclude a project,
+under Team Settings → Billing. Base observability stays free. **That is a
+billing-setting change, so it is Ken's call. It is proposed here, not applied.**
+The trade-off: we lose extended retention and query on Vercel request data. We rely
+on PostHog for product analytics, so the Vercel-side loss is mostly request-level
+debugging.
+
+## Change
+
+- `scripts/vercel-should-build.sh` is wired up as `ignoreCommand` in `vercel.json`.
+  **Exit 0 = skip, exit 1 = build** (Vercel's inverted convention, held in one
+  `build()`/`skip()` pair).
+  - production / `main` → build
+  - head commit message contains `[preview]` → build
+  - `integration/*` → build, unless the changes since `VERCEL_GIT_PREVIOUS_SHA`
+    (the last *successful* build of this branch) are docs-only
+  - any other branch that has a previous successful build (that is, it opted in
+    earlier) → the same docs-only rule. The opt-in is sticky, so a fix-and-retest
+    loop works unchanged.
+  - any other branch → skip
+  - docs-only = `docs/**`, `.claude/**`, root `*.md`. **`public/skills/**/*.md` is
+    served by the app and is NOT docs.**
+  - if anything is uncertain (missing ref, a SHA the shallow clone can't fetch, a git
+    error), the script builds.
+- `scripts/test-vercel-should-build.sh`: 15 cases against a throwaway repo.
+- `/deploy-pr-preview` step 3 adds the `[preview]` opt-in commit. The
+  deploy-watcher returns `SKIPPED` instead of waiting out a build that never starts.
+- CLAUDE.md General Workflow step 6 and ADR-002 ("shipped" note plus rollout step 2).
+
+## Estimate (October replayed through the policy)
+
+To be conservative, every `claude/*` branch with "preview" in any deployed commit
+message is treated as opted in (18 branches).
+
+| | builds Oct 1–8 | per 31-day cycle | build CPU-min / cycle | $ / cycle |
+| --- | ---: | ---: | ---: | ---: |
+| before | 95 | ~364 | ~2,830 | ~$9.90 |
+| after | 43 (8 prod, 7 train, 28 opted-in feature) | ~165 | ~1,290 | ~$4.50 |
+
+That is **about −55% builds and about −$5.40 per cycle**. Ken's $20.68 projection
+drops to about $15.8, back inside the credit. Observability (~$8/cycle) is untouched
+by this PR. If the Observability Plus toggle is turned off, the projection falls to
+about $8.
+
+The remaining 28 feature builds are standalone previews. ADR-002 meant those to go
+through trains, so the gap is a process lever, not a config one.
+
+## Validation plan
+
+1. Unit: `bash scripts/test-vercel-should-build.sh`.
+2. Push `claude/vercel-build-cost` itself, with no `[preview]` and no prior deploy.
+   Expect a skip. Check whether a `preview/claude/vercel-build-cost` Neon branch
+   appears (an unknown: does the Vercel–Neon integration branch on a skipped
+   deployment?).
+3. Push throwaway `integration/probe-ignore-build` from the same commit. Expect a
+   build and a `preview/integration/probe-ignore-build` Neon branch.
+4. Push a docs-only commit to the probe. Expect a skip.
+5. Delete the probe branch. The pruner reaps its Neon branch on the 24h timer.
+
+Production is not deployed or touched. `main` is untouched until Ken merges.
