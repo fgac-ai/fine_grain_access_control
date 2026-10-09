@@ -375,6 +375,11 @@ deploy of that git branch. Facts that are easy to get wrong:
     versions in one week and the 2026-09-26 prune died mid-drift; bump the pin on
     purpose, re-verifying the subcommands listed in that file. A failed delete is
     reported and skipped, never an abort — the kept table and 💰 line always print.
+  - **Every Neon call goes through `runNeonctl` in that file** — stdin closed (`neonctl api`
+    reads stdin when it is not a TTY and hangs otherwise) and transient failures retried.
+    `Cannot read properties of undefined (reading 'branches')` is a *transient* API
+    failure the CLI swallows, not an auth problem; re-auth (`npx neonctl auth`, a user
+    action) only when the script classifies the failure as `auth`.
   - Leftover worktree directories no longer pin database branches. `npm run
     worktrees:report` lists finished ones; it only reports — removing a worktree stays
     a manual decision, because a clean merged directory can still be a live session's cwd.
