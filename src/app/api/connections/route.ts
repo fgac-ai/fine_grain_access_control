@@ -12,6 +12,7 @@ import { db } from '@/db';
 import { agentConnections, users, proxyKeys, partnerApps } from '@/db/schema';
 import { eq, and, inArray } from 'drizzle-orm';
 import { cancelSubscriptionsForConnection } from '@/lib/notifications/subscriptions';
+import { connectionState, isKeyLive } from '@/lib/connectionState';
 
 export async function GET() {
   const { userId: clerkUserId } = await auth();
@@ -43,14 +44,31 @@ export async function GET() {
     where: eq(proxyKeys.userId, user.id),
   });
 
+  const keysById = new Map(keys.map(k => [k.id, k]));
+  const now = new Date();
+
   return NextResponse.json({
-    connections: connections.map(c => ({
+    connections: connections.map(c => {
+      // `state` is what the dashboard renders: an approved row bound to a
+      // revoked/expired profile is `profile_revoked`, shown on every tab with
+      // a re-attach action instead of vanishing (src/lib/connectionState.ts).
+      const state = connectionState(c, keysById, now);
+      const boundKey = c.proxyKeyId ? keysById.get(c.proxyKeyId) : undefined;
+      return {
       id: c.id,
       clientId: c.clientId,
       clientName: c.clientName,
       nickname: c.nickname,
       status: c.status,
+      state,
       proxyKeyId: c.proxyKeyId,
+      revokedProfile: state === 'profile_revoked'
+        ? {
+            label: boundKey?.label ?? null,
+            revokedAt: boundKey?.revokedAt ?? null,
+            expiresAt: boundKey?.expiresAt ?? null,
+          }
+        : null,
       createdAt: c.createdAt,
       approvedAt: c.approvedAt,
       lastUsedAt: c.lastUsedAt,
@@ -60,7 +78,8 @@ export async function GET() {
             logoUrl: partnerById.get(c.partnerAppId)!.logoUrl,
           }
         : null,
-    })),
+      };
+    }),
     availableKeys: keys.map(k => ({
       id: k.id,
       label: k.label,
@@ -124,6 +143,14 @@ export async function POST(req: NextRequest) {
         return NextResponse.json(
           { error: 'Proxy key not found' },
           { status: 404 }
+        );
+      }
+      // Attaching to a revoked/expired profile would look approved here and
+      // be refused by MCP — the same dead end this endpoint exists to repair.
+      if (!isKeyLive(key)) {
+        return NextResponse.json(
+          { error: 'That profile has been revoked. Attach the connection to an active profile.' },
+          { status: 409 }
         );
       }
 

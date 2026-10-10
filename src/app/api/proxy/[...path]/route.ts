@@ -12,6 +12,7 @@ import { eq, and } from 'drizzle-orm';
 import {
   isTemporaryKey, hashTemporaryKey, hashUploadId, requestOrigin, PROXY_MAX_REQUEST_BYTES, RECOMMENDED_CHUNK_BYTES,
 } from '@/lib/temporaryApiKeys';
+import { linkBase, runWithLinkOrigin } from '@/lib/linkOrigin';
 import { clerkClient } from '@clerk/nextjs/server';
 import { checkReadRestrictions, checkSendWhitelist, loadApplicableRules, type SendDenial } from '@/lib/gmailRules';
 import { captureServerEvent } from '@/lib/posthogServer';
@@ -31,9 +32,14 @@ export const dynamic = 'force-dynamic';
 
 /** Same fallback chain as the MCP route's DASHBOARD_URL (trimmed: pasted
  * Vercel vars have shipped with trailing whitespace). */
-const DASHBOARD_URL = (process.env.NEXT_PUBLIC_APP_URL || '').trim().replace(/\/+$/, '')
+const CONFIGURED_DASHBOARD_URL = (process.env.NEXT_PUBLIC_APP_URL || '').trim().replace(/\/+$/, '')
   || (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL.trim()}` : '')
   || 'http://localhost:3000';
+
+/** Configured URL in production, the host serving this request elsewhere (src/lib/linkOrigin.ts). */
+function dashboardUrl(): string {
+  return linkBase(CONFIGURED_DASHBOARD_URL);
+}
 
 /** The Gmail scope FGAC requests at sign-in, plus the broader legacy grant —
  * mirror of the MCP route's GMAIL_SCOPES (see its gmailScopeDenial for the
@@ -47,25 +53,25 @@ const GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.modify', 'https://m
 export const maxDuration = 60;
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
-  return trackedProxyRequest(request, await params);
+  return runWithLinkOrigin(requestOrigin(request), async () => trackedProxyRequest(request, await params));
 }
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
-  return trackedProxyRequest(request, await params);
+  return runWithLinkOrigin(requestOrigin(request), async () => trackedProxyRequest(request, await params));
 }
 
 export async function DELETE(request: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
-  return trackedProxyRequest(request, await params);
+  return runWithLinkOrigin(requestOrigin(request), async () => trackedProxyRequest(request, await params));
 }
 
 // Sheets values:update and batchUpdate are PUT/PATCH-shaped; without these
 // exports Next.js answers 405 before FGAC's rules ever run.
 export async function PUT(request: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
-  return trackedProxyRequest(request, await params);
+  return runWithLinkOrigin(requestOrigin(request), async () => trackedProxyRequest(request, await params));
 }
 
 export async function PATCH(request: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
-  return trackedProxyRequest(request, await params);
+  return runWithLinkOrigin(requestOrigin(request), async () => trackedProxyRequest(request, await params));
 }
 
 /** Identity resolved inside handleProxyRequest, reported back for analytics. */
@@ -675,7 +681,7 @@ async function proxyDriveTreeDenial(engine: ProxyDriveTree, fileId: string, isMu
   if (decision.allowed) return null;
   telemetry.errorStatus = decision.denial === 'blocked' ? 'drive_blocked' : decision.denial === 'read_only' ? 'drive_read_only' : 'drive_not_exposed';
   telemetry.denialCode = telemetry.errorStatus;
-  const text = driveDenialText(decision, label, engine.driveDefault, `${DASHBOARD_URL}/dashboard`).replace(/^🚫 /u, '');
+  const text = driveDenialText(decision, label, engine.driveDefault, `${dashboardUrl()}/dashboard`).replace(/^🚫 /u, '');
   return NextResponse.json({ error: text }, { status: 403 });
 }
 
@@ -1509,7 +1515,7 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
           `Every Gmail call will fail until the account owner reconnects and approves Gmail access; retrying will not help. ` +
           // for= binds the link to the account it repairs — the Accounts page
           // refuses to auto-fire reconnect for a different signed-in user.
-          `One-click fix (opens Google's consent screen directly): ${DASHBOARD_URL}/dashboard/accounts?reconnect=1&for=${encodeURIComponent(targetEmail)}`,
+          `One-click fix (opens Google's consent screen directly): ${dashboardUrl()}/dashboard/accounts?reconnect=1&for=${encodeURIComponent(targetEmail)}`,
       }, { status: 403 });
     }
 

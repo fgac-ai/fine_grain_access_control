@@ -73,7 +73,10 @@
 - Revoke (or expire) the proxy key behind an attached connection, then retry
   a tool call
 - **Expected**: Blocked — auto-attach does not weaken the key-liveness check
-  from the directory-readiness refactor
+  from the directory-readiness refactor. Since 2026-10-09 the refusal names
+  the cause: "🚫 This connection has been blocked: the agent profile it was
+  attached to was revoked." followed by a dashboard link (still 🚫 /
+  `denied_by_policy`, not an error)
 
 ### A12: Profile-addressed URL binds a new connection to that profile
 - Create (or reuse) a non-default profile; connect a NEW DCR client via
@@ -95,3 +98,27 @@
 - **Expected**: The connection stays bound to X — the slug applies only when
   a connection is first created; rebinding remains a dashboard-only action
   (A5)
+
+### A14: A connection on a revoked profile stays visible and can be re-attached
+- **Never revoke the profile bound to the stored QA bearer's connection**
+  (`scripts/qa-mcp-token.ts`). Create a throwaway profile, bind a SECOND
+  connection to it (A12 profile URL or A5 reattach), then revoke the
+  throwaway profile from its tab ("Revoke key" → "Confirm revoke")
+- Visit every profile tab (and `/dashboard` with no active profile, if
+  reachable without touching the QA bearer's profile)
+- **Expected**:
+  - The connection is listed in Connected Agents on EVERY profile tab with a
+    "Profile revoked" badge, the revoked profile's name and revocation time,
+    and "Attach to this profile" / "Block" actions; a warning banner reads
+    "1 agent lost its profile" and its button scrolls to that card
+  - `GET /api/connections` returns it with `state: "profile_revoked"` and
+    `revokedProfile.revokedAt` set; `status` is unchanged (`approved`)
+  - The "connected with safe defaults" banner no longer counts it, and when
+    it shows for other connections its review link points at a tab whose
+    Connected Agents card lists them ("below" only on that tab)
+  - MCP tool calls on it return the A11 profile-revoked refusal
+  - "Attach to this profile" on an active tab restores tool calls on the
+    next request with that profile's permissions — no new OAuth/DCR
+  - Attaching through `POST /api/connections` to a revoked profile id is
+    refused with 409
+

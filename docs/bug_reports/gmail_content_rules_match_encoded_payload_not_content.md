@@ -120,3 +120,27 @@ responses; GET/SSE never buffered), and request/response-shape props on
   identically via `gmail_read` and `google_api_get`; a large multi-attachment message
   with no matching content reads fine via both paths in full/metadata/windowed forms.
 - Preview validation via `/deploy-pr-preview` before hand-off.
+
+## Follow-up (2026-10-09): stored legacy `Sign In` rows over-blocked business mail
+
+"Existing user rules keep their stored patterns" (above) turned out to be the gap.
+The tightened `sign-in` seed only reached NEW template clicks; 14 rows across 13
+accounts (12 live) kept the spaced `Sign In`, which compiles case-insensitively and,
+against decoded bodies, matches any "sign in to …" prose.
+
+Evidence (production, read-only):
+
+- 6 of the 7 external accounts ever blocked by this rule hold the legacy pattern.
+  Weekly blocks by the rule rose from 1–3 (September) to 16–17 (weeks of 09-27 and
+  10-04), almost entirely two legacy holders (user A, user B).
+- User B's agent read 14 distinct messages in one inbox sweep (format=full); 8 were
+  refused by this rule. An inbox is not 57% sign-in alerts — the blocked mail is
+  inferred (not observed: FGAC logs no subject or sender) to be ordinary business
+  mail carrying "sign in" in a body or footer.
+- User A's daily scheduled run (format=metadata, so headers + snippet only) loses
+  about one message per run to the rule.
+
+Fix: migration `0023_tighten_legacy_sign_in_template_rule.sql` rewrites the legacy
+template rows (exact rule name + exact pattern + created before the tightened seed
+shipped) to the current seed. `scripts/test-rule-patterns.ts` pins the migration's
+target to the template seed so the two cannot drift.
