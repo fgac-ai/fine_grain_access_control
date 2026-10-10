@@ -144,8 +144,34 @@ exit 0
 ```
 
 Production and trains always build; feature branches build only on request.
-Fewer previews also means fewer `preview/<branch>` Neon branches for the pruner
-to carry.
+~~Fewer previews also means fewer `preview/<branch>` Neon branches for the pruner
+to carry.~~ **Not so (measured 2026-10-08):** the Vercel–Neon integration creates
+`preview/<branch>` when the deployment is *created*, before the Ignored Build Step
+runs, so a skipped push still makes a (never-used, compute-idle) Neon branch that
+the 24 h pruner reaps. Only `git.deploymentEnabled: false` for a branch pattern
+would prevent the deployment itself, at the cost of the `[preview]` opt-in.
+
+**Shipped 2026-10-08** (`claude/vercel-build-cost`, plan
+`docs/implementation_plans/claude_vercel-build-cost_v1.md`) after the sketch above
+sat unimplemented for two weeks while every feature push kept building — 72 of the
+95 builds in the first eight days of the October billing cycle were `claude/*`
+branches, and the team projected past its $20 Pro credit. Refinements over the
+sketch:
+
+- **Docs-only pushes skip**, on trains and opted-in branches alike: the diff from
+  `VERCEL_GIT_PREVIOUS_SHA` (last successful build of the branch) touches only
+  `docs/**`, `.claude/**` or root `*.md`. 8 of the 15 October train builds were
+  plan-doc revisions. `public/skills/**/*.md` is served by the app, so it is not
+  "docs".
+- **The `[preview]` opt-in is sticky**: a branch with a previous successful
+  deployment keeps building code changes without repeating the token, so a
+  `/deploy-pr-preview` fix-and-retest loop works unchanged.
+- **The token only counts at the end of the subject line**
+  (`chore: request a preview build [preview]`). The sketch's substring match fired
+  on this change's own first push, whose subject merely *described* "[preview]-opted
+  branches".
+- Uncertainty (missing env, an unfetchable SHA) **builds** — failing open costs
+  cents, failing closed hides a preview someone is waiting on.
 
 ## Consequences
 
@@ -190,7 +216,8 @@ to carry.
    PRs; validation evidence in the plan file. It was assembled by hand with
    exactly the conflict rules above, which is what surfaced the three
    registry collisions.
-2. **Tooling PR (next train):** `scripts/vercel-should-build.sh` + `vercel.json`,
+2. **Tooling PR (next train):** `scripts/vercel-should-build.sh` + `vercel.json`
+   (**done 2026-10-08**, see above),
    `scripts/run-unit-checks.ts` replacing the `mcp:lint` chain, the duplicate-id
    guard in `qa-coverage-check.ts`, `docs/trains/`, `.claude/commands/land.md`,
    and `deploy-pr-preview.md` → `deploy-train.md` with `--solo`.

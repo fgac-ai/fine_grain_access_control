@@ -20,7 +20,14 @@ the branch name and, if known, the commit SHA that was just pushed.
    npx vercel ls fine-grain-access-control | head -20
    ```
    Identify the deployment for your branch/commit (newest matching row).
+   Not every push builds: `scripts/vercel-should-build.sh` (the Ignored Build
+   Step) skips feature branches that have not opted in with `[preview]` and
+   docs-only pushes. A skipped push shows up as a `Canceled` row within a few
+   seconds; `npx vercel inspect <url> --logs` shows the script's
+   `vercel-should-build: SKIP — <reason>` line.
 2. When it reaches `Ready`: extract the preview URL and stop.
+   When the row for your commit is `Canceled` by the Ignored Build Step: stop
+   and return `SKIPPED` — do not wait for a build that will never start.
 3. When it reaches `Error`: fetch the build logs BEFORE concluding anything —
    ```bash
    npx vercel inspect <deployment-url>
@@ -55,5 +62,8 @@ One of:
   `NEON_BRANCH_LIMIT` only, the note that
   `bash scripts/cleanup-neon-branches.sh` is the documented remedy —
   suggested, never run by you.
+- `SKIPPED <reason>` when the Ignored Build Step skipped the commit (quote the
+  `SKIP —` line), plus the newest `Ready` deployment for the branch if one
+  exists — for a docs-only push that is still the current preview.
 - `TIMEOUT` if 30 minutes pass without a terminal state (include the last
   observed status).

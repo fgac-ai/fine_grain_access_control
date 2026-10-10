@@ -21,7 +21,20 @@ Current branch: !`git branch --show-current`
    npm run db:generate && ls -la src/db/migrations/
    ```
 
-3. **Push the branch**:
+3. **Push the branch**. Vercel builds only `main`, `integration/*`, and branches that
+   opted in (`scripts/vercel-should-build.sh`, the `ignoreCommand` in `vercel.json`).
+   On any other branch (`claude/*`, `fix/*`, …) opt in first, or the push is skipped
+   and the watcher reports `SKIPPED`:
+
+   ```bash
+   git commit --allow-empty -m "chore: request a preview build [preview]"
+   ```
+
+   The opt-in sticks: once a branch has one successful deployment, later code pushes
+   build without the token. On every branch, a push whose changes since the last
+   built commit are docs-only (`docs/**`, `.claude/**`, root `*.md`) is skipped and
+   the previous preview URL stays current; end the commit subject with `[preview]` to force a
+   rebuild anyway.
 
    ```bash
    git push origin HEAD
@@ -52,6 +65,9 @@ Current branch: !`git branch --show-current`
 7. **Deploy-watch loop** (max 3 rounds). On the watcher's result:
 
    - `READY <url>` → continue to step 8.
+   - `SKIPPED <reason>` → a feature branch without the opt-in: add the `[preview]`
+     commit from step 3 and push again. A docs-only push: the preview the watcher
+     names is still current, so continue to step 8 with it.
    - `ERROR <classification>` → apply the matching fix **after reading the quoted log lines**:
      - `MIGRATION_SQL` — fix the migration file or the `splitStatements` parser in `migrate.ts`.
      - `NEON_BRANCH_LIMIT` — only THEN run `bash scripts/cleanup-neon-branches.sh`
