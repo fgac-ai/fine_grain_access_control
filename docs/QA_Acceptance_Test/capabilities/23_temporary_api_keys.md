@@ -159,6 +159,8 @@ dashboard list shows no new temporary key. Each emits one `temp_api_key_check_fa
 `check_output` first line, with any key redacted: `sk_proxy_[redacted]`, or
 `Bearer [redacted]` when it follows `Bearer`). `reachability: "ok"` and an
 omitted value both mint as before, with `temp_api_key_created.reachability` = `ok` /
-`not_reported`. A keyless `GET /api/proxy/ping` emits one anonymous `proxy_ping_checked`
-and creates no person. A real agent (A12 setup) that reaches the host passes `ok`
+`not_reported`. A keyless `GET /api/proxy/ping` emits an anonymous `proxy_ping_checked` and
+creates no person — at most one per source address per 10 minutes (60/min per
+instance): repeated keyless pings from one source all return 200 `fgac-proxy-ok`
+but produce a single row. A real agent (A12 setup) that reaches the host passes `ok`
 unprompted.

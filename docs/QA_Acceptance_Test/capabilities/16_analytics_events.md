@@ -312,16 +312,18 @@ attributable to it.
   time-to-first-success funnel depends on. Gmail tool events carry neither
   prop.
 
-### A17: Not-picked-file calls classify failed, not error, and keep error_status
+### A17: Not-picked-file calls classify as a policy denial, not error, and keep error_status
 - With a rule-covered-but-never-picked file (the capability 17 A7 state),
   call `sheets_get_spreadsheet` (or a docs read) via MCP; inspect that
   `$mcp_tool_call` event.
-- **Expected**: `outcome = 'failed'` with `$mcp_is_error = false` — the ❌
-  setup-link guidance text is a textResult, demoted out of the field
-  Anthropic's Connector Directory reads — while the event still carries
-  `error_status` (403 or 404 from Google) for internal observability, and no
-  `failure_reason` (that prop is account-resolution's). A row classifying
-  `outcome = 'error'` for this call is the pre-demotion regression. Genuine
+- **Expected**: `outcome = 'denied_by_policy'` with
+  `denial_code = 'file_grant_missing_at_google'` and `$mcp_is_error = false` —
+  the 🚫 setup-link guidance is a deterministic grant refusal, kept out of the
+  field Anthropic's Connector Directory reads (graduated from ❌ `failed` to 🚫
+  on 2026-09-03, `78f6227`; capabilities 10 and 21 A12 assert the same) — while
+  the event still carries `error_status` (403 or 404 from Google) for internal
+  observability, and no `failure_reason` (that prop is account-resolution's).
+  A row classifying `outcome = 'error'` for this call is the regression. Genuine
   unhealth must be unaffected: any 5xx/`timeout`/`network` row from this run
   still classifies `error` with `$mcp_is_error = true`.
 
