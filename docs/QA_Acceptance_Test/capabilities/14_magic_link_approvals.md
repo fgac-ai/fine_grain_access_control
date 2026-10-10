@@ -459,9 +459,16 @@
   (`../accounts`, `//evil.example.com`, uppercase) must yield `href="/dashboard"`
   — never an off-site or out-of-tree URL. A well-formed slug of a profile the
   visitor does not own resolves on the profile page like any unknown slug
-  (no other user's data is shown). An approval on the default profile, and
-  the error / missing-link / invalid / wrong-account cards, keep linking to
-  `/dashboard`, which redirects to the default profile as before
+  (no other user's data is shown). An approval on the default profile links
+  to `/dashboard/agents/<default-slug>` — the same page `/dashboard` redirects
+  to. The error / missing-link / invalid / wrong-account cards keep linking
+  to `/dashboard`
+- **Harness note**: the stored QA bearer (`scripts/qa-mcp-token.ts`) is bound
+  to the Default Profile connection, so `request_access` through
+  `/api/mcp/<other-slug>` still mints for the default profile. On localhost
+  use `qa:mint-link --profile <slug>`; on a preview (whose `preview/<branch>`
+  database the local script cannot read) connect a second agent through
+  `/api/mcp/<other-slug>` and trigger the denial from it
 - **Why**: until 2026-10-10 every card on the approve page linked to bare
   `/dashboard`, which redirects to the DEFAULT profile, so approving a grant
   for a second profile and clicking "Back to dashboard" showed a profile
