@@ -19,6 +19,7 @@ import { RuleControls } from './RuleControls';
 import { KeyControls, SecretKeyDisplay } from './KeyControls';
 import { DirectoryCta } from '../DirectoryCta';
 import { slugifyProfileLabel } from '@/lib/profileSlugs';
+import { reviewTarget, type ConnectionState } from '@/lib/connectionState';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -67,7 +68,12 @@ interface Connection {
   clientName: string | null;
   nickname: string | null;
   status: 'pending' | 'approved' | 'blocked';
+  /** Effective state (src/lib/connectionState.ts): an approved row whose
+   *  profile was revoked is `profile_revoked` — render on `state`, not `status`. */
+  state: ConnectionState;
   proxyKeyId: string | null;
+  /** The revoked profile this connection was on (state === 'profile_revoked'). */
+  revokedProfile?: { label: string | null; revokedAt: string | null; expiresAt: string | null } | null;
   createdAt: string;
   lastUsedAt: string | null;
   // Set when the connection was provisioned via the partner handoff
@@ -87,6 +93,12 @@ interface GrantState {
   state: string;
   /** Live Drive filename when state is 'ok' — fresher than resourceName. */
   title?: string | null;
+}
+
+/** Revocation is an audit event — show date AND time, not just the day. */
+function formatWhen(date: string | null | undefined): string {
+  if (!date) return '';
+  return new Date(date).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 }
 
 function timeAgo(date: string | null): string {
@@ -133,7 +145,8 @@ export function AgentProfilesView({
     try {
       const res = await fetch('/api/connections');
       const data = await res.json();
-      setConnections(data.connections || []);
+      // `state` falls back to the raw status for a response from an older build.
+      setConnections((data.connections || []).map((c: Connection) => ({ ...c, state: c.state ?? c.status })));
     } catch (e) {
       console.error('Failed to fetch connections:', e);
     } finally {
@@ -171,7 +184,12 @@ export function AgentProfilesView({
   useEffect(() => { fetchConnections(); }, [fetchConnections]);
 
   const active = activeProfiles.find(p => p.id === activeId) ?? null;
-  const pending = connections.filter(c => c.status === 'pending');
+  const pending = connections.filter(c => c.state === 'pending');
+  const orphaned = connections.filter(c => c.state === 'profile_revoked');
+  const revokedProfiles = useMemo(
+    () => profiles.filter(p => p.revokedAt).sort((a, b) => b.revokedAt!.localeCompare(a.revokedAt!)),
+    [profiles],
+  );
 
   // Per-kind file rules (sheets / docs / slides) and the Gmail remainder.
   // Each FilesRulesCard owns its own Google Picker hook for its kind (the
@@ -201,7 +219,16 @@ export function AgentProfilesView({
         <PendingBanner count={pending.length} first={pending[0]} />
       )}
 
-      <RecentConnectionsBanner connections={connections} rules={rules} />
+      {orphaned.length > 0 && (
+        <OrphanedBanner count={orphaned.length} first={orphaned[0]} hasActiveProfile={!!active} />
+      )}
+
+      <RecentConnectionsBanner
+        connections={connections}
+        rules={rules}
+        activeId={active?.id ?? null}
+        profiles={activeProfiles}
+      />
 
       <ProfileTabs
         profiles={activeProfiles}
@@ -220,6 +247,17 @@ export function AgentProfilesView({
           <div className="mt-5 inline-block">
             <KeyControls accessibleEmails={accessibleEmails} existingKeys={[]} />
           </div>
+          {orphaned.length > 0 && (
+            // Revoking the last profile must not hide its agents: list them
+            // here so the user knows a new profile gets them back.
+            <div id="connected-agents" className="mt-6 mx-auto max-w-md space-y-2.5 text-left">
+              <p className="text-xs text-muted-foreground">
+                These agents lost access when their profile was revoked. Create a profile, then
+                attach them to it from its Connected Agents card.
+              </p>
+              {orphaned.map(conn => <OrphanedAgentCard key={conn.id} conn={conn} />)}
+            </div>
+          )}
         </Card>
       ) : (
         <>
@@ -307,6 +345,10 @@ export function AgentProfilesView({
           </Card>
         </>
       )}
+
+      {revokedProfiles.length > 0 && (
+        <RevokedProfilesCard profiles={revokedProfiles} connections={connections} />
+      )}
     </div>
   );
 }
@@ -332,23 +374,72 @@ function PendingBanner({ count, first }: { count: number; first: Connection }) {
   );
 }
 
+// ─── Orphaned connections banner ────────────────────────────────────────────
+// A connection whose profile was revoked is refused by MCP ("blocked: the
+// agent profile it was attached to was revoked"). Until 2026-10-09 it also
+// vanished from the dashboard; this banner points at the card that now lists
+// it with a re-attach action.
+
+function OrphanedBanner({ count, first, hasActiveProfile }: { count: number; first: Connection; hasActiveProfile: boolean }) {
+  return (
+    <div className="flex items-center justify-between gap-4 rounded-md border border-warning-foreground bg-warning px-5 py-3.5">
+      <div className="min-w-0">
+        <p className="text-[13px] font-bold text-warning-foreground">
+          {count === 1 ? '1 agent lost its profile' : `${count} agents lost their profile`}
+        </p>
+        <p className="text-xs text-warning-foreground/80 mt-0.5 truncate">
+          &ldquo;{first.nickname || first.clientName || first.clientId}&rdquo; was on a revoked profile and is blocked.
+          {hasActiveProfile ? ' Attach it to a profile to restore access.' : ' Create a profile, then attach it.'}
+        </p>
+      </div>
+      <a href="#connected-agents" className={`${buttonSecondary} shrink-0`}>
+        {hasActiveProfile ? 'Attach to a profile' : 'Show agents'}
+      </a>
+    </div>
+  );
+}
+
 // ─── Recent auto-attached connections banner (instant-start) ────────────────
 // New MCP connections auto-attach to the Default Profile read-only. This
 // notice keeps the user informed after the fact and carries the one-click
 // sensitive-mail shield CTA (shield is OFF by default — decision log in
 // connector-growth_v1.md).
 
-function RecentConnectionsBanner({ connections, rules }: { connections: Connection[]; rules: Rule[] }) {
+function RecentConnectionsBanner({
+  connections,
+  rules,
+  activeId,
+  profiles,
+}: {
+  connections: Connection[];
+  rules: Rule[];
+  activeId: string | null;
+  profiles: Profile[];
+}) {
   const [dismissed, setDismissed] = useState(false);
   const [enabling, setEnabling] = useState(false);
 
   const sevenDaysAgo = Date.now() - 7 * 86400_000;
+  // Live connections only: one on a revoked profile is not "connected with
+  // safe defaults" — the orphaned banner covers it.
   const recent = connections.filter(
-    c => c.status === 'approved' && new Date(c.createdAt).getTime() > sevenDaysAgo,
+    c => c.state === 'approved' && new Date(c.createdAt).getTime() > sevenDaysAgo,
   );
   const hasShield = rules.some(r => !FILE_SERVICES.includes(r.service) && r.actionType === 'read_blacklist');
 
   if (dismissed || recent.length === 0) return null;
+
+  // "Below" only when the Connected Agents card below actually lists them —
+  // it shows the ACTIVE profile's agents, so otherwise link to their tab.
+  const target = reviewTarget(recent, activeId);
+  const targetProfile = target && target !== 'below' ? profiles.find(p => p.id === target.profileId) : undefined;
+  const targetSlug = targetProfile ? slugifyProfileLabel(targetProfile.label) : '';
+  const reviewLink = target === 'below'
+    ? <a href="#connected-agents" className="underline hover:text-foreground">below</a>
+    : targetProfile
+      ? <>on the <Link href={`${targetSlug ? `/dashboard/agents/${targetSlug}` : '/dashboard'}#connected-agents`} className="underline hover:text-foreground">{targetProfile.label}</Link> tab</>
+      : <>in each profile&apos;s Connected Agents card</>;
+  const it = recent.length === 1 ? 'it' : 'them';
 
   const label = recent.length === 1
     ? `"${recent[0].nickname || recent[0].clientName || recent[0].clientId}" connected ${timeAgo(recent[0].createdAt).toLowerCase()}`
@@ -362,8 +453,8 @@ function RecentConnectionsBanner({ connections, rules }: { connections: Connecti
         </p>
         <p className="mt-0.5 text-xs text-muted-foreground">
           {hasShield
-            ? 'Your sensitive-mail shield rules apply to it. Review or block it below.'
-            : 'The sensitive-mail shield (blocks 2FA codes, password resets, sign-in alerts) is OFF. Enable it in one click, or review the agent below.'}
+            ? <>Your sensitive-mail shield rules apply to {it}. Review or block {it} {reviewLink}.</>
+            : <>The sensitive-mail shield (blocks 2FA codes, password resets, sign-in alerts) is OFF. Enable it in one click, or review {it} {reviewLink}.</>}
         </p>
       </div>
       <div className="flex shrink-0 items-center gap-2.5">
@@ -478,7 +569,8 @@ function ProfileHeader({ profile }: { profile: Profile }) {
         {confirming ? (
           <>
             <span className="text-[13px] text-muted-foreground">
-              Revoke this key? Agents using it lose access immediately.
+              Revoke this profile? Its agents lose access immediately and move to
+              &ldquo;Profile revoked&rdquo; until you attach them to another profile.
             </span>
             <button
               className={buttonDanger}
@@ -1034,12 +1126,15 @@ function ConnectedAgentsCard({
     }
   };
 
-  const mine = connections.filter(c => c.status === 'approved' && c.proxyKeyId === profileId);
-  const pending = connections.filter(c => c.status === 'pending');
+  const mine = connections.filter(c => c.state === 'approved' && c.proxyKeyId === profileId);
+  const pending = connections.filter(c => c.state === 'pending');
   // Blocked connections are not profile-scoped: blocking clears nothing, but a
   // blocked agent has no key binding to filter on, so show them on every tab
   // rather than hiding them somewhere unreachable.
-  const blocked = connections.filter(c => c.status === 'blocked');
+  const blocked = connections.filter(c => c.state === 'blocked');
+  // Same for connections whose profile was revoked: their profile has no tab,
+  // so they show on every tab with a re-attach action.
+  const orphaned = connections.filter(c => c.state === 'profile_revoked');
 
   return (
     <Card className="scroll-mt-24" >
@@ -1056,7 +1151,7 @@ function ConnectedAgentsCard({
           </div>
         ) : (
           <>
-            {mine.length === 0 && pending.length === 0 && blocked.length === 0 && (
+            {mine.length === 0 && pending.length === 0 && blocked.length === 0 && orphaned.length === 0 && (
               <EmptyState>
                 No agents attached yet. Connect one with the endpoint below and it will
                 appear here for approval.
@@ -1085,6 +1180,16 @@ function ConnectedAgentsCard({
               />
             ))}
 
+            {orphaned.map(conn => (
+              <OrphanedAgentCard
+                key={conn.id}
+                conn={conn}
+                busy={busyId === conn.id}
+                onAttach={() => act(conn.id, 'approve', { proxyKeyId: profileId })}
+                onBlock={() => act(conn.id, 'block')}
+              />
+            ))}
+
             {blocked.map(conn => (
               <div key={conn.id} className="rounded-sm border border-border bg-muted p-3.5">
                 <div className="flex items-center justify-between gap-2">
@@ -1107,6 +1212,81 @@ function ConnectedAgentsCard({
           </>
         )}
       </div>
+    </Card>
+  );
+}
+
+/** Agent whose profile was revoked: refused by MCP until re-attached. Without
+ *  handlers (no active profile to attach to) it is display-only. */
+function OrphanedAgentCard({
+  conn,
+  busy = false,
+  onAttach,
+  onBlock,
+}: {
+  conn: Connection;
+  busy?: boolean;
+  onAttach?: () => void;
+  onBlock?: () => void;
+}) {
+  const rp = conn.revokedProfile;
+  const expired = !rp?.revokedAt && !!rp?.expiresAt;
+  return (
+    <div className="rounded-sm border border-warning-foreground bg-warning p-3.5" data-connection-state="profile_revoked">
+      <div className="flex items-center justify-between gap-2">
+        <span className="min-w-0 truncate text-[13px] font-semibold text-warning-foreground">
+          {conn.nickname || conn.clientName || conn.clientId}
+        </span>
+        <Badge tone="warning">{expired ? 'Profile expired' : 'Profile revoked'}</Badge>
+      </div>
+      <p className="mt-0.5 text-[11px] text-warning-foreground/80">
+        {rp?.label ? <>Was on &ldquo;{rp.label}&rdquo;</> : 'Its profile was deleted'}
+        {rp?.revokedAt ? <>, revoked {formatWhen(rp.revokedAt)}</> : rp?.expiresAt ? <>, expired {formatWhen(rp.expiresAt)}</> : null}
+        . Blocked until you attach it to a profile.
+      </p>
+      {(onAttach || onBlock) && (
+        <div className="mt-3 flex gap-2">
+          {onAttach && (
+            <button className={`${buttonPrimary} flex-1`} disabled={busy} onClick={onAttach}>
+              {busy ? '…' : 'Attach to this profile'}
+            </button>
+          )}
+          {onBlock && (
+            <button className={buttonDanger} disabled={busy} onClick={onBlock}>
+              Block
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Revoked profiles, newest first, with the revocation time — the audit
+ *  trail the profile tabs drop (key lifecycle A2). */
+function RevokedProfilesCard({ profiles, connections }: { profiles: Profile[]; connections: Connection[] }) {
+  return (
+    <Card>
+      <details className="group" data-testid="revoked-profiles">
+        <summary className="cursor-pointer select-none px-5 py-3.5 text-[13px] font-semibold text-muted-foreground hover:text-foreground">
+          {profiles.length === 1 ? '1 revoked profile' : `${profiles.length} revoked profiles`}
+        </summary>
+        <ul className="px-5 pb-4 space-y-2">
+          {profiles.map(p => {
+            const agents = connections.filter(c => c.state === 'profile_revoked' && c.proxyKeyId === p.id).length;
+            return (
+              <li key={p.id} className="flex flex-wrap items-center justify-between gap-2 rounded-sm border border-border bg-muted px-3.5 py-2.5">
+                <span className="min-w-0 truncate text-[13px] font-semibold text-muted-foreground line-through">{p.label}</span>
+                <span className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                  {agents > 0 && <span>{agents === 1 ? '1 agent to re-attach' : `${agents} agents to re-attach`}</span>}
+                  <Badge tone="error">Revoked</Badge>
+                  <time dateTime={p.revokedAt!}>{formatWhen(p.revokedAt)}</time>
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      </details>
     </Card>
   );
 }

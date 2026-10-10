@@ -55,6 +55,7 @@ import { inSuccessSample, AUTH_SUCCESS_SAMPLE } from '@/lib/authSampling';
 import { ensureDefaultProfile } from '@/db/defaultProfile';
 import { mintApprovalLink, describeApproval, actionTarget, fileApprovalActionFor, fileIdFields, type ApprovalAction, type ApprovalPayload } from '@/lib/approvalLinks';
 import { connectionsDeepLink } from '@/lib/dashboardAgentLinks';
+import { isKeyLive } from '@/lib/connectionState';
 import { recordApprovalMint, getApprovalRequestResourceName } from '@/lib/approvalRequests';
 import {
   AGENT_APPROVAL_PROTOCOL,
@@ -151,7 +152,7 @@ interface ConnectionApproved {
 
 interface ConnectionDenied {
   authorized: false;
-  reason: 'pending_approval' | 'blocked' | 'no_client_id' | 'user_not_found' | 'no_auth';
+  reason: 'pending_approval' | 'blocked' | 'profile_revoked' | 'no_client_id' | 'user_not_found' | 'no_auth';
   dashboardUrl?: string;
   connectionId?: string;
 }
@@ -325,18 +326,23 @@ async function resolveConnection(
   // A connection is only as alive as the key behind it. The proxy path checks
   // revokedAt/expiresAt on every request; without this, a revoked key kept
   // working through hosted MCP for connections bound before the revocation.
+  // A revoked profile is refused like a block (🚫), but says so and links to
+  // the dashboard, where the connection now shows as "Profile revoked" with a
+  // re-attach action (src/lib/connectionState.ts).
   let profileLabel: string | null = null;
   if (connection.proxyKeyId) {
     const boundKey = await db.query.proxyKeys.findFirst({
       where: eq(proxyKeys.id, connection.proxyKeyId),
     });
-    if (!boundKey || boundKey.revokedAt) {
-      return { authorized: false, reason: 'blocked', connectionId: connection.id };
+    if (!isKeyLive(boundKey)) {
+      return {
+        authorized: false,
+        reason: 'profile_revoked',
+        connectionId: connection.id,
+        dashboardUrl: await connectionsDeepLink(DASHBOARD_URL, user.id),
+      };
     }
-    profileLabel = boundKey.label;
-    if (boundKey.expiresAt && boundKey.expiresAt < new Date()) {
-      return { authorized: false, reason: 'blocked', connectionId: connection.id };
-    }
+    profileLabel = boundKey!.label;
   }
 
   return {
@@ -385,6 +391,11 @@ function pendingMessage(result: ConnectionDenied) {
       ].join('\n');
     case 'blocked':
       return '🚫 This connection has been blocked by the user.';
+    case 'profile_revoked':
+      return [
+        '🚫 This connection has been blocked: the agent profile it was attached to was revoked.',
+        `The user can attach it to an active profile at: ${result.dashboardUrl}`,
+      ].join('\n');
     case 'no_client_id':
       return '❌ No client_id found in auth token.';
     case 'user_not_found':
