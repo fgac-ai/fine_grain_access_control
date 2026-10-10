@@ -16,6 +16,7 @@ import { ApproveSubmitButton } from "./ApproveSubmitButton";
 import { SignOutAndReturn } from "./SignOutAndReturn";
 import { FileApprovalFlow } from "./FileApprovalFlow";
 import { ApprovedSettling } from "./ApprovedSettling";
+import { profileDashboardHref } from "@/lib/profileSlugs";
 
 /* ─── Magic-link approval page (connector-growth Phase C) ────────────────
    Reached from a signed deep link embedded in an agent's denial (or minted
@@ -55,12 +56,15 @@ async function clientClassification(): Promise<{ agent_driven: boolean; client: 
   }
 }
 
-function Card({ children }: { children: React.ReactNode }) {
+/** `dashboardHref` is the page of the profile the link targets when known
+ *  (profileDashboardHref), so "Back to dashboard" after an approval lands on
+ *  the profile whose rules just changed rather than the default profile. */
+function Card({ children, dashboardHref = "/dashboard" }: { children: React.ReactNode; dashboardHref?: string }) {
   return (
     <div className="mx-auto mt-16 max-w-lg px-6 pb-16">
       <div className="rounded-lg border border-border bg-card p-8">{children}</div>
       <p className="mt-4 text-center text-xs text-subtle">
-        <Link href="/dashboard" className="underline hover:text-foreground">
+        <Link href={dashboardHref} className="underline hover:text-foreground" data-testid="approve-back-to-dashboard">
           Back to dashboard
         </Link>
       </p>
@@ -90,12 +94,17 @@ export default async function ApprovePage({
     result?: string; message?: string; sid?: string; did?: string; pid?: string; notice?: string;
     /** `email` when the link came from FGAC's own notification email (approvalNotify.ts). */
     src?: string;
+    /** Slug of the profile an approval was written to (result=ok only). Not
+     *  trusted: profileDashboardHref accepts only a well-formed slug, and the
+     *  profile page itself resolves it within the signed-in user's profiles. */
+    profile?: string;
   }>;
 }) {
   const params = await searchParams;
   const link: ApprovalSearchParams = { a: params.a, k: params.k, r: params.r, s: params.s };
 
   if (params.result === "ok") {
+    const dashboardHref = profileDashboardHref(params.profile);
     // Per-file (sheets/docs) approvals settle asynchronously on Google's
     // side — verify the grant is live before claiming the agent can retry
     // (grant-race fix).
@@ -103,7 +112,7 @@ export default async function ApprovePage({
     const settleKind = ACTIVE_DRIVE_FILE_KINDS.find(k => params[DRIVE_FILE_KINDS[k].setupIdParam]);
     if (settleKind) {
       return (
-        <Card>
+        <Card dashboardHref={dashboardHref}>
           <ApprovedSettling
             kind={settleKind}
             fileId={params[DRIVE_FILE_KINDS[settleKind].setupIdParam]!}
@@ -113,7 +122,7 @@ export default async function ApprovePage({
       );
     }
     return (
-      <Card>
+      <Card dashboardHref={dashboardHref}>
         <h1 className="mb-2 text-xl font-bold text-success-foreground">✓ Approved</h1>
         <p className="text-sm text-muted-foreground">
           {params.message || "The permission has been granted."} The agent can
@@ -312,9 +321,11 @@ export default async function ApprovePage({
     : await getApprovalRequestResourceName(resolved.payload.requestId);
   const p: ApprovalPayload = storedName ? { ...resolved.payload, resourceName: storedName } : resolved.payload;
 
+  const dashboardHref = profileDashboardHref(resolved.profileSlug);
+
   if (resolved.status === "already_granted") {
     return (
-      <Card>
+      <Card dashboardHref={dashboardHref}>
         <h1 className="mb-2 text-xl font-bold text-success-foreground">✓ Already approved</h1>
         <p className="text-sm text-muted-foreground">
           {describeApproval(p)} — this permission is already active, so there is
@@ -352,12 +363,14 @@ export default async function ApprovePage({
         const d = DRIVE_FILE_KINDS[result.needsFileGrant.kind];
         const s = new URLSearchParams({ [d.setupIdParam]: result.needsFileGrant.fileId, from: "approval" });
         if (result.needsFileGrant.resourceName) s.set("name", result.needsFileGrant.resourceName);
+        if (result.profileSlug) s.set("profile", result.profileSlug);
         redirect(`${d.setupPath}?${s.toString()}`);
       }
       const settle = result.grantedFile
         ? `&${DRIVE_FILE_KINDS[result.grantedFile.kind].setupIdParam}=${encodeURIComponent(result.grantedFile.fileId)}`
         : "";
-      redirect(`/dashboard/approve?result=ok&message=${encodeURIComponent(result.description)}${settle}`);
+      const profile = result.profileSlug ? `&profile=${encodeURIComponent(result.profileSlug)}` : "";
+      redirect(`/dashboard/approve?result=ok&message=${encodeURIComponent(result.description)}${settle}${profile}`);
     }
     if (result.retryable) {
       // Nothing was written — return to the LIVE approve page (link intact)
@@ -390,7 +403,7 @@ export default async function ApprovePage({
   }
 
   return (
-    <Card>
+    <Card dashboardHref={dashboardHref}>
       <h1 className="mb-1 text-xl font-bold text-foreground">Approve agent permission?</h1>
       <p className="mb-5 text-sm text-muted-foreground">
         An AI agent connected to your account is asking for exactly this grant:

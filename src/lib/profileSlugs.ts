@@ -27,3 +27,15 @@ export function slugifyProfileLabel(label: string): string {
     .slice(0, 64)
     .replace(/-+$/g, '');
 }
+
+/**
+ * Dashboard page for one profile: /dashboard/agents/<slug>. Anything that is
+ * not a valid slug (missing, tampered `profile=` query param) falls back to
+ * /dashboard, which redirects to the default profile.
+ *
+ * Used by the approval flow so "Back to dashboard" returns to the profile
+ * whose rule the approval just changed, not the default one.
+ */
+export function profileDashboardHref(slug: string | null | undefined): string {
+  return slug && PROFILE_SLUG_RE.test(slug) ? `/dashboard/agents/${slug}` : '/dashboard';
+}

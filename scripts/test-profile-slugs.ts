@@ -11,6 +11,7 @@ import {
   slugifyProfileLabel,
   PROFILE_SLUG_RE,
   MCP_PROFILE_PATH_RE,
+  profileDashboardHref,
 } from '../src/lib/profileSlugs';
 
 let failures = 0;
@@ -76,6 +77,14 @@ check("'Research Bot' collides with 'RESEARCH.BOT'",
   slugifyProfileLabel('Research Bot') === slugifyProfileLabel('RESEARCH.BOT'));
 check("'Research Bot' does not collide with 'Research Bot 2'",
   slugifyProfileLabel('Research Bot') !== slugifyProfileLabel('Research Bot 2'));
+
+console.log('profileDashboardHref (approval "Back to dashboard"):');
+check('valid slug → that profile', profileDashboardHref('research-bot') === '/dashboard/agents/research-bot');
+check('missing slug → /dashboard', profileDashboardHref(undefined) === '/dashboard');
+check('empty slug → /dashboard', profileDashboardHref('') === '/dashboard');
+check('path-traversal slug → /dashboard', profileDashboardHref('../accounts') === '/dashboard');
+check('open-redirect slug → /dashboard', profileDashboardHref('//evil.example.com') === '/dashboard');
+check('uppercase slug → /dashboard', profileDashboardHref('Research-Bot') === '/dashboard');
 
 if (failures) {
   console.error(`\n${failures} failure(s)`);
