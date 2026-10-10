@@ -118,6 +118,18 @@ capability scope (e.g. "capabilities 04 and 06 only" for a re-test).
   execute tests and report. If a test cannot run because of a code or
   environment problem, record it as `fail` or `skip` with specifics and let
   the orchestrator decide. Do not "fix" anything, however obvious.
+- **Never break the stored QA bearer's own connection.** The token from
+  `qa-mcp-token.ts` is bound to one FGAC connection and its profile. Do not
+  revoke, block, delete or re-scope that connection or the profile it is bound
+  to — on 2026-10-09 a runner revoked it for a key-lifecycle check and ~110
+  assertions went BLOCKED for the rest of the run (a connection under a revoked
+  profile cannot be re-attached). Lifecycle assertions that revoke or block must
+  target a different connection/profile; if none exists, mark them BLOCKED
+  ("needs a scratch connection") instead of using the bearer's own.
+- **Real email goes only to the two QA accounts.** Any send that can succeed
+  (a whitelist or `*` rule, an approved retry) is addressed to USER_A or
+  USER_B. `blocked@example.net` is for denials only — if a rule could
+  let it through, use USER_B instead.
 - **Never write to the database to simulate user actions** (CLAUDE.md
   Database Rule 7). State changes go through the UI or the app's own APIs
   exactly as the runbook prescribes. Read-only queries for evidence are fine.

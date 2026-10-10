@@ -102,7 +102,7 @@
 
 ### A5: Raw send to non-whitelisted recipient is denied
 - `google_api_modify` to `gmail/v1/users/me/messages/send` with a base64url
-  RFC 2822 `raw` body addressed to `blocked@untrusted.com`
+  RFC 2822 `raw` body addressed to `blocked@example.net`
 - **Expected**: Unauthorized-recipient denial (recipient parsed out of the
   raw message); nothing is sent
 
@@ -155,9 +155,9 @@
   because nothing at its decision point referenced the raw fallback.
 
 ### A11: drafts/send rides the send whitelist via server-side recipient resolution
-- Create a draft addressed to `blocked@untrusted.com`:
+- Create a draft addressed to `blocked@example.net`:
   `google_api_modify` POST `gmail/v1/users/me/drafts` with body
-  `{"message":{"raw":"<base64url RFC 2822 to blocked@untrusted.com>"}}`
+  `{"message":{"raw":"<base64url RFC 2822 to blocked@example.net>"}}`
   (the create itself must SUCCEED — drafting is a plain mailbox write).
   Then `google_api_modify` POST `gmail/v1/users/me/drafts/send` with body
   `{"id":"<draftId>"}`.

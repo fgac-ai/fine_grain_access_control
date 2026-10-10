@@ -12,8 +12,12 @@
  * carry no `aud` (see src/lib/mcpAudience.ts), and every preview uses dev Clerk.
  * Production is refused outright — this script never touches the prod instance.
  *
- *   start  [--user A|B] [--base URL]   register (or reuse) the DCR client, print the
- *                                      authorize URL to open in the QA browser
+ *   start  [--user A|B] [--base URL] [--new-client]
+ *                                      register (or reuse) the DCR client, print the
+ *                                      authorize URL to open in the QA browser.
+ *                                      --new-client: register a fresh client, i.e. a new
+ *                                      FGAC connection (recovery when the old one was
+ *                                      blocked or its profile revoked)
  *   finish <redirected URL | code> [--user A|B]
  *                                      exchange the code, store the refresh token
  *   token  [--user A|B] [--out PATH]   write a valid access token to a 0600 file and
@@ -128,7 +132,7 @@ async function start() {
   const u = userLabel();
   const issuer = await issuerFor(arg('base'));
   let s = load(u);
-  if (!s || s.issuer !== issuer) {
+  if (!s || s.issuer !== issuer || process.argv.includes('--new-client')) {
     const redirect_uri = `${issuer}${REDIRECT_PATH}`;
     const res = await fetch(`${issuer}/oauth/register`, {
       method: 'POST',

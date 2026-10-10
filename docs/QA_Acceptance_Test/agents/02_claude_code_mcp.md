@@ -82,7 +82,7 @@ tmux send-keys -t fgac-qa "Send an email to $USER_B_EMAIL with subject 'QA CC MC
 
 ### A2: Send to blocked address
 ```bash
-tmux send-keys -t fgac-qa "Send an email to blocked@untrusted.com with subject 'Blocked'" Enter
+tmux send-keys -t fgac-qa "Send an email to blocked@example.net with subject 'Blocked'" Enter
 ```
 - [ ] Claude Code reports whitelist error from fgac
 
