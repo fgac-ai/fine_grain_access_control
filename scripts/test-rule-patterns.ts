@@ -17,6 +17,8 @@
  * The load-bearing test here is INVARIANT (bottom): the string validated on
  * write must be byte-identical to the string compiled on read.
  */
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import {
   globToRegex,
   validateRulePattern,
@@ -135,6 +137,39 @@ function main() {
       `${JSON.stringify(p)}: validated string is exactly globToRegex(pattern)`,
       validated.ok && validated.regex === globToRegex(p),
     );
+  }
+
+  // ─── "Block Sign In Alerts" template ──────────────────────────────────────
+  // Migration 0022 moves stored legacy rows onto whatever the template seeds
+  // today. If the seed changes again, the repair must follow it — otherwise
+  // old and new holders of the same-named rule match different mail.
+  console.log('\n"Block Sign In Alerts": legacy pattern vs the template seed:');
+  const root = join(__dirname, '..');
+  const actionsSrc = readFileSync(join(root, 'src/app/dashboard/actions.ts'), 'utf8');
+  const seed = actionsSrc.match(/ruleName: "Block Sign In Alerts",[\s\S]*?regexPattern: "([^"]+)"/)?.[1];
+  const migration = readFileSync(
+    join(root, 'src/db/migrations/0023_tighten_legacy_sign_in_template_rule.sql'), 'utf8');
+  check('template seed is found in actions.ts', !!seed);
+  check(`migration 0022 rewrites to the template seed (${JSON.stringify(seed)})`,
+    !!seed && migration.includes(`SET "regex_pattern" = '${seed}'`));
+  check('migration 0022 only touches the exact legacy pattern',
+    migration.includes(`"regex_pattern" = 'Sign In'`));
+
+  const legacy = compileRulePattern('Sign In')!;
+  const tightened = compileRulePattern(seed ?? 'sign-in')!;
+  const ALERTS = [
+    'Security alert: New sign-in to your account',
+    'Unusual sign-in activity',
+    'New sign-in on Mac',
+  ];
+  const BUSINESS = [
+    'Please sign in to the portal to submit your timesheet',
+    'Sign in to view your invoice',
+  ];
+  for (const s of ALERTS) check(`seed blocks alert: ${JSON.stringify(s)}`, tightened.test(s));
+  for (const s of BUSINESS) {
+    check(`legacy pattern over-blocks: ${JSON.stringify(s)}`, legacy.test(s));
+    check(`seed lets through: ${JSON.stringify(s)}`, !tightened.test(s));
   }
 
   if (failures > 0) {
