@@ -23,6 +23,8 @@ import {
 import { eq, and } from 'drizzle-orm';
 import { NextRequest, NextResponse } from 'next/server';
 import { connectionsDeepLink } from '@/lib/dashboardAgentLinks';
+import { linkBase } from '@/lib/linkOrigin';
+import { requestOrigin } from '@/lib/temporaryApiKeys';
 
 const DASHBOARD_URL = process.env.NEXT_PUBLIC_APP_URL
   || (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : null)
@@ -146,7 +148,7 @@ export async function POST(request: NextRequest) {
 
   // --- Return based on status ---
   if (connection.status === 'pending') {
-    const dashboardUrl = await connectionsDeepLink(DASHBOARD_URL, user.id);
+    const dashboardUrl = await connectionsDeepLink(linkBase(DASHBOARD_URL, process.env, requestOrigin(request)), user.id);
     return NextResponse.json({
       status: 'pending',
       message: '⚠️ This connection has not been approved yet.',
@@ -170,7 +172,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       status: 'approved_no_key',
       message: 'Connection approved but no proxy key assigned. Ask user to assign one in the dashboard.',
-      dashboard_url: await connectionsDeepLink(DASHBOARD_URL, user.id),
+      dashboard_url: await connectionsDeepLink(linkBase(DASHBOARD_URL, process.env, requestOrigin(request)), user.id),
     });
   }
 
