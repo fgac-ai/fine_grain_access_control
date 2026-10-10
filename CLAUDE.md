@@ -105,7 +105,7 @@ QA execution is delegated to cost-tiered subagents defined in `.claude/agents/`:
 `docs/QA_Acceptance_Test/qa-results.json`; `qa-smoke` and `deploy-watcher` (Haiku) handle
 mechanical polling and smoke checks; `qa-coverage-auditor` (Sonnet) adversarially reviews
 results; `qa-setup-driver` (inherits the session model) drives the browser setup flows.
-Four rules bind this architecture:
+Five rules bind this architecture:
 
 1. **Only the orchestrator (main session) edits source, schema, or config.** Runners
    execute and report; a runner that hits a code problem records it, never fixes it.
@@ -132,6 +132,22 @@ Four rules bind this architecture:
    earlier were unaffected. Every runner prompt states the context plainly: QA of
    FGAC's own Google integration against a local or preview build, using the two test
    accounts we own.
+5. **MCP bearers come from `scripts/qa-mcp-token.ts`, never a per-run consent click.**
+   A refresh token stored once in the main clone's `.secrets/qa-mcp/` yields a fresh
+   USER_A bearer that works on localhost and every preview (dev Clerk tokens carry no
+   `aud`). Runners call `token`/`check`; a fresh DCR client + consent "Allow" per run
+   is what the auto-mode classifier kept denying (2026-10-05/07/08), stalling every
+   train's authenticated QA. Exit 3 = a mint is needed (`start`/`finish` via
+   `qa-setup-driver`; `start --new-client` when the old connection was orphaned); the
+   script refuses production.
+
+   **Minting is pre-approved, permanently (Ken, 2026-10-09: "runner may accept both
+   consent screens don't ask again!").** A runner may click Allow on the Clerk consent
+   screen for a `FGAC QA token (USER_A|USER_B)` client — first mint, re-mint, or
+   `--new-client` recovery — on the dev Clerk instance, for the two QA accounts, against
+   local or preview builds, without asking. Never end a turn or a QA run asking whether
+   to mint. The hard limits of Local Development rule 5 still apply (no passwords, no
+   new accounts, only these two accounts, never production).
 
 QA environments run sequentially (they share one dev server, one Neon branch, and the QA
 accounts/keys — lifecycle capabilities mutate that shared state). Targeted re-tests
@@ -375,6 +391,11 @@ deploy of that git branch. Facts that are easy to get wrong:
     versions in one week and the 2026-09-26 prune died mid-drift; bump the pin on
     purpose, re-verifying the subcommands listed in that file. A failed delete is
     reported and skipped, never an abort — the kept table and 💰 line always print.
+  - **Every Neon call goes through `runNeonctl` in that file** — stdin closed (`neonctl api`
+    reads stdin when it is not a TTY and hangs otherwise) and transient failures retried.
+    `Cannot read properties of undefined (reading 'branches')` is a *transient* API
+    failure the CLI swallows, not an auth problem; re-auth (`npx neonctl auth`, a user
+    action) only when the script classifies the failure as `auth`.
   - Leftover worktree directories no longer pin database branches. `npm run
     worktrees:report` lists finished ones; it only reports — removing a worktree stays
     a manual decision, because a clean merged directory can still be a live session's cwd.

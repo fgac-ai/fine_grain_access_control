@@ -11,7 +11,7 @@ import {
   type Verdict,
   type MergedRefs,
 } from './lib/neon-branch-classifier'
-import { neonctl, NEONCTL_SPEC } from './lib/neonctl'
+import { runNeonctl, runNeonctlJson, neonctlHint, NEONCTL_SPEC } from './lib/neonctl'
 
 // Load environment variables from .env.local
 config({ path: '.env.local' })
@@ -51,14 +51,14 @@ const DRY_RUN = process.argv.includes('--dry-run');
 /** Read-side neonctl call. A failure here is fatal — nothing sensible can be
  * decided without the branch and endpoint lists. */
 function runNeonCmd(cmd: string) {
-  try {
-    const output = execSync(neonctl(`${cmd} -o json`), { encoding: 'utf-8' });
-    return JSON.parse(output);
-  } catch (error: any) {
-    console.error(`❌ Neon CLI error executing: ${cmd}`);
-    console.error(error.message);
+  const r = runNeonctlJson(cmd);
+  if (r.error !== undefined) {
+    console.error(`❌ Neon CLI error (${r.kind}) executing: ${cmd}`);
+    console.error(r.error);
+    console.error(neonctlHint(r.kind!));
     process.exit(1);
   }
+  return r.result;
 }
 
 /** Write-side neonctl call that returns the failure instead of exiting. Success
@@ -66,13 +66,8 @@ function runNeonCmd(cmd: string) {
  * a CLI that prints nothing (or prose) after a successful delete cannot be
  * misreported as a failed one. */
 function tryNeonCmd(cmd: string): { error: string | null } {
-  try {
-    execSync(neonctl(`${cmd} -o json`), { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
-    return { error: null };
-  } catch (error: any) {
-    const stderr = error?.stderr?.toString?.() ?? '';
-    return { error: (stderr || error?.message || 'unknown neonctl error').trim() };
-  }
+  const r = runNeonctl(`${cmd} -o json`, { retries: 0 });
+  return { error: r.error ?? null };
 }
 
 /**

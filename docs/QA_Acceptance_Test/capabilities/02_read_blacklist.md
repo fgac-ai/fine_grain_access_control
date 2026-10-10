@@ -61,7 +61,7 @@ pattern cannot pass. With `send_whitelist` = `*@umich.edu` (matching
 - send to `USER_B_EMAIL` → **200**, response carries a Gmail message `id` and
   `labelIds: ["SENT"]`. This delivers real mail to the QA account, which is
   expected and permitted.
-- send to `blocked@untrusted.com` → **403** *"...add 'blocked@untrusted.com'
+- send to `blocked@example.net` → **403** *"...add 'blocked@example.net'
   to the sending whitelist."*
 
 The wording matters: the zero-rules branch ends *"Default access is DENIED."*

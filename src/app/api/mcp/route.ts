@@ -26,7 +26,8 @@ import {
 import { eq, and, isNull, gt, sql } from 'drizzle-orm';
 import {
   TEMP_KEY_PURPOSES, TEMP_KEY_MAX_LIVE_PER_CONNECTION, TEMP_KEY_MAX_TTL_MINUTES, type TempKeyPurpose,
-  clampTtlMinutes, expectedBytesBucket, generateTemporaryKey, requestOrigin, temporaryKeyRecipe,
+  clampTtlMinutes, deploymentHostCopy, deploymentOrigin, expectedBytesBucket, generateTemporaryKey, reachabilityFallback, requestOrigin,
+  sanitizeCheckOutput, TEMP_KEY_REACHABILITY, temporaryKeyRecipe,
 } from '@/lib/temporaryApiKeys';
 import { filterLiveDelegatedAccess } from '@/db/delegationQueries';
 import { findActiveDelegationOwner } from '@/db/delegationOwner';
@@ -39,7 +40,7 @@ import { runWithToolCallProps, addToolCallProps, getToolCallProps, runWithReques
 import { normalizeToolArguments, unknownArgumentKeys, describeArgumentFailure, rewriteValidationFailureBody, type AliasHit, type ZodIssueLike } from '@/lib/mcpArgumentGuidance';
 import { cleanResourceName } from '@/lib/pickerRecoveryCopy';
 import { GOOGLE_FETCH_TIMEOUT_MS, CLERK_TOKEN_TIMEOUT_MS, withTimeout, isUpstreamTimeout } from '@/lib/upstreamTimeouts';
-import { classifyMcpClient, classifyTransportRejection, installFingerprint, parseInitializeClientInfo, parseRpcEnvelope, parseValidationFailure, normalizeValidationIssue, resourceIdHash, validationFailureProps, type McpClientInfo } from '@/lib/mcpClientSignals';
+import { classifyMcpClient, productClientName, classifyTransportRejection, installFingerprint, parseInitializeClientInfo, parseRpcEnvelope, parseValidationFailure, normalizeValidationIssue, resourceIdHash, validationFailureProps, type McpClientInfo } from '@/lib/mcpClientSignals';
 import { classifyClientNameTransition, nextConnectionClientName, toolCallClientName } from '@/lib/mcpClientName';
 import { recordEagerResolve, shouldSkipEagerResolve } from '@/lib/connectionTouchMemo';
 import { after } from 'next/server';
@@ -107,6 +108,9 @@ function cleanUrl(value: string | undefined | null): string | null {
 const DASHBOARD_URL = cleanUrl(process.env.NEXT_PUBLIC_APP_URL)
   || (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL.trim()}` : null)
   || 'http://localhost:3000';
+
+/** Host agents are told to reach and ping before minting a temporary key (see deploymentHostCopy). */
+const DEPLOYMENT_ORIGIN = deploymentOrigin();
 
 /**
  * One-click reconnect link, bound to the account it is meant to repair. The
@@ -1900,8 +1904,9 @@ const LARGE_FILE_HINT_CHARS = 1_500_000;
 function largeFileHint(totalChars: number, windowChars: number): string {
   addToolCallProps({ large_file_hint_shown: true });
   const calls = Math.ceil(totalChars / windowChars);
-  return `This payload needs about ${calls} windowed calls. If you can run code with network access, ` +
-    `create_temporary_api_key (purpose "download") fetches it in one request instead.`;
+  return deploymentHostCopy(`This payload needs about ${calls} windowed calls. If code you run can reach fgac.ai ` +
+    `(check: curl -sS https://fgac.ai/api/proxy/ping prints fgac-proxy-ok), create_temporary_api_key ` +
+    `(purpose "download") fetches it in one request instead; otherwise keep windowing.`, DEPLOYMENT_ORIGIN);
 }
 
 function windowPayload(payload: string, offset: number, limit: number | undefined) {
@@ -2935,7 +2940,7 @@ async function executeRawGoogleCall(
 function toolConfig<S extends z.ZodRawShape>(def: FgacToolDef, inputSchema: S) {
   return {
     title: def.title,
-    description: def.description,
+    description: deploymentHostCopy(def.description, DEPLOYMENT_ORIGIN),
     inputSchema,
     annotations: toolAnnotations(def),
   };
@@ -4001,10 +4006,12 @@ function registerFgacTools(server: FgacMcpServer) {
         purpose: z.enum(TEMP_KEY_PURPOSES).optional().describe('What the script will do: upload (file to Drive), download (Drive file or Gmail attachment), send_attachment (email with a large attachment), bulk_calls, or other. Selects the recipe returned with the key. Default other.'),
         ttl_minutes: z.number().optional().describe(`Key lifetime in minutes, 1–${TEMP_KEY_MAX_TTL_MINUTES} (default 15). Ask for more only when a transfer will take longer; an expired upload can be resumed with a new key.`),
         expected_bytes: z.number().optional().describe('Approximate size of the file or payload, if known (used for usage statistics only).'),
+        reachability: z.enum(TEMP_KEY_REACHABILITY).optional().describe('Result of the no-key check (curl -sS <host>/api/proxy/ping): ok = it printed fgac-proxy-ok (mints the key); unreachable = a connection error or any other reply; command_denied = your environment refused to run the command. unreachable and command_denied create no key.'),
+        check_output: z.string().optional().describe('The first line the check printed, or the refusal message, if it failed. Never include a key.'),
       }),
-      async ({ purpose, ttl_minutes, expected_bytes }, { authInfo }) => {
+      async ({ purpose, ttl_minutes, expected_bytes, reachability, check_output }, { authInfo }) => {
         const chosen: TempKeyPurpose = purpose ?? 'other';
-        addToolCallProps({ temp_key_purpose: chosen });
+        addToolCallProps({ temp_key_purpose: chosen, temp_key_reachability: reachability ?? 'not_reported' });
         const conn = await requireApproval(authInfo);
         if ('content' in conn) {
           const userId = authInfo?.extra?.userId as string | undefined;
@@ -4015,20 +4022,35 @@ function registerFgacTools(server: FgacMcpServer) {
           captureServerEvent(conn.user.clerkUserId, 'temp_api_key_refused', { reason: 'no_profile', purpose: chosen, client_id: conn.clientId });
           return textResult('❌ This connection is not bound to an agent profile yet, so there are no permissions to put on a key. Ask the user to finish approving the connection in the FGAC dashboard.');
         }
-        if (ttl_minutes !== undefined && ttl_minutes < 1) {
-          return textResult(`❌ ttl_minutes must be between 1 and ${TEMP_KEY_MAX_TTL_MINUTES}. Omit it for the 15-minute default. No key was created.`);
-        }
-        const ttl = clampTtlMinutes(ttl_minutes);
+        const baseUrl = (authInfo?.extra?.requestOrigin as string | undefined) ?? DASHBOARD_URL;
         const now = new Date();
-
-        const [{ live }] = await db
+        const liveKeys = () => db
           .select({ live: sql<number>`count(*)::int` })
           .from(temporaryApiKeys)
           .where(and(
             eq(temporaryApiKeys.connectionId, conn.connectionId),
             isNull(temporaryApiKeys.revokedAt),
             gt(temporaryApiKeys.expiresAt, now),
-          ));
+          ))
+          .then(r => r[0].live);
+
+        // A failed reachability check, reported by the agent: no key. This is the only
+        // signal that separates a sandbox blocking fgac.ai from the agent's own permission
+        // rules refusing the command — neither request ever reaches us.
+        if (reachability && reachability !== 'ok') {
+          const afterMint = (await liveKeys()) > 0;
+          captureServerEvent(conn.user.clerkUserId, 'temp_api_key_check_failed', {
+            reachability, after_mint: afterMint, check_output: sanitizeCheckOutput(check_output), purpose: chosen,
+            client_id: conn.clientId, client_name: conn.clientName ?? undefined, connection_id: conn.connectionId,
+          });
+          return textResult(reachabilityFallback(reachability, baseUrl, afterMint));
+        }
+
+        if (ttl_minutes !== undefined && ttl_minutes < 1) {
+          return textResult(`❌ ttl_minutes must be between 1 and ${TEMP_KEY_MAX_TTL_MINUTES}. Omit it for the 15-minute default. No key was created.`);
+        }
+        const ttl = clampTtlMinutes(ttl_minutes);
+        const live = await liveKeys();
         if (live >= TEMP_KEY_MAX_LIVE_PER_CONNECTION) {
           captureServerEvent(conn.user.clerkUserId, 'temp_api_key_refused', {
             reason: 'rate_capped', purpose: chosen, client_id: conn.clientId, live_temp_keys: live,
@@ -4060,11 +4082,11 @@ function registerFgacTools(server: FgacMcpServer) {
           parent_proxy_key_id: conn.proxyKeyId,
           temp_key_id: row.id,
           live_temp_keys: live + 1,
+          reachability: reachability ?? 'not_reported',
         };
         captureServerEvent(conn.user.clerkUserId, 'temp_api_key_created', props);
         addToolCallProps({ temp_key_id: row.id, ttl_granted: ttl.granted });
 
-        const baseUrl = (authInfo?.extra?.requestOrigin as string | undefined) ?? DASHBOARD_URL;
         return textResult(temporaryKeyRecipe({
           key: generated.key, baseUrl, purpose: chosen, ttlGranted: ttl.granted,
           ttlRequested: ttl_minutes, capped: ttl.capped, expiresAt,
@@ -4422,12 +4444,22 @@ const verifyMcpAuth = async (req: Request, bearerToken?: string) => {
   // client's name/version exist server-side — and this auth wrapper is the
   // only code that still holds the raw Request. Parsed from a clone;
   // undefined for every other request.
-  const clientInfo = await parseInitializeClientInfo(req);
+  const reportedClientInfo = await parseInitializeClientInfo(req);
+  const verifiedClientId = (authInfo as { clientId?: string } | undefined)?.clientId;
+  // A client that reports only its SDK's default name (`mcp` — Hermes Agent)
+  // is named from its verified OAuth client_id when that is a known product's
+  // metadata-document URL, so its connection row and tool calls carry the
+  // product. The raw report rides along as client_name_reported.
+  const productName = productClientName(reportedClientInfo?.name, verifiedClientId);
+  const clientInfo: McpClientInfo | undefined = reportedClientInfo && productName && productName !== reportedClientInfo.name
+    ? { ...reportedClientInfo, name: productName }
+    : reportedClientInfo;
+  const clientNameReported = clientInfo !== reportedClientInfo ? reportedClientInfo?.name : undefined;
   const userAgent = req.headers.get('user-agent') ?? undefined;
   // Registry crawler / health probe / our own probe / Claude product / other —
   // a measurement label (nothing is authorized or rate-limited on it) that
   // lets the auth alert and the install funnel leave scanner traffic out.
-  const clientClass = classifyMcpClient({ userAgent, clientName: clientInfo?.name });
+  const clientClass = classifyMcpClient({ userAgent, clientName: clientInfo?.name, clientId: verifiedClientId ?? clientIdHint });
   // Set by middleware when the client connected via /api/mcp/<slug>.
   const profileSlug = req.headers.get('x-fgac-profile-slug') ?? undefined;
 
@@ -4521,6 +4553,7 @@ const verifyMcpAuth = async (req: Request, bearerToken?: string) => {
     if (clientInfo && userId) {
       captureServerEvent(userId, 'mcp_client_initialize', {
         client_name: clientInfo.name,
+        client_name_reported: clientNameReported,
         client_version: clientInfo.version,
         client_id: clientId,
         user_agent: userAgent,

@@ -71,7 +71,7 @@ claude -p "Using the fgac skill, send an email to \$USER_B_EMAIL with subject 'Q
 
 ### A2: Send to blocked address
 ```bash
-claude -p "Using the fgac skill, send an email to blocked@untrusted.com with subject 'Should Block' and body 'Test'" \
+claude -p "Using the fgac skill, send an email to blocked@example.net with subject 'Should Block' and body 'Test'" \
   --allowedTools "Bash(node:*)" --output-format json --max-turns 5 --permission-mode auto
 ```
 - [ ] Result contains "blocked", "403", "Unauthorized", or "whitelist"

@@ -30,9 +30,19 @@ everywhere downstream.
    Okta/SSO, or 2FA prompt means the built-in session lapsed — report it in
    one line, not as a question), never create an account, only these two
    accounts, only against local/preview.
-4. Save the final dashboard screenshot to `.playwright/qa_proof_setup.png`
+   Click consent buttons with `computer` (`left_click`), never a JS click.
+4. **MCP bearer**: if `npx tsx scripts/qa-mcp-token.ts token --user A` exits
+   3, do the one-time mint: `start --user A --base <url>`, open the printed
+   authorize URL in the built-in browser as USER_A, click Allow (trusted
+   click), read the landed `…/qa-cb?code=` URL from the tab, then
+   `finish '<url>' --user A` and `check --base <url>`. The refresh token it
+   stores (main clone `.secrets/qa-mcp/`) serves every later run on localhost
+   and previews — never mint per run. Minting (including `--user B` and
+   `start --new-client` recovery) is pre-approved permanently (CLAUDE.md QA
+   rule 5, Ken 2026-10-09) — never ask.
+5. Save the final dashboard screenshot to `.playwright/qa_proof_setup.png`
    (never the repo root).
-5. Walk the coverage checkpoint from `.claude/commands/qa-setup.md` item by
+6. Walk the coverage checkpoint from `.claude/commands/qa-setup.md` item by
    item and verify each in the UI.
 
 ## Hard rules

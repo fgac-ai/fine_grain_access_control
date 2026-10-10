@@ -24,11 +24,16 @@ process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = process.env.CLERK_PUBLISHABLE_KE
 delete process.env.NEXT_PUBLIC_POSTHOG_KEY;
 delete process.env.NEXT_PUBLIC_POSTHOG_HOST;
 
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { NextRequest } from 'next/server';
 import {
   clampTtlMinutes, expectedBytesBucket, generateTemporaryKey, hashTemporaryKey, isTemporaryKey,
-  temporaryKeyRecipe, hashUploadId, TEMP_KEY_PREFIX, PROXY_MAX_REQUEST_BYTES,
+  temporaryKeyRecipe, hashUploadId, TEMP_KEY_PREFIX, PROXY_MAX_REQUEST_BYTES, PING_OK,
+  deploymentHostCopy, deploymentOrigin, reachabilityFallback, sanitizeCheckOutput, TEMP_KEY_REACHABILITY,
+  createPingEventGate, requestSource, tempKeyPingOutcome,
 } from '../src/lib/temporaryApiKeys';
+import { TOOL_DEFS } from '../src/app/api/mcp/toolDefs';
 
 const OWNER_EMAIL = 'owner@example.com';
 const ALLOWED = 'allowed@example.com';
@@ -139,6 +144,103 @@ async function main() {
   check('recipe allows the temp file and forbids only what leaves the session',
     allRecipes.every(r => r.includes('private temp file (chmod 600)') && !r.includes('write it to a file')));
   check('recipe explains users/me vs users/<address>', allRecipes.every(r => r.includes('users/me is your FGAC sign-in address') && r.includes('list_accounts')));
+  // Egress wall (plan claude/temp-key-never-used_v1): half of claude-code's
+  // keys were minted in sandboxes that cannot reach FGAC. The check must come
+  // before the work, and the fallback must be named.
+  check('every recipe starts with an authenticated ping on the serving host, before any Google call',
+    allRecipes.every(r => r.includes('https://preview.example.com/api/proxy/ping') && r.includes(`${PING_OK} key-valid`)
+      && r.indexOf('/api/proxy/ping') < r.indexOf('/api/proxy/', r.indexOf('/api/proxy/ping') + 1)));
+  check('every recipe names the windowed fallback, forbids re-minting, and names the host to allow',
+    allRecipes.every(r => r.includes('offset and limit') && r.includes('do not create another one this session')
+      && r.includes('allowing preview.example.com')));
+  const desc = TOOL_DEFS.create_temporary_api_key.description;
+  check('tool description gives a no-key reachability check before minting', desc.includes('https://fgac.ai/api/proxy/ping')
+    && desc.includes(PING_OK) && desc.includes('does not create a key') && desc.includes('offset+limit'));
+  check('tool description asks for the check result as reachability, naming all three values',
+    TEMP_KEY_REACHABILITY.every(r => desc.includes(r)) && desc.includes('pass what happened as reachability'));
+  check('attachment pointer conditions on reaching fgac.ai, not on "network access"',
+    !TOOL_DEFS.gmail_get_attachment.description.includes('network access') && TOOL_DEFS.gmail_get_attachment.description.includes('reach fgac.ai'));
+  // Tool copy follows the serving deployment (train QA 2026-10-08, A12: an agent on a
+  // preview pinged production, got a non-ok answer and correctly declined to mint).
+  const preview = 'https://fine-grain-access-control-abc.vercel.app';
+  const previewDesc = deploymentHostCopy(desc, preview);
+  check('production copy is unchanged', deploymentHostCopy(desc, 'https://fgac.ai') === desc);
+  check('preview copy pings the preview, never fgac.ai', previewDesc.includes(`${preview}/api/proxy/ping`)
+    && !/fgac\.ai/.test(previewDesc.replace(/fgac-proxy-ok/g, '')));
+  check('preview copy names the preview host to reach', previewDesc.includes('can reach fine-grain-access-control-abc.vercel.app:'));
+  check('host rewrite leaves other copy alone', deploymentHostCopy('FGAC rules; fgac-proxy-ok; gmail.fgac.ai/x', preview) === 'FGAC rules; fgac-proxy-ok; gmail.fgac.ai/x');
+  check('deploymentOrigin: production → fgac.ai', deploymentOrigin({ VERCEL_ENV: 'production', VERCEL_URL: 'x.vercel.app' }) === 'https://fgac.ai');
+  check('deploymentOrigin: preview → its deployment URL', deploymentOrigin({ VERCEL_ENV: 'preview', VERCEL_URL: 'x.vercel.app' }) === 'https://x.vercel.app');
+  check('deploymentOrigin: local → localhost:PORT', deploymentOrigin({ PORT: '52330' }) === 'http://localhost:52330' && deploymentOrigin({}) === 'http://localhost:3000');
+  // Reachability reports (2026-10-09): the agent says why a check failed, because a
+  // blocked sandbox and a refused command both look like silence from our side.
+  const net = reachabilityFallback('unreachable', preview, false);
+  const denied = reachabilityFallback('command_denied', preview, false);
+  check('unreachable: no key, sandbox network fix, preview host named', net.startsWith('No key was created.')
+    && net.includes("sandbox's network") && net.includes('fine-grain-access-control-abc.vercel.app') && net.includes('offset and limit'));
+  check('command_denied: no key, permission fix, says the network was never tried', denied.startsWith('No key was created.')
+    && denied.includes('permission rules') && denied.includes('network was never tried') && !denied.includes("sandbox's network"));
+  check('after a mint, the reply also says stop using the key and do not mint again',
+    reachabilityFallback('unreachable', preview, true).includes('do not create another one this session') && !net.includes('do not create another'));
+  check('check_output: first non-empty line only', sanitizeCheckOutput('\n  curl: (6) Could not resolve host  \nmore') === 'curl: (6) Could not resolve host');
+  check('check_output: key-shaped strings redacted', sanitizeCheckOutput('Bearer sk_proxy_tmp_abc123 failed sk_proxy_live_x')
+    === 'Bearer [redacted] failed sk_proxy_[redacted]');
+  check('check_output: capped at 160 chars, absent stays absent', sanitizeCheckOutput('x'.repeat(500))?.length === 160
+    && sanitizeCheckOutput(undefined) === undefined && sanitizeCheckOutput('  \n ') === undefined);
+  check('every recipe asks for a reachability report when the keyed check fails', allRecipes.every(r =>
+    r.includes('reachability "unreachable"') && r.includes('"command_denied"')));
+  {
+    const route = readFileSync(join(__dirname, '..', 'src', 'app', 'api', 'mcp', 'route.ts'), 'utf8');
+    const handler = route.slice(route.indexOf('TOOL_DEFS.create_temporary_api_key.name'), route.indexOf('// ── get_my_permissions'));
+    check('route: a failed report is captured and returns before any key is inserted',
+      handler.indexOf("'temp_api_key_check_failed'") > -1 && handler.indexOf("'temp_api_key_check_failed'") < handler.indexOf('db.insert(temporaryApiKeys)')
+      && /reachability && reachability !== 'ok'/.test(handler));
+    check('route: mints record the reported reachability (not_reported when absent)', /reachability: reachability \?\? 'not_reported'/.test(handler));
+    const pingSrc = readFileSync(join(__dirname, '..', 'src', 'app', 'api', 'proxy', 'ping', 'route.ts'), 'utf8');
+    check('ping: the keyless check is counted anonymously, without a person profile',
+      pingSrc.includes("'proxy_ping_checked'") && pingSrc.includes('$process_person_profile: false'));
+  }
+  // The anonymous ping event is capped: public, unauthenticated, crawlable.
+  {
+    const gate = createPingEventGate({ perSourceMs: 600_000, perMinute: 3, maxSources: 4 });
+    const t = 1_000_000;
+    check('ping gate: first ping from a source is counted', gate('a', t) === true);
+    check('ping gate: repeats from the same source within the window are not', gate('a', t + 1000) === false && gate('a', t + 599_000) === false);
+    check('ping gate: the same source counts again after the window', gate('a', t + 600_000) === true);
+    const g2 = createPingEventGate({ perSourceMs: 600_000, perMinute: 3, maxSources: 100 });
+    const firstMinute = ['s1', 's2', 's3', 's4', 's5'].map(src => g2(src, t));
+    check('ping gate: at most perMinute events per minute across sources', JSON.stringify(firstMinute) === '[true,true,true,false,false]');
+    check('ping gate: the per-minute budget resets', g2('s6', t + 60_000) === true);
+    const g3 = createPingEventGate({ perSourceMs: 600_000, perMinute: 1000, maxSources: 3 });
+    ['x1', 'x2', 'x3', 'x4'].forEach(src => g3(src, t));
+    check('ping gate: memory is bounded (the source map clears past maxSources)', g3('x1', t + 1) === true);
+    check('requestSource: first x-forwarded-for hop, then x-real-ip, else unknown',
+      requestSource(new Headers({ 'x-forwarded-for': '203.0.113.7, 10.0.0.1' })) === '203.0.113.7'
+      && requestSource(new Headers({ 'x-real-ip': '198.51.100.2' })) === '198.51.100.2'
+      && requestSource(new Headers()) === 'unknown');
+    const pingSrc2 = readFileSync(join(__dirname, '..', 'src', 'app', 'api', 'proxy', 'ping', 'route.ts'), 'utf8');
+    check('ping: the anonymous event is gated, the response is not', /if \(pingEventGate\(requestSource\(request\.headers\)\)\) captureServerEvent/.test(pingSrc2)
+      && /\}\);\n    return text\(PING_OK\);/.test(pingSrc2));
+  }
+  // The ping mirrors the proxy: key-valid only when a real call would authenticate.
+  {
+    const now = new Date('2026-10-09T12:00:00Z');
+    const live = { revokedAt: null, expiresAt: new Date('2026-10-09T12:10:00Z') };
+    const parentOk = { revokedAt: null, expiresAt: null };
+    check('ping outcome: live key under a live profile is valid', tempKeyPingOutcome(live, parentOk, now) === 'valid');
+    check('ping outcome: revoked parent profile → parent-revoked (was valid before 2026-10-09)',
+      tempKeyPingOutcome(live, { revokedAt: new Date('2026-10-09T11:00:00Z'), expiresAt: null }, now) === 'parent-revoked');
+    check('ping outcome: expired parent profile → parent-expired',
+      tempKeyPingOutcome(live, { revokedAt: null, expiresAt: new Date('2026-10-09T11:59:00Z') }, now) === 'parent-expired');
+    check('ping outcome: missing parent → invalid', tempKeyPingOutcome(live, undefined, now) === 'invalid');
+    check('ping outcome: the key\'s own state wins over the parent\'s',
+      tempKeyPingOutcome({ revokedAt: new Date(), expiresAt: live.expiresAt }, undefined, now) === 'revoked'
+      && tempKeyPingOutcome({ revokedAt: null, expiresAt: new Date('2026-10-09T11:00:00Z') }, parentOk, now) === 'expired');
+    const pingSrc3 = readFileSync(join(__dirname, '..', 'src', 'app', 'api', 'proxy', 'ping', 'route.ts'), 'utf8');
+    check('ping route looks up the parent profile and uses tempKeyPingOutcome',
+      pingSrc3.includes('eq(proxyKeys.id, tempKey.parentKeyId)') && pingSrc3.includes('tempKeyPingOutcome(tempKey, parent)'));
+    check('every recipe says what key-revoked / key-parent-revoked mean', allRecipes.every(r => r.includes('key-parent-revoked')));
+  }
   const send = allRecipes[2];
   const [iRaw, iMedia, iResumable] = ['{"raw":', 'uploadType=media', 'uploadType=resumable'].map(s => send.indexOf(s));
   check('send_attachment recipe is ordered by size: JSON raw, then media, then resumable',
@@ -234,6 +336,29 @@ async function main() {
   reset(); tempKeyRow = {} as Row;
   r = await call('GET', 'gmail/v1/users/me/messages');
   check('an unknown temporary key is refused', r.status === 401 && r.google.length === 0, r);
+
+  console.log('temporary-api-keys — reachability ping:');
+  const ping = await import('../src/app/api/proxy/ping/route');
+  const pingCall = async (key?: string) => {
+    googleCalls = [];
+    const res = await ping.GET(new NextRequest('http://localhost:3000/api/proxy/ping', key ? { headers: { authorization: `Bearer ${key}` } } : {}));
+    return { status: res.status, text: await res.text(), google: googleCalls.length, cache: res.headers.get('cache-control') };
+  };
+  reset();
+  let p = await pingCall();
+  check('ping without a key answers the exact reachability string, uncached', p.status === 200 && p.text.trim() === PING_OK && p.cache === 'no-store', p);
+  p = await pingCall(TEMP.key);
+  check('ping with a live temporary key confirms the hand-off and never calls Google', p.status === 200 && p.text.trim() === `${PING_OK} key-valid` && p.google === 0, p);
+  tempKeyRow.expiresAt = minutesFromNow(-1);
+  p = await pingCall(TEMP.key);
+  check('ping with an expired key still proves reachability but says expired', p.status === 401 && p.text.startsWith(PING_OK) && p.text.includes('key-expired'), p);
+  reset(); tempKeyRow = {} as Row;
+  p = await pingCall(TEMP.key);
+  check('ping with a key FGAC never issued says key-invalid', p.status === 401 && p.text.includes('key-invalid'), p);
+  p = await pingCall('sk_proxy_parent');
+  check('ping refuses to validate a standing profile key', p.status === 401 && p.text.includes('key-not-temporary'), p);
+  const head = await ping.HEAD(new NextRequest('http://localhost:3000/api/proxy/ping', { method: 'HEAD' }));
+  check('HEAD ping answers 200 with no body', head.status === 200 && (await head.text()) === '', head.status);
 
   console.log('temporary-api-keys — size guard:');
   reset();

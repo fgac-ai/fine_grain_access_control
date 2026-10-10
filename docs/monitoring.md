@@ -26,7 +26,7 @@ Captured in `verifyMcpAuth` (`src/app/api/mcp/route.ts`):
 | `connection_resolve` | what the auth layer's eager `resolveConnection` did on this request: `ran` (four Neon round trips), `skipped` (touched within the last 5 minutes by the same user+client — `src/lib/connectionTouchMemo.ts`), `error`. Added 2026-09-08 |
 | `connection_resolve_ms` | wall time of that eager resolve when it ran; the per-request DB cost of a handshake (see 7.16) |
 | `user_agent`, `client_name` | who failed: the request's UA and, when the unauthenticated request was an MCP `initialize`, its self-reported `clientInfo.name`. Added 2026-09-10 so a 401 spike is diagnosable from this event alone (the registry-launch spike had to be attributed by joining `connector_install_started` by minute) |
-| `client_class`, `client_class_signal` | `claude` \| `internal` \| `scanner` \| `direct`, and the rule that decided it (`ua:SmitheryBot/`, `name:glama`, `keyword:probe`, `ua:self-link`). `scanner` = MCP registry crawlers, directory health probes, "MCP security" scanners, SEO bots — classified from **both** fields because about a third of them run on a stock `node` / `undici` / `Go-http-client` / `python-httpx` UA and only identify themselves in `clientInfo.name`. `classifyMcpClient` in `src/lib/mcpClientSignals.ts`; also stamped on `connector_install_started`. Since 2026-09-12 a `direct` row can carry `client_class_signal = 'ua:stock-runtime-no-name'`: a bare HTTP runtime UA (`Bun/`, `Python/… aiohttp/`, `Go-http-client/`, `node`, `undici`, `python-httpx/`) with no `clientInfo` at all — unnamed automation, still `direct` because the real SDKs run on the same runtimes, but not a client that broke (every SDK's first request is an `initialize` that names itself). Since 2026-09-25 a `direct` row can carry `client_class_signal = 'product:grok'` / `'product:cursor'`: a known third-party product (`PRODUCT_CLIENTS`), matched on `client_name` or user-agent before the scanner rules — Grok's add-time `grok-validator` handshake would otherwise read as a crawler via `keyword:validator`. Still `direct` (7.5 counts Anthropic products only), but named, so it leaves the unlabelled remainder in 7.21e and gets its own row in 7.21f. A measurement label only: nothing is blocked or rate-limited on it, and a 401 is the correct answer to every probe. Added 2026-09-10; see 7.21 |
+| `client_class`, `client_class_signal` | `claude` \| `internal` \| `scanner` \| `direct`, and the rule that decided it (`ua:SmitheryBot/`, `name:glama`, `keyword:probe`, `ua:self-link`). `scanner` = MCP registry crawlers, directory health probes, "MCP security" scanners, SEO bots — classified from **both** fields because about a third of them run on a stock `node` / `undici` / `Go-http-client` / `python-httpx` UA and only identify themselves in `clientInfo.name`. `classifyMcpClient` in `src/lib/mcpClientSignals.ts`; also stamped on `connector_install_started`. Since 2026-09-12 a `direct` row can carry `client_class_signal = 'ua:stock-runtime-no-name'`: a bare HTTP runtime UA (`Bun/`, `Python/… aiohttp/`, `Go-http-client/`, `node`, `undici`, `python-httpx/`) with no `clientInfo` at all — unnamed automation, still `direct` because the real SDKs run on the same runtimes, but not a client that broke (every SDK's first request is an `initialize` that names itself). Since 2026-09-25 a `direct` row can carry `client_class_signal = 'product:grok'` / `'product:cursor'`: a known third-party product (`PRODUCT_CLIENTS`), matched on `client_name` or user-agent before the scanner rules — Grok's add-time `grok-validator` handshake would otherwise read as a crawler via `keyword:validator`. Since 2026-10-07 also `'product:openclaw'` (`openclaw-bundle-mcp` on `undici`) and `'product:hermes'` (`Hermes-Agent/` discovery UA, `hermes-probe`/`hermes-agent` names, or the Hermes CIMD `client_id` `https://nousresearch.github.io/hermes-agent/…` — its MCP session itself reports only the Python SDK default `mcp` on `python-httpx2/`, and on authenticated rows the classifier reads the client_id too); `python-httpx2/` stopped being a scanner prefix the same day — it is now the MCP Python SDK's own transport UA. Still `direct` (7.5 counts Anthropic products only), but named, so it leaves the unlabelled remainder in 7.21e and gets its own row in 7.21f. A measurement label only: nothing is blocked or rate-limited on it, and a 401 is the correct answer to every probe. Added 2026-09-10; see 7.21 |
 
 Volume control: failures always capture; successes are sampled **1 in 20 per
 request** (`success_sample_rate` carries the factor). Multiply `outcome=ok`
@@ -1615,7 +1615,9 @@ What the 09-10 population looked like (~60 distinct sources in nine hours):
   (the Python MCP SDK's default, so the name alone is not a tell): sends a
   non-JWT bearer, then an `initialize`, in pairs — **all 28 non-probe
   `invalid_token` rows that day**, from 4 addresses. Classified on the UA
-  prefix.
+  prefix until 2026-10-07, when the prefix was dropped: httpx2 had become the
+  MCP Python SDK's own transport (Hermes Agent sends `python-httpx2/2.7.0` +
+  `mcp`), and 30 days of the prefix had matched no authenticated row.
 - Pre-existing, not from the registry: `ado-p5-health/1` (GET, ~16/day since
   before 08-27), `mcp-reputation-scanner`, `tedix-mcp-scanner`, search-engine
   bots on GET. And a `python-httpx/0.28.1` client that self-reports
@@ -3622,3 +3624,102 @@ as everywhere else.
    ```
    Pair it with `SELECT count() FROM events WHERE event = 'temp_api_key_refused'
    AND properties.reason = 'rate_capped' AND timestamp > now() - INTERVAL 7 DAY`.
+
+7. **Egress wall: pre-check and ping** (added 2026-10-08,
+   `docs/implementation_plans/claude/temp-key-never-used_v1.md`). The tool
+   description now tells agents to check `https://fgac.ai/api/proxy/ping`
+   before minting, and every recipe opens with an authenticated ping that
+   emits `temp_api_key_pinged`. This splits never-used keys into "the sandbox
+   reached FGAC and the key worked, but the agent did nothing" (pinged) and
+   "never reached FGAC" (not pinged). Exclude keys minted in the last 60
+   minutes so they have had time to be used, and exclude the internal
+   accounts as everywhere else.
+
+   ```sql
+   WITH m AS (SELECT properties.temp_key_id AS k, any(person_id) AS p,
+                     any(properties.client_name) AS client, min(timestamp) AS t
+              FROM events WHERE event = 'temp_api_key_created' AND properties.environment = 'production'
+                AND timestamp > now() - INTERVAL 7 DAY AND timestamp < now() - INTERVAL 60 MINUTE GROUP BY k),
+        u AS (SELECT properties.temp_key_id AS k, count() AS calls FROM events
+              WHERE event = 'proxy_request' AND properties.key_kind = 'temporary'
+                AND timestamp > now() - INTERVAL 8 DAY GROUP BY k),
+        pg AS (SELECT properties.temp_key_id AS k, count() AS pings FROM events
+               WHERE event = 'temp_api_key_pinged' AND timestamp > now() - INTERVAL 8 DAY GROUP BY k),
+        acct AS (SELECT m.p AS p, countIf(u.calls > 0) AS used_keys FROM m LEFT JOIN u ON u.k = m.k GROUP BY m.p)
+   SELECT m.client AS client, count() AS mints,
+          countIf(u.calls = 0) AS never_used, round(countIf(u.calls = 0) / count(), 2) AS never_used_share,
+          countIf(u.calls = 0 AND pg.pings > 0) AS never_used_but_pinged,
+          countIf(acct.used_keys = 0) AS mints_on_accounts_with_no_working_key,
+          uniqIf(m.p, acct.used_keys = 0) AS accounts_with_no_working_key
+   FROM m LEFT JOIN u ON u.k = m.k LEFT JOIN pg ON pg.k = m.k LEFT JOIN acct ON acct.p = m.p
+   GROUP BY client ORDER BY mints DESC
+   ```
+
+   **Before** (7 days to 2026-10-08 ~20:00Z, internal accounts excluded):
+   `claude-code` 109 mints, 56 never used (51%); `Anthropic/ClaudeAI` 30
+   mints, 10 never used (33%). Every never-used key came from the
+   `Claude-User` user agent (the claude.ai-managed connector). The two mints
+   from a direct CLI registration (`claude-code/*`) were both used. 54 of the
+   66 never-used keys sat on 18 accounts (14 `claude-code`, 4
+   `Anthropic/ClaudeAI`) where **no** key ever worked; the
+   top three accounts alone minted 33 (19, 8, 6), one per task, over two
+   days. 13 of 25 never-used `download` keys were followed within 30 minutes
+   by windowed `gmail_get_attachment` calls, against 0 of 12 used ones. Only
+   ~10 proxy 401s in the week (`missing` ×9, `invalid` ×1), so a broken key
+   hand-off is not the cause.
+
+   **Success looks like**: `mints_on_accounts_with_no_working_key` falls
+   (the pre-check stops the mint), without `mints` on accounts that do use
+   keys falling with it. Target: `claude-code` never-used share under 20%
+   within a week of deploy. `never_used_but_pinged` should stay near zero. If
+   it grows, agents reach FGAC and then abandon the key, which is a recipe
+   problem, not egress. The pre-check itself is not captured (no key, no
+   person), so a mint drop on the no-working-key accounts is the only
+   evidence that agents ran it. Read it together with (5): windowed reads on
+   those accounts should continue at the same level.
+
+8. **Why the check failed: network vs the agent's own rules** (added
+   2026-10-09). A sandbox that blocks fgac.ai and an agent whose permission
+   rules refuse to run the command look identical from our side: nothing
+   arrives. So the agent reports what happened on `create_temporary_api_key`
+   (`reachability`): `ok` mints; `unreachable` and `command_denied` mint
+   nothing and emit `temp_api_key_check_failed`. The fix differs by cause.
+   `unreachable` needs the user to allow the host in the sandbox's network
+   settings. `command_denied` needs the user to approve or allow the command
+   in the agent's permission settings. `after_mint = true` means the
+   recipe's keyed ping failed after a key was minted, which is the
+   recipe-step version of the same split. `proxy_ping_checked` (anonymous)
+   counts keyless pings that did arrive, to corroborate `ok` reports in
+   aggregate.
+
+   ```sql
+   SELECT properties.client_name AS client,
+          countIf(event = 'temp_api_key_created' AND properties.reachability = 'ok') AS minted_after_ok,
+          countIf(event = 'temp_api_key_created' AND properties.reachability = 'not_reported') AS minted_unreported,
+          countIf(event = 'temp_api_key_check_failed' AND properties.reachability = 'unreachable') AS network_blocked,
+          countIf(event = 'temp_api_key_check_failed' AND properties.reachability = 'command_denied') AS agent_rules_blocked,
+          countIf(event = 'temp_api_key_check_failed' AND properties.after_mint) AS failed_after_mint,
+          uniqIf(person_id, event = 'temp_api_key_check_failed') AS people_reporting_failure
+   FROM events
+   WHERE event IN ('temp_api_key_created', 'temp_api_key_check_failed')
+     AND properties.environment = 'production' AND timestamp > now() - INTERVAL 7 DAY
+   GROUP BY client ORDER BY minted_after_ok + network_blocked + agent_rules_blocked DESC
+   ```
+
+   Corroboration: `SELECT count() FROM events WHERE event = 'proxy_ping_checked'
+   AND properties.environment = 'production' AND timestamp > now() - INTERVAL 7 DAY`
+   should be at least `minted_after_ok`. The keyless ping is anonymous, so the
+   two are compared only as totals. It is also capped to one event per source
+   address per 10 minutes (60/min per instance), so it counts checking sources,
+   and an agent that re-checks within 10 minutes is counted once. Sample `properties.check_output` (first
+   line, keys redacted) to confirm agents classify correctly. A proxy's
+   `403 Forbidden` is `unreachable`; a harness message such as "permission
+   denied" or "blocked by" is `command_denied`.
+
+   **Before**: none. No failed check was observable until this ships, and
+   `not_reported` is every mint before it. **Reading it**: if
+   `agent_rules_blocked` is a large share, a sandbox allowlist message is the
+   wrong fix. Users need to know how to approve the command. That points
+   at the client's permission defaults, not at our egress. A
+   `minted_unreported` share that stays high means agents are skipping the
+   check; tighten the description.

@@ -52,7 +52,7 @@ curl -s $BASE_URL/api/mcp -X POST \
 curl -s $BASE_URL/api/mcp -X POST \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"gmail_send","arguments":{"to":"blocked@untrusted.com","subject":"Blocked","body":"Test"}},"id":1}'
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"gmail_send","arguments":{"to":"blocked@example.net","subject":"Blocked","body":"Test"}},"id":1}'
 ```
 - [ ] Returns error: "Unauthorized email address"
 
@@ -331,7 +331,7 @@ curl -s $BASE_URL/api/mcp -X POST \
 - A4: three writes that must SUCCEED — `messages/<id>/modify`
   (removeLabelIds UNREAD), `labels` create, `messages/batchModify` applying
   the new label. Verify event props via capability 16's query path.
-- A11: `drafts` create addressed to `blocked@untrusted.com` (must succeed),
+- A11: `drafts` create addressed to `blocked@example.net` (must succeed),
   then `drafts/send` with that draft id (must be DENIED with approval
   links — recipients came from the stored draft). Whitelisted-draft variant
   sends for real (standing permission covers QA-account mail).

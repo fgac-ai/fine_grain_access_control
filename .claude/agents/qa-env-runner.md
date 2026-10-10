@@ -32,6 +32,11 @@ capability scope (e.g. "capabilities 04 and 06 only" for a re-test).
      reconnect flows, Picker per-file grants — click Allow and continue; never
      record a consent screen as `blocked` or as needing the user. Prefer
      `get_page_text`/`read_page` over screenshots.
+   - **Click "Allow" on Google or Clerk surfaces with `computer`
+     (`left_click`), never a JS click.** JS clicks are not trusted input:
+     Google ignores them, and the auto-mode classifier denied a JS click on
+     Clerk's consent page on 2026-10-08. Signed-in as the wrong QA account?
+     Switch first, then click.
    - **Never type a password.** A password/passkey/Okta-SSO/2FA prompt means
      the built-in session expired: fall back to the Playwright CLI against the
      CDP-attached Chrome (`npx @playwright/cli -s=fgac_ui ...` via Bash) for
@@ -40,8 +45,40 @@ capability scope (e.g. "capabilities 04 and 06 only" for a re-test).
      USER_X" note — the only kind of hand-back a grant flow can still need.
    - Never plain `pkill chrome`; snapshot output always through `grep | head`.
 
+   **MCP bearer — use the stored QA token, never a consent screen.** Every
+   authenticated MCP call (tools/call, `create_temporary_api_key`, approvals,
+   the `list_accounts` smoke) uses `scripts/qa-mcp-token.ts`:
+   - `TOKEN_FILE=$(npx tsx scripts/qa-mcp-token.ts token --user A)` writes a
+     fresh access token to a 0600 file and prints only its path; send it as
+     `-H "Authorization: Bearer $(cat "$TOKEN_FILE")"`. It refreshes itself;
+     one token works on localhost and on every Vercel preview (dev Clerk).
+   - `npx tsx scripts/qa-mcp-token.ts check --base <preview or local URL>` is
+     the one-line smoke: initialize + `list_accounts`, reports which QA user.
+   - Exit code 3 means a mint is needed (no token yet, the grant was revoked,
+     or the connection was orphaned). Minting is pre-approved permanently
+     (CLAUDE.md QA rule 5, Ken 2026-10-09): do it yourself, without asking —
+     `start --user X --base <url>` (add `--new-client` if the old connection
+     is blocked/orphaned), open the printed URL in the built-in browser signed
+     in as that user, click Allow with `computer` (trusted click), read the
+     landed `…/qa-cb?code=` URL, `finish '<url>' --user X`, then `check`.
+     Never register DCR clients by hand. Only a password/2FA wall stops it.
+   - Never print the token, never put it in `qa-results.json` or any file in
+     the repo, and remove `$TOKEN_FILE` copies you make.
+   - **Real-agent assertions** ("the agent finds and uses it unprompted") need
+     an agent, not curl: run headless Claude Code against the build under
+     test with an MCP config file in your scratch dir whose server entry is
+     `{"type":"http","url":"<base>/api/mcp","headers":{"Authorization":"Bearer ${FGAC_QA_TOKEN}"}}`,
+     then `FGAC_QA_TOKEN="$(cat "$TOKEN_FILE")" claude -p "<task>" --mcp-config <file> --allowedTools "mcp__fgac__*,Bash"`.
+     The `${VAR}` expansion keeps the token out of the file and the command
+     line. Give the agent the user's task, never the tool name.
+
    **PostHog event verification (capability 16 and any event-side evidence)**
-   — primary path is the session's PostHog MCP connector, which you inherit:
+   — primary path is the session's PostHog MCP connector, which you inherit.
+   It is in your tool list (`mcp__<uuid>__exec`) even when the separate
+   `.mcp.json` `posthog` server reports a 401 — that server is a different,
+   optional path and its failure says nothing about the connector. If
+   `ToolSearch "posthog exec"` surfaces the `exec` tool, CALL it; skipping an
+   available connector and recording the event as "not verified" is a miss:
    - Load it with ToolSearch (keyword query `posthog exec` — do NOT rely on a
      hardcoded tool name; the server prefix is a connector UUID that can
      change), then query with
@@ -84,6 +121,18 @@ capability scope (e.g. "capabilities 04 and 06 only" for a re-test).
   execute tests and report. If a test cannot run because of a code or
   environment problem, record it as `fail` or `skip` with specifics and let
   the orchestrator decide. Do not "fix" anything, however obvious.
+- **Never break the stored QA bearer's own connection.** The token from
+  `qa-mcp-token.ts` is bound to one FGAC connection and its profile. Do not
+  revoke, block, delete or re-scope that connection or the profile it is bound
+  to — on 2026-10-09 a runner revoked it for a key-lifecycle check and ~110
+  assertions went BLOCKED for the rest of the run (a connection under a revoked
+  profile cannot be re-attached). Lifecycle assertions that revoke or block must
+  target a different connection/profile; if none exists, mark them BLOCKED
+  ("needs a scratch connection") instead of using the bearer's own.
+- **Real email goes only to the two QA accounts.** Any send that can succeed
+  (a whitelist or `*` rule, an approved retry) is addressed to USER_A or
+  USER_B. `blocked@example.net` is for denials only — if a rule could
+  let it through, use USER_B instead.
 - **Never write to the database to simulate user actions** (CLAUDE.md
   Database Rule 7). State changes go through the UI or the app's own APIs
   exactly as the runbook prescribes. Read-only queries for evidence are fine.

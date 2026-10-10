@@ -23,7 +23,7 @@
  */
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { classifyMcpClient } from '../src/lib/mcpClientSignals';
+import { classifyMcpClient, productClientName } from '../src/lib/mcpClientSignals';
 
 let failures = 0;
 function check(name: string, cond: boolean) {
@@ -52,7 +52,9 @@ console.log('scanners, 09-10 population:');
 check('SmitheryBot/1.0 (+https://smithery.ai) → scanner', is('SmitheryBot/1.0 (+https://smithery.ai)', undefined, 'scanner'));
 check('glama on a bare node UA → scanner by name', is('node', 'glama', 'scanner', 'name:glama'));
 check('verifymcp-probe on Go-http-client → scanner by keyword', is('Go-http-client/2.0', 'verifymcp-probe', 'scanner'));
-check('python-httpx2/ (junk-bearer sender) → scanner by UA prefix', is('python-httpx2/2.12.0', 'mcp', 'scanner', 'ua:python-httpx2/'));
+// python-httpx2/ was a scanner prefix until 2026-10-07; it is now the MCP
+// Python SDK's own transport (Hermes Agent sends `python-httpx2/2.7.0`).
+check('python-httpx2/ + mcp (the Python SDK) is NOT a scanner', is('python-httpx2/2.7.0', 'mcp', 'direct'));
 check('Mozilla/5.0 (compatible) → scanner', is('Mozilla/5.0 (compatible)', undefined, 'scanner'));
 check('self-link convention → scanner', is('mcp-thing/0.1 (+mailto:ops@example.com)', undefined, 'scanner', 'ua:self-link'));
 check('GoogleOther stays a whole-token hit after the CamelCase change', is('GoogleOther', undefined, 'scanner', 'keyword:googleother'));
@@ -96,8 +98,26 @@ check('a product name never outranks a Claude UA (Claude-User + connectors-manag
 check('a product name never outranks an internal UA', is('fgac-auth-probe/1.0', 'connectors-manager', 'internal', 'ua:fgac-'));
 check('the product is never `claude` (7.5 counts Anthropic products only)', cls('grok-connectors-manager/0.1.0', 'connectors-manager').client_class !== 'claude');
 
+console.log('direct + product:openclaw / product:hermes (measured on a local build 2026-10-07):');
+check('openclaw-bundle-mcp on undici (every OpenClaw initialize) → direct / product:openclaw', is('undici', 'openclaw-bundle-mcp', 'direct', 'product:openclaw'));
+check('Hermes-Agent/<ver> on OAuth discovery, no name → direct / product:hermes', is('Hermes-Agent/unknown', undefined, 'direct', 'product:hermes'));
+check('hermes-probe (the content-type preflight) is NOT a scanner: keyword:probe must lose to the product', is('python-httpx2/2.7.0', 'hermes-probe', 'direct', 'product:hermes'));
+check('hermes-agent (the transport fallback name) → direct / product:hermes', is('python-httpx2/2.7.0', 'hermes-agent', 'direct', 'product:hermes'));
+const HERMES_CIMD = 'https://nousresearch.github.io/hermes-agent/docs/oauth/client-metadata.json';
+check('Hermes on prod: SDK-default `mcp` + its CIMD client_id → direct / product:hermes',
+  (() => { const r = classifyMcpClient({ userAgent: 'python-httpx2/2.7.0', clientName: 'mcp', clientId: HERMES_CIMD }); return r.client_class === 'direct' && r.client_class_signal === 'product:hermes'; })());
+check('an opaque DCR client_id names nothing', is('python-httpx2/2.7.0', 'mcp', 'direct') && classifyMcpClient({ userAgent: 'python-httpx2/2.7.0', clientName: 'mcp', clientId: 'AbCdEfGhIjKlMnOp' }).client_class_signal === undefined);
+
+console.log('productClientName (the name a connection row and its tool calls carry):');
+check('SDK-default `mcp` + Hermes CIMD client_id → hermes-agent', productClientName('mcp', HERMES_CIMD) === 'hermes-agent');
+check('no name + Hermes CIMD client_id → hermes-agent', productClientName(undefined, HERMES_CIMD) === 'hermes-agent');
+check('a real self-reported name always wins over the client_id', productClientName('Anthropic/ClaudeAI', HERMES_CIMD) === 'Anthropic/ClaudeAI');
+check('`mcp` + an opaque DCR client_id stays `mcp` (nothing better to say)', productClientName('mcp', 'AbCdEfGhIjKlMnOp') === 'mcp');
+check('openclaw-bundle-mcp is kept as reported', productClientName('openclaw-bundle-mcp', 'QrStUvWxYz012345') === 'openclaw-bundle-mcp');
+check('absent name + no client_id → undefined', productClientName(undefined, undefined) === undefined);
+
 console.log('direct + ua:stock-runtime-no-name (unnamed automation on a bare runtime):');
-for (const ua of ['Python/3.11 aiohttp/3.14.3', 'Bun/1.1.45', 'python-httpx/0.28.1', 'Go-http-client/2.0', 'node', 'undici', 'python-requests/2.32.3', 'axios/1.7.2', 'Deno/2.1.4']) {
+for (const ua of ['Python/3.11 aiohttp/3.14.3', 'Bun/1.1.45', 'python-httpx/0.28.1', 'python-httpx2/2.7.0', 'Go-http-client/2.0', 'node', 'undici', 'python-requests/2.32.3', 'axios/1.7.2', 'Deno/2.1.4']) {
   check(`${ua}, no clientInfo → direct / ua:stock-runtime-no-name`, is(ua, undefined, 'direct', 'ua:stock-runtime-no-name'));
 }
 check('a runtime UA WITH a name is plain direct (the name is the identity)', (() => {
@@ -133,8 +153,10 @@ check('CamelCase split does not create hits from ordinary words (AppleWebKit, Ma
 
 console.log('route wiring (structural):');
 const route = readFileSync(join(__dirname, '..', 'src', 'app', 'api', 'mcp', 'route.ts'), 'utf8');
-check('route classifies from user-agent + initialize clientInfo',
-  /classifyMcpClient\(\{ userAgent, clientName: clientInfo\?\.name \}\)/.test(route));
+check('route classifies from user-agent + initialize clientInfo + client_id',
+  /classifyMcpClient\(\{ userAgent, clientName: clientInfo\?\.name, clientId: verifiedClientId \?\? clientIdHint \}\)/.test(route));
+check('route names the connection from the VERIFIED client_id only (never the unverified hint)',
+  /productClientName\(reportedClientInfo\?\.name, verifiedClientId\)/.test(route));
 check('client_class is never consulted for a decision (measurement label only)',
   !/clientClass\.client_class\s*[!=]==?/.test(route) && !/client_class_signal\s*[!=]==?/.test(route));
 

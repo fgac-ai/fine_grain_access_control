@@ -115,18 +115,19 @@ sheet tells the truth.
   indicator never blocks the rest of the dashboard from rendering (a
   Google outage degrades to no-indicator, not a broken page).
 
-### A7: Post-policy Google 403/404 on a sheets call returns honest ❌ guidance
+### A7: Post-policy Google 403/404 on a sheets call returns honest 🚫 guidance
 - With the A2 rule present and the sheet still un-picked, retry
   `sheets_get_spreadsheet` via MCP.
 - **Expected**: The response is NOT the generic "Google resource not found
-  (404). Check the ID and try again." It is ❌ guidance stating that the
-  sheet is approved in FGAC but Google access is not set up yet, and points
-  the user at the dashboard to finish setup. Since the directory-error
-  demotion (PR #72 salvage, 2026-09) this classifies as `$mcp_tool_call`
-  `outcome=failed` with `$mcp_is_error=false` — a user-fixable condition,
-  kept out of the Connector Directory error rate — while still carrying
-  `error_status` (403/404) internally. `outcome=error` here is the
-  pre-demotion regression (capability 16 A17 asserts the event side).
+  (404). Check the ID and try again." It is 🚫 guidance stating that the
+  sheet is approved in FGAC but Google access is not set up yet ("Not
+  available yet … pick this sheet"), and points the user at
+  `/dashboard/sheets-setup`. It classifies as `$mcp_tool_call`
+  `outcome=denied_by_policy`, `denial_code=file_grant_missing_at_google`,
+  `$mcp_is_error=false` — a user-fixable condition, kept out of the Connector
+  Directory error rate (❌ `failed` until the 2026-09-03 graduation, `78f6227`)
+  — while still carrying `error_status` (403/404) internally. `outcome=error`
+  here is the regression (capability 16 A17 asserts the event side).
 
 ### A8: Recovery analytics distinguish the funnel stages
 - Replay A1→A4 and inspect captured events (PostHog debug/local capture per

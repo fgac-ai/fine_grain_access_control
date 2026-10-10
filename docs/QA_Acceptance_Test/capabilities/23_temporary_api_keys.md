@@ -100,11 +100,16 @@ to reuse its current key (`live_temp_keys` = 10). Revoking one frees a slot.
 ### A11: Agents are told the path exists
 
 `tools/list` includes `create_temporary_api_key` with the description's four elements: when to
-use it (over ~1 MB / scripted loops), the code-execution requirement and the windowed-tool
-fallback, the 15/60-minute lifetime with resume-after-expiry, and the key-handling rule ("keep the key out of
+use it (over ~1 MB / scripted loops), the reachability pre-check (`curl -sS
+<serving host>/api/proxy/ping` prints `fgac-proxy-ok`; anything else → do not mint) with the
+windowed-tool fallback named, the 15/60-minute lifetime with resume-after-expiry, and the key-handling rule ("keep the key out of
 anything that leaves this session" — private temp file or env var allowed). The
 `initialize` instructions contain the large-file sentence. `gmail_get_attachment`,
 `gmail_send`, and `google_api_modify` descriptions each point to the tool.
+Every host the copy names is the deployment serving it: `fgac.ai` in production, the
+preview's own host on a preview, `localhost:<port>` locally — never production from a
+non-production build (train QA 2026-10-08: a preview pointing at production made a
+correct agent decline to mint).
 
 ### A12: An agent finds and uses it unprompted (code-execution runtimes)
 
@@ -130,3 +135,32 @@ In the run window:
 - A7's dashboard revoke emits `temp_api_key_revoked` (`via: 'dashboard'`);
 - runbook query `docs/monitoring.md` §7.34 (1) and (2) return the run's mints, with the
   never-used ones (e.g. A10's surplus keys) counted as never used.
+
+### A14: The reachability ping separates a blocked sandbox from a broken key hand-off
+
+`curl -sS $BASE_URL/api/proxy/ping` with no key → 200, body exactly `fgac-proxy-ok`,
+`Cache-Control: no-store`. With `Authorization: Bearer $TMP` → 200 `fgac-proxy-ok key-valid`
+and one `temp_api_key_pinged` event (`outcome: 'valid'`, `temp_key_id` = the mint's); with an
+expired key → 401 `fgac-proxy-ok key-expired`; with a made-up `sk_proxy_tmp_` key → 401
+`fgac-proxy-ok key-invalid`; with the standing profile key → 401 `key-not-temporary`. No ping
+makes a Google request, and a pinged key with no other traffic still counts as never used in
+§7.34 (2). The minted recipe text (A1) contains the authenticated ping as its FIRST command,
+before any Google path, plus the "do not create another one this session" fallback.
+
+### A15: A failed check is reported with its cause, and mints nothing
+
+`create_temporary_api_key` with `reachability: "unreachable"` returns "No key was created",
+names the serving host and the sandbox network setting, and lists the windowed fallback.
+With `"command_denied"` it says the agent's permission rules refused the command and the
+network was never tried, and points the user at approving or allowing the command (no
+network-settings advice). Neither call inserts a key: a following `get_my_permissions` or
+dashboard list shows no new temporary key. Each emits one `temp_api_key_check_failed`
+(`reachability` as sent; `after_mint` false with no live key, true after a mint;
+`check_output` first line, with any key redacted: `sk_proxy_[redacted]`, or
+`Bearer [redacted]` when it follows `Bearer`). `reachability: "ok"` and an
+omitted value both mint as before, with `temp_api_key_created.reachability` = `ok` /
+`not_reported`. A keyless `GET /api/proxy/ping` emits an anonymous `proxy_ping_checked` and
+creates no person — at most one per source address per 10 minutes (60/min per
+instance): repeated keyless pings from one source all return 200 `fgac-proxy-ok`
+but produce a single row. A real agent (A12 setup) that reaches the host passes `ok`
+unprompted.

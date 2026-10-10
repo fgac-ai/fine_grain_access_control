@@ -31,6 +31,13 @@ export type TempKeyPurpose = typeof TEMP_KEY_PURPOSES[number];
 export const PROXY_MAX_REQUEST_BYTES = 4 * 1024 * 1024 + 256 * 1024;
 export const RECOMMENDED_CHUNK_BYTES = 4 * 1024 * 1024;
 
+/**
+ * Body of GET /api/proxy/ping when FGAC itself answered. A sandbox's egress
+ * proxy refusing the host answers with its own text (or the connection
+ * fails), so this exact string is the reachability test agents are given.
+ */
+export const PING_OK = 'fgac-proxy-ok';
+
 export function isTemporaryKey(value: string): boolean {
   return value.startsWith(TEMP_KEY_PREFIX);
 }
@@ -64,6 +71,30 @@ export function expectedBytesBucket(bytes: number | undefined): string | undefin
   return '35M+';
 }
 
+const PRODUCTION_ORIGIN = 'https://fgac.ai';
+
+/**
+ * Tool copy names fgac.ai as the host an agent's code must reach (and ping)
+ * before minting a key. Right in production; on a preview or local build it is
+ * a different deployment, so an agent that obeys "check first" pings production
+ * and declines to mint (train QA 2026-10-08, capability 23 A12). Point the copy
+ * at the deployment serving it. Production text is returned unchanged.
+ */
+export function deploymentHostCopy(text: string, origin: string): string {
+  if (origin === PRODUCTION_ORIGIN) return text;
+  const host = new URL(origin).host;
+  return text
+    .replace(/https:\/\/fgac\.ai(?=\/)/g, origin)
+    .replace(/(?<![\w./-])fgac\.ai(?![\w/-])/g, host);
+}
+
+/** The origin this deployment serves from, without a request in hand (tool copy). */
+export function deploymentOrigin(env: Record<string, string | undefined> = process.env): string {
+  if (env.VERCEL_ENV === 'production') return PRODUCTION_ORIGIN;
+  if (env.VERCEL_URL) return `https://${env.VERCEL_URL}`;
+  return `http://localhost:${env.PORT ?? 3000}`;
+}
+
 /** The host serving this request (preview, localhost, or production). */
 export function requestOrigin(req: Request): string {
   const url = new URL(req.url);
@@ -76,6 +107,93 @@ export function requestOrigin(req: Request): string {
 /** SHA-256 of a Google resumable upload_id (the id itself is a capability; never stored). */
 export function hashUploadId(uploadId: string): string {
   return createHash('sha256').update(uploadId).digest('hex');
+}
+
+/**
+ * What the agent saw when it ran the reachability check, reported back on
+ * create_temporary_api_key. The server cannot see a check that never arrives,
+ * so this is the only way to tell a sandbox that blocks fgac.ai (`unreachable`)
+ * from an agent whose own permission rules refused to run the command
+ * (`command_denied`) — the first is fixed in the sandbox's network settings,
+ * the second by approving or allowing the command.
+ */
+export const TEMP_KEY_REACHABILITY = ['ok', 'unreachable', 'command_denied'] as const;
+export type TempKeyReachability = (typeof TEMP_KEY_REACHABILITY)[number];
+
+/**
+ * Gate for the anonymous `proxy_ping_checked` event. The keyless ping is public and
+ * unauthenticated, so a crawler or a loop could turn it into unbounded PostHog volume.
+ * Per serverless instance: one event per source per window (default 10 minutes), and at
+ * most `perMinute` in total. The event therefore counts checking sources, not requests;
+ * the HTTP response is never affected. Memory is bounded by `maxSources`.
+ */
+export function createPingEventGate({ perSourceMs = 10 * 60_000, perMinute = 60, maxSources = 5000 } = {}) {
+  const seen = new Map<string, number>();
+  let windowStart = 0;
+  let inWindow = 0;
+  return (source: string, now = Date.now()): boolean => {
+    if (now - windowStart >= 60_000) { windowStart = now; inWindow = 0; }
+    const last = seen.get(source);
+    if (last !== undefined && now - last < perSourceMs) return false;
+    if (inWindow >= perMinute) return false;
+    if (seen.size >= maxSources) seen.clear();
+    seen.set(source, now);
+    inWindow++;
+    return true;
+  };
+}
+
+/** The client address a request came from, for rate gating only (never stored or sent). */
+export function requestSource(headers: Headers): string {
+  return headers.get('x-forwarded-for')?.split(',')[0].trim() || headers.get('x-real-ip')?.trim() || 'unknown';
+}
+
+/**
+ * What the reachability ping reports for a temporary key. Mirrors the proxy's own
+ * checks (src/app/api/proxy/[...path]/route.ts) so `key-valid` means a real call would
+ * authenticate: the key's own revocation/expiry AND its parent profile's. Before
+ * 2026-10-09 the ping skipped the parent, so a key under a revoked profile pinged
+ * valid and then got 401 on every real call (train QA, capability 23).
+ */
+export type TempKeyPingOutcome = 'valid' | 'revoked' | 'expired' | 'parent-revoked' | 'parent-expired' | 'invalid';
+export function tempKeyPingOutcome(
+  key: { revokedAt: Date | null; expiresAt: Date },
+  parent: { revokedAt: Date | null; expiresAt: Date | null } | undefined,
+  now = new Date(),
+): TempKeyPingOutcome {
+  if (key.revokedAt) return 'revoked';
+  if (key.expiresAt < now) return 'expired';
+  if (!parent) return 'invalid';
+  if (parent.revokedAt) return 'parent-revoked';
+  if (parent.expiresAt && parent.expiresAt < now) return 'parent-expired';
+  return 'valid';
+}
+
+/** First line of what the check printed, short, with anything key-shaped removed (it goes to analytics). */
+export function sanitizeCheckOutput(output: string | undefined): string | undefined {
+  const line = output?.split('\n').map(l => l.trim()).find(Boolean);
+  if (!line) return undefined;
+  return line
+    .replace(/sk_proxy_\S+/g, 'sk_proxy_[redacted]')
+    .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
+    .slice(0, 160);
+}
+
+/** Reply to a failed check: no key, the fallback, and the user-side fix for this cause. */
+export function reachabilityFallback(reachability: Exclude<TempKeyReachability, 'ok'>, baseUrl: string, afterMint: boolean): string {
+  const host = new URL(baseUrl).host;
+  const cause = reachability === 'unreachable'
+    ? `Your code cannot reach ${host}: the sandbox's network blocks it. Tell the user that allowing ${host} ` +
+      'in their sandbox\'s network (egress) settings enables large transfers.'
+    : 'Your environment\'s permission rules refused to run the command; the network was never tried. Tell the ' +
+      `user that approving the command, or allowing network commands to ${host} in their agent's permission ` +
+      'settings, enables large transfers.';
+  return [
+    `No key was created.${afterMint ? ' Stop using the key you already have and do not create another one this session.' : ''}`,
+    cause,
+    'Until then, keep going with the tools: gmail_get_attachment / gmail_read with offset and limit for large ' +
+      'reads, google_api_get, and google_api_modify for bodies under ~1 MB.',
+  ].join('\n');
 }
 
 /**
@@ -111,6 +229,19 @@ export function temporaryKeyRecipe(opts: {
       '(a linked or delegated one) use users/<address> — list_accounts names them.',
     'Limits: each request body must be 4 MB or less (larger requests are refused with 413). ' +
       'Each request must finish within ~55 s; for very large downloads use HTTP Range requests.',
+    '',
+    'FIRST, check that your code reaches FGAC and reads the key correctly (no Google call is made):',
+    `  curl -sS ${'-H "Authorization: Bearer $(cat "$KEY_FILE")"'} "${api}/ping"    # expect: ${PING_OK} key-valid`,
+    `  - A connection error, or any reply that does not start with ${PING_OK}, means this sandbox cannot reach ` +
+      `${opts.baseUrl} (many allow only listed hosts). Stop using the key and do not create another one this ` +
+      'session. Keep going with the tools instead: gmail_get_attachment / gmail_read with offset and limit for ' +
+      'large reads, google_api_get, and google_api_modify for bodies under ~1 MB. Tell the user that allowing ' +
+      `${new URL(opts.baseUrl).host} in their sandbox's network settings enables large transfers.`,
+    '  - If this check failed, or your environment refused to run it, call create_temporary_api_key once more with ' +
+      'reachability "unreachable" (error or other reply) or "command_denied" (refused to run). It creates no key ' +
+      'and tells you exactly what to tell the user.',
+    `  - ${PING_OK} key-invalid: the script is not sending the key you were given. Re-write api_key into KEY_FILE exactly.`,
+    `  - ${PING_OK} key-revoked or key-parent-revoked: the user revoked this key or its agent profile. Stop, and ask the user before creating another one.`,
   ];
   const auth = '-H "Authorization: Bearer $(cat "$KEY_FILE")"';
   const recipes: Record<TempKeyPurpose, string[]> = {
