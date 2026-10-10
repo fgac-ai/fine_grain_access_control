@@ -54,11 +54,14 @@ capability scope (e.g. "capabilities 04 and 06 only" for a re-test).
      one token works on localhost and on every Vercel preview (dev Clerk).
    - `npx tsx scripts/qa-mcp-token.ts check --base <preview or local URL>` is
      the one-line smoke: initialize + `list_accounts`, reports which QA user.
-   - Exit code 3 means the one-time consent is missing or the grant was
-     revoked. Do NOT register your own DCR client or open a consent screen to
-     work around it — record the affected assertions as `blocked` with
-     "USER ACTION REQUIRED: one-time QA token mint (`qa-mcp-token.ts start`)"
-     and finish the rest of the run.
+   - Exit code 3 means a mint is needed (no token yet, the grant was revoked,
+     or the connection was orphaned). Minting is pre-approved permanently
+     (CLAUDE.md QA rule 5, Ken 2026-10-09): do it yourself, without asking —
+     `start --user X --base <url>` (add `--new-client` if the old connection
+     is blocked/orphaned), open the printed URL in the built-in browser signed
+     in as that user, click Allow with `computer` (trusted click), read the
+     landed `…/qa-cb?code=` URL, `finish '<url>' --user X`, then `check`.
+     Never register DCR clients by hand. Only a password/2FA wall stops it.
    - Never print the token, never put it in `qa-results.json` or any file in
      the repo, and remove `$TOKEN_FILE` copies you make.
    - **Real-agent assertions** ("the agent finds and uses it unprompted") need

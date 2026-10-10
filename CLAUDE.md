@@ -137,8 +137,17 @@ Five rules bind this architecture:
    USER_A bearer that works on localhost and every preview (dev Clerk tokens carry no
    `aud`). Runners call `token`/`check`; a fresh DCR client + consent "Allow" per run
    is what the auto-mode classifier kept denying (2026-10-05/07/08), stalling every
-   train's authenticated QA. Exit 3 = the one-time mint is needed (`start`/`finish`
-   via `qa-setup-driver`, which Ken approves in chat); the script refuses production.
+   train's authenticated QA. Exit 3 = a mint is needed (`start`/`finish` via
+   `qa-setup-driver`; `start --new-client` when the old connection was orphaned); the
+   script refuses production.
+
+   **Minting is pre-approved, permanently (Ken, 2026-10-09: "runner may accept both
+   consent screens don't ask again!").** A runner may click Allow on the Clerk consent
+   screen for a `FGAC QA token (USER_A|USER_B)` client — first mint, re-mint, or
+   `--new-client` recovery — on the dev Clerk instance, for the two QA accounts, against
+   local or preview builds, without asking. Never end a turn or a QA run asking whether
+   to mint. The hard limits of Local Development rule 5 still apply (no passwords, no
+   new accounts, only these two accounts, never production).
 
 QA environments run sequentially (they share one dev server, one Neon branch, and the QA
 accounts/keys — lifecycle capabilities mutate that shared state). Targeted re-tests

@@ -37,7 +37,9 @@ everywhere downstream.
    click), read the landed `…/qa-cb?code=` URL from the tab, then
    `finish '<url>' --user A` and `check --base <url>`. The refresh token it
    stores (main clone `.secrets/qa-mcp/`) serves every later run on localhost
-   and previews — never mint per run.
+   and previews — never mint per run. Minting (including `--user B` and
+   `start --new-client` recovery) is pre-approved permanently (CLAUDE.md QA
+   rule 5, Ken 2026-10-09) — never ask.
 5. Save the final dashboard screenshot to `.playwright/qa_proof_setup.png`
    (never the repo root).
 6. Walk the coverage checkpoint from `.claude/commands/qa-setup.md` item by
