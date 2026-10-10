@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '@/db';
 import { temporaryApiKeys, users } from '@/db/schema';
 import { captureServerEvent } from '@/lib/posthogServer';
-import { isTemporaryKey, hashTemporaryKey, PING_OK } from '@/lib/temporaryApiKeys';
+import { createPingEventGate, isTemporaryKey, hashTemporaryKey, PING_OK, requestSource } from '@/lib/temporaryApiKeys';
 
 /**
  * Reachability check for code an agent runs (create_temporary_api_key).
@@ -27,6 +27,9 @@ export const dynamic = 'force-dynamic';
 /** One shared distinct id; `$process_person_profile: false` keeps it from becoming a person. */
 const ANONYMOUS_PING_ID = 'fgac-anonymous-proxy-ping';
 
+/** Caps the anonymous event (see createPingEventGate); the response itself is never gated. */
+const pingEventGate = createPingEventGate();
+
 function text(body: string, status = 200) {
   return new NextResponse(`${body}\n`, {
     status,
@@ -40,7 +43,7 @@ async function ping(request: NextRequest) {
     // The pre-mint check. Anonymous (the agent's sandbox carries no identity), so it
     // only corroborates in aggregate: reachability "ok" reports on
     // create_temporary_api_key should be matched by roughly as many of these.
-    captureServerEvent(ANONYMOUS_PING_ID, 'proxy_ping_checked', {
+    if (pingEventGate(requestSource(request.headers))) captureServerEvent(ANONYMOUS_PING_ID, 'proxy_ping_checked', {
       authenticated: false, method: request.method,
       user_agent: request.headers.get('user-agent')?.slice(0, 120) ?? undefined,
       $process_person_profile: false,

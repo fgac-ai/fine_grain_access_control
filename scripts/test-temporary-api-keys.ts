@@ -31,6 +31,7 @@ import {
   clampTtlMinutes, expectedBytesBucket, generateTemporaryKey, hashTemporaryKey, isTemporaryKey,
   temporaryKeyRecipe, hashUploadId, TEMP_KEY_PREFIX, PROXY_MAX_REQUEST_BYTES, PING_OK,
   deploymentHostCopy, deploymentOrigin, reachabilityFallback, sanitizeCheckOutput, TEMP_KEY_REACHABILITY,
+  createPingEventGate, requestSource,
 } from '../src/lib/temporaryApiKeys';
 import { TOOL_DEFS } from '../src/app/api/mcp/toolDefs';
 
@@ -198,6 +199,28 @@ async function main() {
     const pingSrc = readFileSync(join(__dirname, '..', 'src', 'app', 'api', 'proxy', 'ping', 'route.ts'), 'utf8');
     check('ping: the keyless check is counted anonymously, without a person profile',
       pingSrc.includes("'proxy_ping_checked'") && pingSrc.includes('$process_person_profile: false'));
+  }
+  // The anonymous ping event is capped: public, unauthenticated, crawlable.
+  {
+    const gate = createPingEventGate({ perSourceMs: 600_000, perMinute: 3, maxSources: 4 });
+    const t = 1_000_000;
+    check('ping gate: first ping from a source is counted', gate('a', t) === true);
+    check('ping gate: repeats from the same source within the window are not', gate('a', t + 1000) === false && gate('a', t + 599_000) === false);
+    check('ping gate: the same source counts again after the window', gate('a', t + 600_000) === true);
+    const g2 = createPingEventGate({ perSourceMs: 600_000, perMinute: 3, maxSources: 100 });
+    const firstMinute = ['s1', 's2', 's3', 's4', 's5'].map(src => g2(src, t));
+    check('ping gate: at most perMinute events per minute across sources', JSON.stringify(firstMinute) === '[true,true,true,false,false]');
+    check('ping gate: the per-minute budget resets', g2('s6', t + 60_000) === true);
+    const g3 = createPingEventGate({ perSourceMs: 600_000, perMinute: 1000, maxSources: 3 });
+    ['x1', 'x2', 'x3', 'x4'].forEach(src => g3(src, t));
+    check('ping gate: memory is bounded (the source map clears past maxSources)', g3('x1', t + 1) === true);
+    check('requestSource: first x-forwarded-for hop, then x-real-ip, else unknown',
+      requestSource(new Headers({ 'x-forwarded-for': '203.0.113.7, 10.0.0.1' })) === '203.0.113.7'
+      && requestSource(new Headers({ 'x-real-ip': '198.51.100.2' })) === '198.51.100.2'
+      && requestSource(new Headers()) === 'unknown');
+    const pingSrc2 = readFileSync(join(__dirname, '..', 'src', 'app', 'api', 'proxy', 'ping', 'route.ts'), 'utf8');
+    check('ping: the anonymous event is gated, the response is not', /if \(pingEventGate\(requestSource\(request\.headers\)\)\) captureServerEvent/.test(pingSrc2)
+      && /\}\);\n    return text\(PING_OK\);/.test(pingSrc2));
   }
   const send = allRecipes[2];
   const [iRaw, iMedia, iResumable] = ['{"raw":', 'uploadType=media', 'uploadType=resumable'].map(s => send.indexOf(s));
