@@ -25,6 +25,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { connectionsDeepLink } from '@/lib/dashboardAgentLinks';
 import { linkBase } from '@/lib/linkOrigin';
 import { requestOrigin } from '@/lib/temporaryApiKeys';
+import { isKeyLive } from '@/lib/connectionState';
 
 const DASHBOARD_URL = process.env.NEXT_PUBLIC_APP_URL
   || (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : null)
@@ -185,6 +186,20 @@ export async function POST(request: NextRequest) {
       status: 'error',
       message: 'Assigned proxy key not found.',
     }, { status: 500 });
+  }
+
+  // Revoked/expired profile: the key would be refused by the proxy anyway —
+  // say why and where to re-attach instead of handing out a dead key.
+  if (!isKeyLive(proxyKey)) {
+    return NextResponse.json({
+      status: 'profile_revoked',
+      message: '🚫 This connection has been blocked: the agent profile it was attached to was revoked.',
+      dashboard_url: await connectionsDeepLink(linkBase(DASHBOARD_URL, process.env, requestOrigin(request)), user.id),
+      instructions: [
+        'Ask the user to attach this connection to an active profile in their FGAC dashboard.',
+        'Then re-run this auth command to retrieve the new proxy key.',
+      ],
+    }, { status: 403 });
   }
 
   // Get accessible emails
