@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { eq } from 'drizzle-orm';
 import { db } from '@/db';
-import { temporaryApiKeys, users } from '@/db/schema';
+import { proxyKeys, temporaryApiKeys, users } from '@/db/schema';
 import { captureServerEvent } from '@/lib/posthogServer';
-import { createPingEventGate, isTemporaryKey, hashTemporaryKey, PING_OK, requestSource } from '@/lib/temporaryApiKeys';
+import { createPingEventGate, isTemporaryKey, hashTemporaryKey, PING_OK, requestSource, tempKeyPingOutcome } from '@/lib/temporaryApiKeys';
 
 /**
  * Reachability check for code an agent runs (create_temporary_api_key).
@@ -58,7 +58,9 @@ async function ping(request: NextRequest) {
     .limit(1).then(r => r[0]);
   if (!tempKey) return text(`${PING_OK} key-invalid`, 401);
 
-  const outcome = tempKey.revokedAt ? 'revoked' : tempKey.expiresAt < new Date() ? 'expired' : 'valid';
+  const parent = await db.select({ revokedAt: proxyKeys.revokedAt, expiresAt: proxyKeys.expiresAt }).from(proxyKeys)
+    .where(eq(proxyKeys.id, tempKey.parentKeyId)).limit(1).then(r => r[0]);
+  const outcome = tempKeyPingOutcome(tempKey, parent);
   const owner = await db.select({ clerkUserId: users.clerkUserId }).from(users)
     .where(eq(users.id, tempKey.userId)).limit(1).then(r => r[0]);
   if (owner?.clerkUserId) {
