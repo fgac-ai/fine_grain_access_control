@@ -557,46 +557,25 @@ export async function revokeTemporaryKey(tempKeyId: string) {
   revalidateDashboard();
 }
 
-export async function rollProxyKey(keyId: string) {
+/**
+ * Rotate a profile's secret (the dashboard's "Rotate key"). Same profile row,
+ * new key value — connections, mailboxes, rules and settings stay attached;
+ * see src/db/rotateProfileKey.ts for what is deliberately cut off.
+ * Returns the new key and private key once, like createProxyKey.
+ */
+export async function rollProxyKey(keyId: string): Promise<{ proxyKey: string; privateKey: string | null } | { error: string }> {
   const dbUser = await getDbUser();
+  const { rotateProfileKey } = await import("@/db/rotateProfileKey");
+  const rotated = await rotateProfileKey(dbUser.id, keyId);
+  if (!rotated) return { error: "This profile no longer exists or was revoked." };
 
-  const oldKey = await db.select().from(proxyKeys).where(eq(proxyKeys.id, keyId)).limit(1).then(res => res[0]);
-  if (!oldKey || oldKey.userId !== dbUser.id) throw new Error("Unauthorized");
-
-  // Get old key's email access
-  const oldEmailAccess = await db.select().from(keyEmailAccess).where(eq(keyEmailAccess.proxyKeyId, keyId));
-
-  // Get old key's rule assignments
-  const oldRuleAssignments = await db.select().from(keyRuleAssignments).where(eq(keyRuleAssignments.proxyKeyId, keyId));
-
-  // Create new key with same label
-  const newKey = await db.insert(proxyKeys).values({
-    userId: dbUser.id,
-    key: `sk_proxy_${crypto.randomUUID().replace(/-/g, '')}`,
-    label: oldKey.label,
-  }).returning().then(res => res[0]);
-
-  // Copy email access
-  for (const ea of oldEmailAccess) {
-    await db.insert(keyEmailAccess).values({
-      proxyKeyId: newKey.id,
-      delegationId: ea.delegationId,
-      targetEmail: ea.targetEmail,
-    });
-  }
-
-  // Copy rule assignments
-  for (const ra of oldRuleAssignments) {
-    await db.insert(keyRuleAssignments).values({
-      proxyKeyId: newKey.id,
-      accessRuleId: ra.accessRuleId,
-    });
-  }
-
-  // Revoke old key
-  await db.update(proxyKeys).set({ revokedAt: new Date() }).where(eq(proxyKeys.id, keyId));
-
+  const { captureServerEvent } = await import("@/lib/posthogServer");
+  captureServerEvent(dbUser.clerkUserId, "agent_profile_key_rotated", {
+    temp_keys_revoked: rotated.tempKeysRevoked,
+    has_service_account: rotated.privateKey !== null,
+  });
   revalidateDashboard();
+  return { proxyKey: rotated.proxyKey, privateKey: rotated.privateKey };
 }
 
 // ─── Access Rules ───────────────────────────────────────────────────────────

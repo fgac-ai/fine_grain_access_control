@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { Eye, EyeOff, Copy, Check } from "lucide-react";
-import { createProxyKey, revokeProxyKey, rollProxyKey } from "./actions";
+import { createProxyKey, revokeProxyKey } from "./actions";
 
 const PROXY_ENDPOINT = "https://gmail.fgac.ai";
 
@@ -21,6 +21,32 @@ interface ProxyKey {
   expiresAt: Date | null;
   createdAt: Date;
   emailAccess: string[]; // email addresses this key can access
+}
+
+/** Service-account credentials JSON for a profile key (shown once, at create or rotate). */
+export function downloadSaJson(proxyKey: string, privateKey: string) {
+  const jsonContent = JSON.stringify({
+    type: "service_account",
+    project_id: "fgac-proxy",
+    private_key_id: proxyKey,
+    private_key: privateKey,
+    client_email: `${proxyKey}@fgac.ai`,
+    client_id: proxyKey,
+    auth_uri: "https://accounts.fgac.ai/o/oauth2/auth",
+    token_uri: "https://oauth2.fgac.ai/token",
+    auth_provider_x509_cert_url: "https://www.fgac.ai/oauth2/v1/certs",
+    client_x509_cert_url: `https://www.fgac.ai/robot/v1/metadata/x509/${proxyKey}%40fgac.ai`,
+  }, null, 2);
+  const blob = new Blob([jsonContent], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.style.display = 'none';
+  a.href = url;
+  a.download = `fgac-credentials-${proxyKey.substring(0, 16)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 export function SecretKeyDisplay({
@@ -105,31 +131,6 @@ export function KeyControls({
   function closeModal() {
     setIsModalOpen(false);
     setCreated(null);
-  }
-
-  function downloadSaJson(proxyKey: string, privateKey: string) {
-    const jsonContent = JSON.stringify({
-      type: "service_account",
-      project_id: "fgac-proxy",
-      private_key_id: proxyKey,
-      private_key: privateKey,
-      client_email: `${proxyKey}@fgac.ai`,
-      client_id: proxyKey,
-      auth_uri: "https://accounts.fgac.ai/o/oauth2/auth",
-      token_uri: "https://oauth2.fgac.ai/token",
-      auth_provider_x509_cert_url: "https://www.fgac.ai/oauth2/v1/certs",
-      client_x509_cert_url: `https://www.fgac.ai/robot/v1/metadata/x509/${proxyKey}%40fgac.ai`,
-    }, null, 2);
-    const blob = new Blob([jsonContent], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.style.display = 'none';
-    a.href = url;
-    a.download = `fgac-credentials-${proxyKey.substring(0, 16)}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
   }
 
   async function onSubmit(formData: FormData) {
@@ -230,15 +231,6 @@ export function KeyControls({
                 </div>
               </div>
               <div className="flex gap-2">
-                <button
-                  onClick={() =>
-                    startTransition(() => rollProxyKey(k.id))
-                  }
-                  disabled={isPending}
-                  className="text-sm font-medium text-indigo-600 hover:text-indigo-800 disabled:opacity-50"
-                >
-                  Roll
-                </button>
                 <button
                   onClick={() =>
                     startTransition(() => revokeProxyKey(k.id))

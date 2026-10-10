@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Card, CardHeader, Badge, EmptyState, buttonPrimary, buttonSecondary, buttonDanger } from '@/components/ui';
-import { assignRulesToKey, unassignRuleFromKey, revokeProxyKey, revokeTemporaryKey, setSheetRulePermission, exposeFilesFromPicker, applyRecommendedSecurityRules, enableSendToAnyone, addMailboxToProfile } from './actions';
+import { assignRulesToKey, unassignRuleFromKey, revokeProxyKey, rollProxyKey, revokeTemporaryKey, setSheetRulePermission, exposeFilesFromPicker, applyRecommendedSecurityRules, enableSendToAnyone, addMailboxToProfile } from './actions';
 import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, kindForService, type DriveFileKind } from '@/lib/driveFileKinds';
 import { useGooglePicker, PickedSheet } from './useGooglePicker';
 import { DriveAccessCard } from './DriveAccessCard';
@@ -16,7 +16,7 @@ const FILE_SERVICES: string[] = ACTIVE_DRIVE_FILE_KINDS.map(k => DRIVE_FILE_KIND
 import { EditRuleButton } from './EditRuleButton';
 import { DeleteRuleButton } from './DeleteRuleButton';
 import { RuleControls } from './RuleControls';
-import { KeyControls, SecretKeyDisplay } from './KeyControls';
+import { KeyControls, SecretKeyDisplay, downloadSaJson } from './KeyControls';
 import { DirectoryCta } from '../DirectoryCta';
 import { slugifyProfileLabel } from '@/lib/profileSlugs';
 
@@ -456,8 +456,12 @@ function ProfileHeader({ profile }: { profile: Profile }) {
   const router = useRouter();
   const [revoking, setRevoking] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [rotateState, setRotateState] = useState<'idle' | 'confirming' | 'rotating'>('idle');
+  const [rotated, setRotated] = useState<{ proxyKey: string; privateKey: string | null } | null>(null);
+  const [rotateError, setRotateError] = useState<string | null>(null);
 
   return (
+    <div className="space-y-3">
     <div className="flex flex-wrap items-center justify-between gap-4">
       <div className="flex items-center gap-3 min-w-0">
         <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-primary bg-primary-muted text-[13px] font-bold text-primary">
@@ -502,12 +506,65 @@ function ProfileHeader({ profile }: { profile: Profile }) {
               Cancel
             </button>
           </>
+        ) : rotateState !== 'idle' ? (
+          <>
+            <span className="text-[13px] text-muted-foreground">
+              Issue a new key? Connected agents keep working; anything using the old key or credentials file stops.
+            </span>
+            <button
+              className={buttonPrimary}
+              disabled={rotateState === 'rotating'}
+              onClick={async () => {
+                setRotateState('rotating');
+                setRotateError(null);
+                try {
+                  const result = await rollProxyKey(profile.id);
+                  if ('error' in result) setRotateError(result.error);
+                  else setRotated(result);
+                } finally {
+                  setRotateState('idle');
+                }
+              }}
+            >
+              {rotateState === 'rotating' ? 'Rotating…' : 'Confirm rotate'}
+            </button>
+            <button className={buttonSecondary} onClick={() => setRotateState('idle')}>
+              Cancel
+            </button>
+          </>
         ) : (
-          <button className={buttonDanger} onClick={() => setConfirming(true)}>
-            Revoke key
-          </button>
+          <>
+            <button className={buttonSecondary} onClick={() => setRotateState('confirming')}>
+              Rotate key
+            </button>
+            <button className={buttonDanger} onClick={() => setConfirming(true)}>
+              Revoke key
+            </button>
+          </>
         )}
       </div>
+    </div>
+    {rotateError && (
+      <p role="alert" className="text-[13px] text-destructive">{rotateError}</p>
+    )}
+    {rotated && (
+      <Card className="p-4">
+        <p className="text-[13px] font-semibold text-foreground">Key rotated</p>
+        <p className="text-[13px] text-muted-foreground mt-0.5">
+          The old key no longer works. Connected agents, mailboxes and rules are unchanged.
+          Copy the new key now — it is shown only once.
+        </p>
+        <SecretKeyDisplay apiKey={rotated.proxyKey} />
+        <div className="mt-2 flex gap-2">
+          {rotated.privateKey && (
+            <button className={buttonSecondary} onClick={() => downloadSaJson(rotated.proxyKey, rotated.privateKey!)}>
+              Download Service Account JSON
+            </button>
+          )}
+          <button className={buttonSecondary} onClick={() => setRotated(null)}>Done</button>
+        </div>
+      </Card>
+    )}
     </div>
   );
 }
