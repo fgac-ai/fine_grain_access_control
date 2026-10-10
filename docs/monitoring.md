@@ -3709,7 +3709,9 @@ as everywhere else.
    Corroboration: `SELECT count() FROM events WHERE event = 'proxy_ping_checked'
    AND properties.environment = 'production' AND timestamp > now() - INTERVAL 7 DAY`
    should be at least `minted_after_ok`. The keyless ping is anonymous, so the
-   two are compared only as totals. Sample `properties.check_output` (first
+   two are compared only as totals. It is also capped to one event per source
+   address per 10 minutes (60/min per instance), so it counts checking sources,
+   and an agent that re-checks within 10 minutes is counted once. Sample `properties.check_output` (first
    line, keys redacted) to confirm agents classify correctly. A proxy's
    `403 Forbidden` is `unreachable`; a harness message such as "permission
    denied" or "blocked by" is `command_denied`.

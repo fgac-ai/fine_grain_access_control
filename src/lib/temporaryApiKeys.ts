@@ -120,6 +120,34 @@ export function hashUploadId(uploadId: string): string {
 export const TEMP_KEY_REACHABILITY = ['ok', 'unreachable', 'command_denied'] as const;
 export type TempKeyReachability = (typeof TEMP_KEY_REACHABILITY)[number];
 
+/**
+ * Gate for the anonymous `proxy_ping_checked` event. The keyless ping is public and
+ * unauthenticated, so a crawler or a loop could turn it into unbounded PostHog volume.
+ * Per serverless instance: one event per source per window (default 10 minutes), and at
+ * most `perMinute` in total. The event therefore counts checking sources, not requests;
+ * the HTTP response is never affected. Memory is bounded by `maxSources`.
+ */
+export function createPingEventGate({ perSourceMs = 10 * 60_000, perMinute = 60, maxSources = 5000 } = {}) {
+  const seen = new Map<string, number>();
+  let windowStart = 0;
+  let inWindow = 0;
+  return (source: string, now = Date.now()): boolean => {
+    if (now - windowStart >= 60_000) { windowStart = now; inWindow = 0; }
+    const last = seen.get(source);
+    if (last !== undefined && now - last < perSourceMs) return false;
+    if (inWindow >= perMinute) return false;
+    if (seen.size >= maxSources) seen.clear();
+    seen.set(source, now);
+    inWindow++;
+    return true;
+  };
+}
+
+/** The client address a request came from, for rate gating only (never stored or sent). */
+export function requestSource(headers: Headers): string {
+  return headers.get('x-forwarded-for')?.split(',')[0].trim() || headers.get('x-real-ip')?.trim() || 'unknown';
+}
+
 /** First line of what the check printed, short, with anything key-shaped removed (it goes to analytics). */
 export function sanitizeCheckOutput(output: string | undefined): string | undefined {
   const line = output?.split('\n').map(l => l.trim()).find(Boolean);
