@@ -36,6 +36,7 @@ import { clerkClient } from '@clerk/nextjs/server';
 import { resolveDbUser } from '@/db/userHelpers';
 import { loadApplicableRules, checkReadRestrictions, decodeB64Url, stripHtmlToText, checkSendWhitelist, type SendDenial } from '@/lib/gmailRules';
 import { captureServerEvent } from '@/lib/posthogServer';
+import { linkBase, runWithLinkOrigin } from '@/lib/linkOrigin';
 import { runWithToolCallProps, addToolCallProps, getToolCallProps, runWithRequestProps, getRequestProps, setDriveEngine, getDriveEngine, type DriveEngineContext } from '@/lib/toolCallContext';
 import { normalizeToolArguments, unknownArgumentKeys, describeArgumentFailure, rewriteValidationFailureBody, type AliasHit, type ZodIssueLike } from '@/lib/mcpArgumentGuidance';
 import { cleanResourceName } from '@/lib/pickerRecoveryCopy';
@@ -99,15 +100,22 @@ import {
 /** Env URL values have shipped with trailing whitespace/newlines (pasted
  * Vercel vars); a whitespace-only value must also not win the fallback chain.
  * Sanitizing here fixes every consumer: approval links, pending-approval
- * dashboard URLs, everything built on DASHBOARD_URL. */
+ * dashboard URLs, everything built on dashboardUrl(). */
 function cleanUrl(value: string | undefined | null): string | null {
   const trimmed = value?.trim().replace(/\/+$/, '');
   return trimmed || null;
 }
 
-const DASHBOARD_URL = cleanUrl(process.env.NEXT_PUBLIC_APP_URL)
+const CONFIGURED_DASHBOARD_URL = cleanUrl(process.env.NEXT_PUBLIC_APP_URL)
   || (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL.trim()}` : null)
   || 'http://localhost:3000';
+
+/** Base for every link a response or email carries: the configured URL in
+ * production, the host serving this request on a preview or local build
+ * (src/lib/linkOrigin.ts) — a preview's approval requests do not exist on fgac.ai. */
+function dashboardUrl(): string {
+  return linkBase(CONFIGURED_DASHBOARD_URL);
+}
 
 /** Host agents are told to reach and ping before minting a temporary key (see deploymentHostCopy). */
 const DEPLOYMENT_ORIGIN = deploymentOrigin();
@@ -122,7 +130,7 @@ const DEPLOYMENT_ORIGIN = deploymentOrigin();
  * is the one who must run the reconnect.
  */
 function reconnectLink(targetEmail: string): string {
-  return `${DASHBOARD_URL}/dashboard/accounts?reconnect=1&for=${encodeURIComponent(targetEmail)}`;
+  return `${dashboardUrl()}/dashboard/accounts?reconnect=1&for=${encodeURIComponent(targetEmail)}`;
 }
 
 /** Per-account bound on the list_accounts scope probes — deliberately far
@@ -318,7 +326,7 @@ async function resolveConnection(
       authorized: false,
       reason: 'pending_approval',
       connectionId: connection.id,
-      dashboardUrl: await connectionsDeepLink(DASHBOARD_URL, user.id),
+      dashboardUrl: await connectionsDeepLink(dashboardUrl(), user.id),
     };
   }
 
@@ -683,7 +691,7 @@ async function policyDenialWithLink(
   // say so, or the agent gets "Access Denied" and tries again.
   if (!action) return textResult(withNoLinkStop(message));
   try {
-    const { url, query, requestId, targetHash } = await mintApprovalLink(DASHBOARD_URL, conn.user.id, proxyKeyId, action);
+    const { url, query, requestId, targetHash } = await mintApprovalLink(dashboardUrl(), conn.user.id, proxyKeyId, action);
     const mintCount = await recordApprovalMint({
       requestId, userId: conn.user.id, proxyKeyId, action: action.action, targetHash, linkQuery: query,
       resourceName: 'resourceName' in action ? action.resourceName : undefined,
@@ -696,7 +704,7 @@ async function policyDenialWithLink(
     // person never sees the URL however the text is worded. The first
     // denial still relies on the agent; the email is the repeat's fallback.
     const notify = await notifyOwnerOfApprovalLinks({
-      owner: conn.user, agentLabel: agentLabel(conn), dashboardUrl: DASHBOARD_URL,
+      owner: conn.user, agentLabel: agentLabel(conn), dashboardUrl: dashboardUrl(),
       links: [{ requestId, action: action.action, url, description: describeApproval(approvalPayloadFor(conn.user.id, proxyKeyId, action, requestId)) }],
     });
     captureServerEvent(conn.user.clerkUserId, 'approval_link_minted', {
@@ -783,7 +791,7 @@ async function sendDenialWithLinks(
     // cap bounds a batch), else on the send-to-anyone request.
     const emailLinks: NotifyLink[] = [];
     if (denial.deniedRecipient) {
-      const one = await mintApprovalLink(DASHBOARD_URL, conn.user.id, proxyKeyId, {
+      const one = await mintApprovalLink(dashboardUrl(), conn.user.id, proxyKeyId, {
         action: 'send_whitelist', recipient: denial.deniedRecipient,
       });
       lines.push(`👉 Allow sending to '${denial.deniedRecipient}' only — share this one-click link with the user: ${one.url}`);
@@ -800,7 +808,7 @@ async function sendDenialWithLinks(
         mint_count: oneMintCount,
       });
     }
-    const all = await mintApprovalLink(DASHBOARD_URL, conn.user.id, proxyKeyId, { action: 'send_all' });
+    const all = await mintApprovalLink(dashboardUrl(), conn.user.id, proxyKeyId, { action: 'send_all' });
     lines.push(`👉 Or allow sending to ANY recipient from this profile — share this one-click link with the user instead: ${all.url}`);
     const allMintCount = await recordApprovalMint({
       requestId: all.requestId, userId: conn.user.id, proxyKeyId, action: 'send_all', linkQuery: all.query,
@@ -812,7 +820,7 @@ async function sendDenialWithLinks(
     mints.push({ action: 'send_all', request_id: all.requestId, via: 'send_denial', mint_count: allMintCount });
 
     const notify = await notifyOwnerOfApprovalLinks({
-      owner: conn.user, agentLabel: agentLabel(conn), dashboardUrl: DASHBOARD_URL, links: emailLinks,
+      owner: conn.user, agentLabel: agentLabel(conn), dashboardUrl: dashboardUrl(), links: emailLinks,
     });
     for (const props of mints.splice(0)) {
       captureServerEvent(conn.user.clerkUserId, 'approval_link_minted', { ...props, notify_status: notify.status });
@@ -1067,7 +1075,7 @@ function fileGrantErrorResult(kind: DriveFileKind, result: { error: string; stat
     return textResult(
       `🚫 Not available yet: FGAC allows this ${d.noun}, but Google hasn't shared the ${short} itself with FGAC, so Google rejected the call (${result.status}). ` +
       `This is a one-time setup step only the user can do: they must pick this ${short} in Google's file picker. ` +
-      `👉 Send the user here to finish setup${setupBlurb}: ${DASHBOARD_URL}${d.setupPath}?${d.setupIdParam}=${encodeURIComponent(fileId)} ` +
+      `👉 Send the user here to finish setup${setupBlurb}: ${dashboardUrl()}${d.setupPath}?${d.setupIdParam}=${encodeURIComponent(fileId)} ` +
       `Note: a wrong ${d.noun} ID produces this same error — the setup page verifies real access before reporting success, so it resolves either case. Retry after the user confirms.`,
     );
   }
@@ -1533,7 +1541,7 @@ async function checkDriveTreeFile(engine: DriveEngineContext, kind: DriveFileKin
   const code = decision.denial === 'blocked' ? 'drive_blocked' : decision.denial === 'read_only' ? 'drive_read_only' : `${service}_not_exposed`;
   addToolCallProps({ denial_code: code });
   const denial = decision.denial ?? 'not_exposed';
-  return { allowed: false, denial, fileName: lineage.file.name || undefined, reason: driveDenialText(decision, lineage.file.name || fileId, driveDefault, `${DASHBOARD_URL}/dashboard`) };
+  return { allowed: false, denial, fileName: lineage.file.name || undefined, reason: driveDenialText(decision, lineage.file.name || fileId, driveDefault, `${dashboardUrl()}/dashboard`) };
 }
 
 /** Drive file kind of a file from its own metadata (for approval actions); null for kinds FGAC has no tools for. */
@@ -2253,7 +2261,7 @@ async function resolveAccountAndToken(
         owner: conn.user, proxyKeyId: conn.proxyKeyId, agentLabel: agentLabel(conn),
         requestedAccount: targetEmail, usableAccounts: emails.map(e => e.targetEmail),
         tool: typeof toolName === 'string' ? toolName : null,
-        dashboardUrl: DASHBOARD_URL,
+        dashboardUrl: dashboardUrl(),
       });
       addToolCallProps({
         account_requested: normalizeRequestedEmail(targetEmail),
@@ -2305,7 +2313,7 @@ async function resolveAccountAndToken(
       const notify = await notifyOwnerOfDeadGrant({
         owner: googleToken.owner, accountEmail: targetEmail, reason: googleToken.failure as DeadGrantReason,
         keyOwnerEmail: conn.user.email, agentLabel: agentLabel(conn),
-        reconnectUrl: reconnectLink(targetEmail), dashboardUrl: DASHBOARD_URL,
+        reconnectUrl: reconnectLink(targetEmail), dashboardUrl: dashboardUrl(),
       });
       addToolCallProps({
         notify_status: notify.status,
@@ -2320,7 +2328,7 @@ async function resolveAccountAndToken(
         guidance = undeliverableGuidance({
           targetEmail, keyOwnerEmail: conn.user.email, reason: googleToken.failure,
           bounceClass: notify.undeliverable.bounceClass, dsnStatus: notify.undeliverable.dsnStatus,
-          bouncedAt: notify.undeliverable.bouncedAt, reconnectUrl: reconnectLink(targetEmail), dashboardUrl: DASHBOARD_URL,
+          bouncedAt: notify.undeliverable.bouncedAt, reconnectUrl: reconnectLink(targetEmail), dashboardUrl: dashboardUrl(),
         });
       } else {
         emailed = deadGrantDenialLine(notify.status, {
@@ -2419,7 +2427,7 @@ async function notifyOwnerOfMissingScope(
   const notify = await notifyOwnerOfDeadGrant({
     owner: resolved.owner, accountEmail: resolved.targetEmail, reason,
     keyOwnerEmail: conn.user.email, agentLabel: agentLabel(conn),
-    reconnectUrl: reconnectLink(resolved.targetEmail), dashboardUrl: DASHBOARD_URL,
+    reconnectUrl: reconnectLink(resolved.targetEmail), dashboardUrl: dashboardUrl(),
   });
   addToolCallProps({
     notify_status: notify.status,
@@ -2473,7 +2481,7 @@ async function driveTreeScopeLostDenial(conn: ConnectionApproved, resolved: Reso
   return textResult(
     `🚫 Drive access needs re-enabling: this agent profile uses FGAC's folder-based Google Drive access, but the Google account '${resolved.targetEmail}' no longer carries the Drive permission — it was dropped after a Google sign-in or a token refresh. ` +
     `STOP — every Drive, Sheets, Docs and Slides call on this account will fail until it is re-enabled; retrying will NOT help. ` +
-    `👉 The account owner re-enables it in one click on the agent profile page, with the "Re-enable full Drive access" button: ${DASHBOARD_URL}/dashboard — their quick option and folder settings are kept. Gmail tools are unaffected.`,
+    `👉 The account owner re-enables it in one click on the agent profile page, with the "Re-enable full Drive access" button: ${dashboardUrl()}/dashboard — their quick option and folder settings are kept. Gmail tools are unaffected.`,
   );
 }
 
@@ -3110,8 +3118,8 @@ function registerFgacTools(server: FgacMcpServer) {
             // mailbox here (src/lib/secondAccount.ts). Three people in one
             // week had instead created a second FGAC account and got stuck
             // between the two.
-            own_account: `To add another Gmail account the user owns: give the user this link and tell them to open it SIGNED IN to FGAC as that other Gmail account (signing up with it first if needed): ${DASHBOARD_URL}${delegateLinkPath(conn.user.id)} — one click there attaches that mailbox to this account, and it then appears here automatically. Do NOT have them create a separate FGAC account for it. Walkthrough: ${DASHBOARD_URL}/use-cases/multiple-gmail-accounts`,
-            someone_elses: `To access someone else's mailbox: send that person the same link — ${DASHBOARD_URL}${delegateLinkPath(conn.user.id)} — they open it signed in to FGAC as their own Google account (signing up first if needed) and confirm; their mailbox then appears here automatically. They can revoke it any time.`,
+            own_account: `To add another Gmail account the user owns: give the user this link and tell them to open it SIGNED IN to FGAC as that other Gmail account (signing up with it first if needed): ${dashboardUrl()}${delegateLinkPath(conn.user.id)} — one click there attaches that mailbox to this account, and it then appears here automatically. Do NOT have them create a separate FGAC account for it. Walkthrough: ${dashboardUrl()}/use-cases/multiple-gmail-accounts`,
+            someone_elses: `To access someone else's mailbox: send that person the same link — ${dashboardUrl()}${delegateLinkPath(conn.user.id)} — they open it signed in to FGAC as their own Google account (signing up first if needed) and confirm; their mailbox then appears here automatically. They can revoke it any time.`,
           },
         });
       }
@@ -3956,7 +3964,7 @@ function registerFgacTools(server: FgacMcpServer) {
           return textResult(`🚫 Unknown request type '${type}'. ${REQUESTABLE}`);
         }
 
-        const { url, query, requestId, targetHash } = await mintApprovalLink(DASHBOARD_URL, conn.user.id, conn.proxyKeyId, action);
+        const { url, query, requestId, targetHash } = await mintApprovalLink(dashboardUrl(), conn.user.id, conn.proxyKeyId, action);
         // The title rides in the request ledger, never in the URL (the link
         // stays deterministic); the approve page reads it back by request_id.
         const mintCount = await recordApprovalMint({
@@ -3970,7 +3978,7 @@ function registerFgacTools(server: FgacMcpServer) {
         const emailPayload = approvalPayloadFor(conn.user.id, conn.proxyKeyId, action, requestId);
         if (storedTitle && !emailPayload.resourceName) emailPayload.resourceName = storedTitle;
         const notify = await notifyOwnerOfApprovalLinks({
-          owner: conn.user, agentLabel: agentLabel(conn), dashboardUrl: DASHBOARD_URL,
+          owner: conn.user, agentLabel: agentLabel(conn), dashboardUrl: dashboardUrl(),
           links: [{ requestId, action: action.action, url, description: describeApproval(emailPayload) }],
         });
         captureServerEvent(conn.user.clerkUserId, 'approval_link_minted', {
@@ -4022,7 +4030,7 @@ function registerFgacTools(server: FgacMcpServer) {
           captureServerEvent(conn.user.clerkUserId, 'temp_api_key_refused', { reason: 'no_profile', purpose: chosen, client_id: conn.clientId });
           return textResult('❌ This connection is not bound to an agent profile yet, so there are no permissions to put on a key. Ask the user to finish approving the connection in the FGAC dashboard.');
         }
-        const baseUrl = (authInfo?.extra?.requestOrigin as string | undefined) ?? DASHBOARD_URL;
+        const baseUrl = (authInfo?.extra?.requestOrigin as string | undefined) ?? dashboardUrl();
         const now = new Date();
         const liveKeys = () => db
           .select({ live: sql<number>`count(*)::int` })
@@ -4819,6 +4827,12 @@ const authedHandler = experimental_withMcpAuth(
   }
 );
 
+/** Links built anywhere in this request (tool results, denials, emails) name
+ * the host serving it — see dashboardUrl(). */
+const withLinkOrigin =
+  (h: (req: Request) => Promise<Response>) =>
+  (req: Request): Promise<Response> => runWithLinkOrigin(requestOrigin(req), () => h(req));
+
 // experimental_withMcpAuth takes resourceMetadataPath as a module-level
 // constant, but profile-addressed URLs (/api/mcp/<slug>, rewritten by
 // middleware with the slug in a header) need their 401s to point at the
@@ -4855,7 +4869,7 @@ const withProfileResourceMetadata =
     return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
   };
 
-const profileAwareHandler = withProfileResourceMetadata(authedHandler);
+const profileAwareHandler = withLinkOrigin(withProfileResourceMetadata(authedHandler));
 
 export const POST = profileAwareHandler;
 export const GET = profileAwareHandler;

@@ -4,6 +4,8 @@ import { eq, and, isNull, gt } from 'drizzle-orm';
 import { getActiveDelegationsToEmail, filterLiveDelegatedAccess } from '@/db/delegationQueries';
 import { resolveDbUser } from '@/db/userHelpers';
 import { currentUser } from '@clerk/nextjs/server';
+import { headers } from 'next/headers';
+import { linkBase } from '@/lib/linkOrigin';
 import { db } from '@/db';
 import { checkGoogleAccess, type GoogleAccess } from './googleAccess';
 import { clerkPrimaryEmail } from '@/lib/clerkPrimaryEmail';
@@ -165,7 +167,9 @@ export async function loadDashboardData(): Promise<DashboardData | null> {
 
   // Trim and strip a trailing slash — the pulled env value carries stray
   // whitespace, which rendered as "http://localhost:3000 /api/mcp".
-  const appUrl = (process.env.NEXT_PUBLIC_APP_URL ?? 'https://fgac.ai').trim().replace(/\/+$/, '');
+  // Production keeps the configured URL; a preview or local build shows its
+  // own host, or users copy an endpoint that points at production.
+  const appUrl = linkBase((process.env.NEXT_PUBLIC_APP_URL ?? 'https://fgac.ai').trim().replace(/\/+$/, ''), process.env, await pageOrigin());
   const mcpEndpoint = `${appUrl}/api/mcp`;
 
   // Sheets/Docs rules are what drive.file is for; a user without any can lose
@@ -182,4 +186,13 @@ export async function loadDashboardData(): Promise<DashboardData | null> {
       hasFullScope: googleAccess.driveFull,
     },
   };
+}
+
+/** The host serving this page render, if the request names one. */
+async function pageOrigin(): Promise<string | undefined> {
+  const h = await headers();
+  const host = h.get('x-forwarded-host') ?? h.get('host');
+  if (!host) return undefined;
+  const proto = h.get('x-forwarded-proto') ?? (/^(localhost|127\.0\.0\.1)(:|$)/.test(host) ? 'http' : 'https');
+  return `${proto.split(',')[0].trim()}://${host.split(',')[0].trim()}`;
 }
