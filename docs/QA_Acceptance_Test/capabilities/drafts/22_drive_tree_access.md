@@ -87,13 +87,18 @@ by the nav UserButton's connect-account scopes (via `/api/drive/flag`).
 ### A3: Enable full Drive access widens the grant in place; the tree card takes over
 - Click **Enable full Drive access**, complete Google consent (the added line
   reads "See, edit, create, and delete all of your Google Drive files").
-- **Expected**: Return to the profile URL; "Confirming Google permissions…"
-  then the page re-renders with the **Google Drive access** card (quick
-  options, My Drive expanded, Shared with me, Shared drives) and WITHOUT the
-  per-kind cards; `GET /api/auth/google-picker-token` reports the token
-  carrying `…/auth/drive`; the Clerk external account stays `verified`.
-  Events: `drive_scope_enable_started`, `drive_scope_enable_returned`,
-  `drive_scope_enabled`.
+- **Expected**: Return to the profile URL (usually straight onto the
+  **Google Drive access** card; "Confirming Google permissions…" only when
+  the return render did not yet see the scope), the `?drive_scope=1` query
+  stripped; the **Google Drive access** card (quick options, My Drive
+  expanded, Shared with me, Shared drives) WITHOUT the per-kind cards;
+  `GET /api/auth/google-picker-token` reports the token carrying
+  `…/auth/drive`; the Clerk external account stays `verified`.
+  Events: `drive_scope_enable_started`, `drive_scope_enable_returned`
+  {`scope_seen_by_server`}, and EXACTLY ONE server-side
+  `drive_scope_enabled` {`surface: 'dashboard'`, `return_leg: true`} — a
+  reload or a second tab adds none. Re-enabling after a loss: one
+  `drive_scope_lost`, then `drive_scope_enabled {reenable: true}`.
 
 ### A4: Default read-everything: reads work on never-picked files, writes deny with the write link
 - Default Profile, no settings. `sheets_read_range` on `S-unpicked`,

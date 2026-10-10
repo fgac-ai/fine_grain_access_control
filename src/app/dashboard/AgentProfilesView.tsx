@@ -9,6 +9,7 @@ import { DRIVE_FILE_KINDS, ACTIVE_DRIVE_FILE_KINDS, kindForService, type DriveFi
 import { useGooglePicker, PickedSheet } from './useGooglePicker';
 import { DriveAccessCard } from './DriveAccessCard';
 import { EnableDriveAccessCard } from './EnableDriveAccessCard';
+import { useDriveScopeReturnLeg } from './useDriveScopeReturnLeg';
 import { DRIVE_SERVICE } from '@/lib/driveTreeAccess';
 
 /** access_rules.service values that are per-file grants (not Gmail rules). */
@@ -124,6 +125,7 @@ export function AgentProfilesView({
   driveTree?: { flagOn: boolean; hasFullScope: boolean };
 }) {
   const activeProfiles = useMemo(() => profiles.filter(p => !p.revokedAt), [profiles]);
+  const driveScopeVerify = useDriveScopeReturnLeg(driveTree);
   const [connections, setConnections] = useState<Connection[]>([]);
   const [connectionsLoading, setConnectionsLoading] = useState(true);
   // Bumped by the "Create a new rule…" action inside the Apply-a-rule picker.
@@ -240,8 +242,7 @@ export function AgentProfilesView({
                 <>
                   {driveTree?.flagOn && (
                     <EnableDriveAccessCard
-                      profileId={active.id}
-                      driveDefault={active.driveDefault}
+                      verify={driveScopeVerify}
                       reenable={active.driveConfigured || rules.some(r => r.service === DRIVE_SERVICE && (isGlobal(r) || r.assignedKeyIds.includes(active.id)))}
                     />
                   )}

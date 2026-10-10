@@ -11,6 +11,7 @@ import { slugifyProfileLabel } from '@/lib/profileSlugs';
 import type { Profile, Rule } from './AgentProfilesView';
 import { driveTreeFlagOn } from '@/lib/featureFlags';
 import { normalizeDriveDefault } from '@/lib/driveTreeAccess';
+import { recordDriveScopeObservation } from '@/lib/driveScopeEpisodeServer';
 
 /**
  * Everything the dashboard needs to render one signed-in user's profiles.
@@ -62,7 +63,7 @@ export function defaultProfileSlug(profiles: Profile[]): string | null {
   return null;
 }
 
-export async function loadDashboardData(): Promise<DashboardData | null> {
+export async function loadDashboardData(opts: { driveScopeReturnLeg?: boolean } = {}): Promise<DashboardData | null> {
   const user = await currentUser();
   if (!user) return null;
 
@@ -75,6 +76,15 @@ export async function loadDashboardData(): Promise<DashboardData | null> {
   const hasCompleteGoogleAccess = googleAccess.gmail && googleAccess.driveFile;
   // Drive tree feature flag (PostHog, cached; env override for local dev).
   const driveTreeFlag = await driveTreeFlagOn({ clerkUserId: user.id, email: currentEmail });
+  // The server sees the full `drive` scope first — on a successful consent the
+  // return leg renders the Drive tree card, not the card that asked — so the
+  // enable (and a loss) is recorded here, once per episode. `disconnected`
+  // means tokeninfo could not answer: never read as a loss.
+  await recordDriveScopeObservation({
+    userId: dbUser.id, clerkUserId: user.id, flagOn: driveTreeFlag,
+    hasDriveFullScope: googleAccess.driveFull, lossCertain: !googleAccess.disconnected,
+    surface: 'dashboard', returnLeg: opts.driveScopeReturnLeg === true,
+  });
 
   // ─── Emails this user can build profiles against ─────────────────────────
   // Resolved by email rather than user row id: duplicate `users` rows for one

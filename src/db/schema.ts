@@ -11,6 +11,11 @@ export const users = pgTable('users', {
   // sign-up with the same address starts a fresh account rather than inheriting
   // this one. NULL = live user.
   deletedAt: timestamp('deleted_at'),
+  // Drive tree model (feature-flagged): when the user's own Google token was
+  // first observed carrying the full `drive` scope in the current episode;
+  // NULL = not (or no longer) held. The NULL → set transition is what records
+  // `drive_scope_enabled`, exactly once per episode (src/lib/driveScopeEpisode.ts).
+  driveFullScopeSince: timestamp('drive_full_scope_since'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
