@@ -1127,6 +1127,10 @@ export type MagicApprovalResult =
        * for this id before telling the user "the agent can retry now"
        * (drive.file grants are eventually consistent — see driveFileGrantCheck). */
       grantedFile?: { kind: DriveFileKind; fileId: string };
+      /** URL slug of the profile the grant was written to — the approve
+       * page's "Back to dashboard" returns to /dashboard/agents/<slug>
+       * instead of the default profile. Absent if the label has no slug. */
+      profileSlug?: string;
     }
   | {
       ok: false;
@@ -1236,7 +1240,7 @@ async function resolveWrongAccountLink(
 export type ResolvedApprovalLink = (
   | { status: "invalid"; reason: InvalidLinkReason }
   | { status: "wrong_account"; details: WrongAccountDetails }
-  | { status: "fresh" | "already_granted"; payload: ApprovalPayload }
+  | { status: "fresh" | "already_granted"; payload: ApprovalPayload; profileSlug?: string }
 ) & {
   /** Who opened it — null only when there was no usable visitor row. */
   visitor: ApprovalVisitor | null;
@@ -1261,7 +1265,16 @@ export async function resolveApprovalLink(params: ApprovalSearchParams): Promise
   }
   const p = verified.payload;
   const active = await grantActiveForApproval(p, p.proxyKeyId);
-  return { status: active ? "already_granted" : "fresh", payload: p, visitor };
+  // Profile the link targets, so the page's "Back to dashboard" lands on it.
+  // Cosmetic: a failed lookup falls back to /dashboard, never fails the page.
+  let profileSlug: string | undefined;
+  try {
+    const key = await db.select({ label: proxyKeys.label }).from(proxyKeys)
+      .where(and(eq(proxyKeys.id, p.proxyKeyId), eq(proxyKeys.userId, dbUser.id), isNull(proxyKeys.revokedAt)))
+      .limit(1).then(r => r[0]);
+    profileSlug = key ? slugifyProfileLabel(key.label) || undefined : undefined;
+  } catch { profileSlug = undefined; }
+  return { status: active ? "already_granted" : "fresh", payload: p, profileSlug, visitor };
 }
 
 /**
@@ -1507,6 +1520,7 @@ export async function approveMagicLink(
   if (!key) {
     return { ok: false, reason: "The agent profile this link targets no longer exists or was revoked." };
   }
+  const profileSlug = slugifyProfileLabel(key.label) || undefined;
 
   // Grant-level idempotency, replacing single-use. Re-approving a grant that
   // is already active writes nothing and reports success, so a double submit
@@ -1529,6 +1543,7 @@ export async function approveMagicLink(
     return {
       ok: true,
       description: `${describeApproval(p)} — this was already approved, so nothing changed. The agent can retry its request now.`,
+      profileSlug,
     };
   }
 
@@ -1545,7 +1560,7 @@ export async function approveMagicLink(
   } else if (p.action === "send_all") {
     await grantSendToAnyone(dbUser.id, key.id);
   } else if (linkKind && p[DRIVE_FILE_KINDS[linkKind].idKey]) {
-    return applyFileGrantApproval({
+    const fileResult = await applyFileGrantApproval({
       kind: linkKind,
       dbUser, key, p,
       fileId: p[DRIVE_FILE_KINDS[linkKind].idKey]!,
@@ -1553,6 +1568,7 @@ export async function approveMagicLink(
       picked: pickedSheets,
       describe: () => describeApproval(p),
     });
+    return fileResult.ok ? { ...fileResult, profileSlug } : fileResult;
   } else {
     return { ok: false, reason: "This approval link is malformed." };
   }
@@ -1560,7 +1576,7 @@ export async function approveMagicLink(
   await markApprovalRequestApproved(p.requestId);
   captureServerEvent(dbUser.clerkUserId, "approval_link_approved", { action: p.action, request_id: p.requestId });
   revalidateDashboard();
-  return { ok: true, description: describeApproval(p) };
+  return { ok: true, description: describeApproval(p), profileSlug };
 }
 
 // ─── Drive tree model (feature-flagged folder-inherited Drive access) ───────

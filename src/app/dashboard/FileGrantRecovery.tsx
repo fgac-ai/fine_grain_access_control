@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useGooglePicker, PickedFile } from "./useGooglePicker";
 import { TrackedVideoEmbed } from "@/components/TrackedVideoEmbed";
 import { DRIVE_FILE_KINDS, type DriveFileKind } from "@/lib/driveFileKinds";
+import { profileDashboardHref } from "@/lib/profileSlugs";
 
 const SHEETS_DEMO_EMBED = "https://share.descript.com/embed/Fv9pwXugLUa";
 
@@ -27,11 +28,15 @@ export function FileGrantRecovery({
   fileId,
   resourceName,
   fromApproval,
+  profileSlug,
 }: {
   kind: DriveFileKind;
   fileId: string | null;
   resourceName: string | null;
   fromApproval: boolean;
+  /** Profile an approval was written to (`profile=` from the approve flow) —
+   *  "Back to dashboard" returns there instead of the default profile. */
+  profileSlug?: string | null;
 }) {
   const [status, setStatus] = useState<GrantStatus>(fileId ? "checking" : "needs_grant");
   const [busy, setBusy] = useState(false);
@@ -199,7 +204,7 @@ export function FileGrantRecovery({
       )}
 
       <p className="mt-4 text-center text-xs text-subtle">
-        <Link href="/dashboard" className="underline hover:text-foreground">
+        <Link href={profileDashboardHref(profileSlug)} className="underline hover:text-foreground">
           Back to dashboard
         </Link>
       </p>

@@ -17,7 +17,7 @@ import { FileGrantRecovery } from "../FileGrantRecovery";
 export default async function SheetsSetupPage({
   searchParams,
 }: {
-  searchParams: Promise<{ sid?: string; name?: string; from?: string; pickerContext?: string }>;
+  searchParams: Promise<{ sid?: string; name?: string; from?: string; pickerContext?: string; profile?: string }>;
 }) {
   const params = await searchParams;
   const sid = params.sid || params.pickerContext || null;
@@ -27,6 +27,7 @@ export default async function SheetsSetupPage({
       fileId={sid}
       resourceName={params.name || null}
       fromApproval={params.from === "approval"}
+      profileSlug={params.profile ?? null}
     />
   );
 }

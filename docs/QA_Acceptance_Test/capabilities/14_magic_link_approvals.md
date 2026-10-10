@@ -432,3 +432,44 @@
   `invalid_reason: 'signature'` on the open event; nothing is approved or
   delegated by the render itself
 
+
+### A21: "Back to dashboard" returns to the profile the approval changed
+- Fixture: the owning user has at least TWO active profiles, and the link
+  targets the one that is NOT the default (create a second profile in the
+  dashboard if needed — e.g. "QA Second Profile", slug `qa-second-profile`).
+  Mint the link against that profile's proxy key (an agent denial on a
+  connection bound to it, `request_access` through `/api/mcp/<slug>`, or
+  `npm run qa:mint-link -- --email <owner> --action send_all --profile <slug>`
+  — `--profile` signs for that profile instead of the default)
+- Open the link as the owner. Before approving, read the
+  `[data-testid=approve-back-to-dashboard]` link's `href`. Approve (a send
+  link is enough; repeat with a sheets/docs link if one is at hand, so the
+  `ApprovedSettling` card is covered too). On the success card read the
+  same link again, then click it
+- **Expected**: the `href` is `/dashboard/agents/<slug-of-that-profile>`
+  on the confirm card, the success card (`result=ok&…&profile=<slug>` in
+  the URL), and the "Already approved" card on a re-open (A14). Clicking it
+  lands on that profile's page with its tab selected and the new rule
+  listed under it — NOT on the default profile
+- **Fallback path**: when the approval routes to a Picker recovery page
+  (`/dashboard/{sheets,docs,slides}-setup?…&from=approval&profile=<slug>`),
+  that page's "Back to dashboard" also points at
+  `/dashboard/agents/<slug>`
+- **Never**: a hand-edited `profile=` value that is not a well-formed slug
+  (`../accounts`, `//evil.example.com`, uppercase) must yield `href="/dashboard"`
+  — never an off-site or out-of-tree URL. A well-formed slug of a profile the
+  visitor does not own resolves on the profile page like any unknown slug
+  (no other user's data is shown). An approval on the default profile links
+  to `/dashboard/agents/<default-slug>` — the same page `/dashboard` redirects
+  to. The error / missing-link / invalid / wrong-account cards keep linking
+  to `/dashboard`
+- **Harness note**: the stored QA bearer (`scripts/qa-mcp-token.ts`) is bound
+  to the Default Profile connection, so `request_access` through
+  `/api/mcp/<other-slug>` still mints for the default profile. On localhost
+  use `qa:mint-link --profile <slug>`; on a preview (whose `preview/<branch>`
+  database the local script cannot read) connect a second agent through
+  `/api/mcp/<other-slug>` and trigger the denial from it
+- **Why**: until 2026-10-10 every card on the approve page linked to bare
+  `/dashboard`, which redirects to the DEFAULT profile, so approving a grant
+  for a second profile and clicking "Back to dashboard" showed a profile
+  without the rule just added (Ken, 2026-10-10)
