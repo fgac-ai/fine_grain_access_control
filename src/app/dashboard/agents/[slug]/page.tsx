@@ -17,11 +17,15 @@ import { slugifyProfileLabel } from '@/lib/profileSlugs';
  */
 export default async function AgentProfilePage({
   params,
+  searchParams,
 }: {
   params: Promise<{ slug: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { slug } = await params;
-  const data = await loadDashboardData();
+  // ?drive_scope=1 = the Enable Drive access card's OAuth return leg.
+  const { drive_scope: driveScope } = await searchParams;
+  const data = await loadDashboardData({ driveScopeReturnLeg: driveScope === '1' });
   if (!data) redirect('/');
 
   const active = data.profiles.filter(p => !p.revokedAt);

@@ -1,82 +1,36 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
-import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+import { useState } from 'react';
+import { usePathname } from 'next/navigation';
 import { useUser } from '@clerk/nextjs';
 import { usePostHog } from 'posthog-js/react';
 import { Card, CardHeader, Badge, buttonPrimary } from '@/components/ui';
 import {
   startGoogleReconnect, DRIVE_FULL_SCOPE, GMAIL_MODIFY_SCOPE, type ClerkUserLike,
 } from './googleReconnect';
-import { setDriveDefault } from './actions';
-import type { DriveDefault } from '@/lib/driveTreeAccess';
-
-const SCOPE_POLL_ATTEMPTS = 6;
-const SCOPE_POLL_INTERVAL_MS = 1500;
+import type { DriveScopeVerify } from './useDriveScopeReturnLeg';
 
 /**
  * Shown on a feature-flagged user's profile page while their Google grant is
  * still `drive.file`. The button runs the in-place Clerk reauthorize with the
  * full `drive` scope (consent prompt, so Google returns a refresh token) and
- * comes back here with ?drive_scope=1; the return leg polls the token bridge
- * until tokeninfo shows the scope, then refreshes the server-rendered page
- * so the Drive tree card takes over. The scope is requested from nobody who
- * is not flagged — this card is the only place that asks for it.
+ * comes back here with ?drive_scope=1. The return leg lives in
+ * useDriveScopeReturnLeg (mounted by AgentProfilesView, because on success
+ * this card is no longer rendered) and the enable is recorded server-side.
+ * The scope is requested from nobody who is not flagged — this card and the
+ * nav UserButton are the only places that ask for it.
  */
-export function EnableDriveAccessCard({ profileId, driveDefault, reenable }: {
-  profileId: string;
-  driveDefault: DriveDefault;
+export function EnableDriveAccessCard({ reenable, verify }: {
   /** The profile already uses the tree model (a quick option saved, or folder settings): the scope was LOST, not never granted. */
   reenable: boolean;
+  /** Return-leg state from useDriveScopeReturnLeg. */
+  verify: DriveScopeVerify;
 }) {
   const { user, isLoaded } = useUser();
-  const router = useRouter();
   const pathname = usePathname();
-  const params = useSearchParams();
   const posthog = usePostHog();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [verify, setVerify] = useState<'checking' | 'failed' | null>(null);
-  const returned = params.get('drive_scope') === '1';
-  const verifyStarted = useRef(false);
-
-  useEffect(() => {
-    if (!returned || verifyStarted.current) return;
-    verifyStarted.current = true;
-    let cancelled = false;
-    (async () => {
-      setVerify('checking');
-      posthog?.capture('drive_scope_enable_returned');
-      for (let attempt = 0; attempt <= SCOPE_POLL_ATTEMPTS; attempt++) {
-        if (attempt > 0) await new Promise(r => setTimeout(r, SCOPE_POLL_INTERVAL_MS));
-        if (cancelled) return;
-        try {
-          const res = await fetch('/api/auth/google-picker-token');
-          const data = await res.json();
-          if (res.ok && Array.isArray(data.scopes) && data.scopes.includes(DRIVE_FULL_SCOPE)) {
-            posthog?.capture('drive_scope_enabled', { reenable });
-            // Record that this profile now uses the tree model (the quick
-            // option is written even when it is still the default), so a
-            // later loss of the scope is reported as "re-enable", not as a
-            // silent fallback to per-file access.
-            try { await setDriveDefault(profileId, driveDefault); } catch { /* the card still works without it */ }
-            router.replace(pathname);
-            router.refresh();
-            return;
-          }
-        } catch {
-          // keep polling
-        }
-      }
-      if (!cancelled) {
-        posthog?.capture('drive_scope_enable_incomplete');
-        setVerify('failed');
-      }
-    })();
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on the return leg
-  }, [returned]);
-
   const start = async () => {
     if (!user || busy) return;
     setBusy(true);

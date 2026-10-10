@@ -34,6 +34,7 @@ const READERS = new Set([
   'src/app/dashboard/googleReconnect.ts',// exports the constant; default request stays drive.file
   'src/lib/driveTreeServer.ts',          // Drive routes require the scope on the token
   'src/app/api/proxy/[...path]/route.ts',// engine gate reads the live token
+  'src/app/dashboard/useDriveScopeReturnLeg.ts', // return leg polls the token bridge for the scope
   'src/app/dashboard/accounts/ReconnectGoogleButton.tsx', // post-reconnect verify treats a full-Drive token as satisfying drive.file; requests drive.file only
 ]);
 /** Files allowed to REQUEST it — each must be flag-gated (asserted below). */

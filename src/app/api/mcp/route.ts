@@ -37,6 +37,7 @@ import { resolveDbUser } from '@/db/userHelpers';
 import { loadApplicableRules, checkReadRestrictions, decodeB64Url, stripHtmlToText, checkSendWhitelist, type SendDenial } from '@/lib/gmailRules';
 import { captureServerEvent } from '@/lib/posthogServer';
 import { linkBase, runWithLinkOrigin } from '@/lib/linkOrigin';
+import { recordDriveScopeObservation } from '@/lib/driveScopeEpisodeServer';
 import { runWithToolCallProps, addToolCallProps, getToolCallProps, runWithRequestProps, getRequestProps, setDriveEngine, getDriveEngine, type DriveEngineContext } from '@/lib/toolCallContext';
 import { normalizeToolArguments, unknownArgumentKeys, describeArgumentFailure, rewriteValidationFailureBody, type AliasHit, type ZodIssueLike } from '@/lib/mcpArgumentGuidance';
 import { cleanResourceName } from '@/lib/pickerRecoveryCopy';
@@ -2369,6 +2370,15 @@ async function resolveAccountAndToken(
     token: googleToken.token, targetEmail, clerkUserId: googleToken.owner.clerkUserId, userId: conn.user.id, proxyKeyId: conn.proxyKeyId,
   });
   if (driveTreeActive) addToolCallProps({ drive_tree: true });
+  // A grant made outside the dashboard (the nav UserButton's connect-account
+  // scopes) is first seen here. Gains only: the scope verdict may come from
+  // Clerk's record, which is not certain enough to end an episode.
+  if (driveTreeActive) {
+    await recordDriveScopeObservation({
+      userId: conn.user.id, clerkUserId: conn.user.clerkUserId, flagOn: true,
+      hasDriveFullScope: true, lossCertain: false, surface: 'mcp',
+    });
+  }
 
   return {
     targetEmail,
