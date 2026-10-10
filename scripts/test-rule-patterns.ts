@@ -140,7 +140,7 @@ function main() {
   }
 
   // ─── "Block Sign In Alerts" template ──────────────────────────────────────
-  // Migration 0022 moves stored legacy rows onto whatever the template seeds
+  // Migration 0023 moves stored legacy rows onto whatever the template seeds
   // today. If the seed changes again, the repair must follow it — otherwise
   // old and new holders of the same-named rule match different mail.
   console.log('\n"Block Sign In Alerts": legacy pattern vs the template seed:');
@@ -150,9 +150,9 @@ function main() {
   const migration = readFileSync(
     join(root, 'src/db/migrations/0023_tighten_legacy_sign_in_template_rule.sql'), 'utf8');
   check('template seed is found in actions.ts', !!seed);
-  check(`migration 0022 rewrites to the template seed (${JSON.stringify(seed)})`,
+  check(`migration 0023 rewrites to the template seed (${JSON.stringify(seed)})`,
     !!seed && migration.includes(`SET "regex_pattern" = '${seed}'`));
-  check('migration 0022 only touches the exact legacy pattern',
+  check('migration 0023 only touches the exact legacy pattern',
     migration.includes(`"regex_pattern" = 'Sign In'`));
 
   const legacy = compileRulePattern('Sign In')!;
