@@ -6,6 +6,7 @@
  * announced to a partner webhook.
  */
 import { compileRulePattern } from '@/lib/rulePatterns';
+import { linkBase } from '@/lib/linkOrigin';
 import { db } from '@/db';
 import { accessRules, keyRuleAssignments } from '@/db/schema';
 import { eq } from 'drizzle-orm';
@@ -152,7 +153,8 @@ export function collectMessageContent(value: unknown): string | null {
 
 // ─── Read-time enforcement ───────────────────────────────────────────────────
 
-const RULES_DASHBOARD_URL = 'https://fgac.ai/dashboard';
+/** fgac.ai in production; the serving host on a preview or local build. */
+const rulesDashboardUrl = () => `${linkBase('https://fgac.ai')}/dashboard`;
 
 /**
  * Every denial names the governing rule, says FGAC made the decision, and
@@ -164,7 +166,7 @@ const RULES_DASHBOARD_URL = 'https://fgac.ai/dashboard';
 function denial(ruleName: string, detail: string): string {
   return `🚫 FGAC read rule '${ruleName}' blocked this message: ${detail} ` +
     `This decision was made by FGAC.ai policy (not by your agent or client). ` +
-    `The FGAC account owner can review or adjust rules at ${RULES_DASHBOARD_URL}.`;
+    `The FGAC account owner can review or adjust rules at ${rulesDashboardUrl()}.`;
 }
 
 /**

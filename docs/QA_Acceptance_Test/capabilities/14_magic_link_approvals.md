@@ -82,13 +82,17 @@
 - Capture approval URLs from (a) a send denial, (b) a sheets denial, and
   (c) `request_access`'s structured `approvalUrl` field
 - **Expected**: Each URL contains no whitespace or newline characters
-  anywhere in the string, and parses to the FGAC origin with path
+  anywhere in the string, and parses to the origin of the deployment under
+  test (the preview host on a preview, `localhost:<port>` locally, fgac.ai in
+  production — never fgac.ai from a preview) with path
   `/dashboard/approve` carrying a non-empty `a` (action) and `s` (signature)
   parameter, plus `k` (proxy key) and — for every action except `send_all` —
   `r` (target). No user id appears anywhere in the URL
 - **Regression**: 2026-08-15 tester finding — a trailing newline in the env
   base URL shipped links as `https://fgac.ai\n/dashboard/...`, breaking the
-  entire approval loop
+  entire approval loop; 2026-10-09 hosted-MCP regression — preview denials
+  linked fgac.ai for requests that exist only in the preview's database
+  (fixed by src/lib/linkOrigin.ts; unit-pinned by `scripts/test-link-origin.ts`)
 
 ### A10: Denial-minted links match the access level the operation needs
 - Read the `a` (action) query parameter of the approval link from each denied
@@ -311,10 +315,9 @@
   `request_access` for a sheet (A8 shape, any plausible spreadsheet id with a
   `resourceName` — the argument is `resourceName`, not `title`; a mint
   without it stores no name and the banner shows the file id) and do NOT
-  open the link the agent returns. On a preview deployment the returned
-  link carries the PRODUCTION origin (`DASHBOARD_URL` prefers
-  `NEXT_PUBLIC_APP_URL`); rewrite the origin to the preview host before
-  opening any link — the signature covers only `a/k/r/s`. Then visit
+  open the link the agent returns. Since 2026-10-09 the returned link names
+  the deployment serving the request (A9), so on a preview it opens on the
+  preview as-is; a link naming fgac.ai there is an A9 failure. Then visit
   `/dashboard` (the profile page it redirects to) in the built-in browser
 - **Expected**: above the profile view a card `[data-testid=pending-approvals-banner]`
   says "An agent is waiting for your approval" with one

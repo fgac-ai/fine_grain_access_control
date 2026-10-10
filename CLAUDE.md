@@ -12,6 +12,12 @@
 4. Review the `docs/` folder and update the docs and data model to match your changes.
 5. Commit frequently as you work through the problem.
 6. **Validation**: Validate changes locally, then in the preview branch via `/deploy-pr-preview`, running the applicable `docs/QA_Acceptance_Test` suites before handing back to the user.
+   **Pushes do not all build (Ignored Build Step, `scripts/vercel-should-build.sh`).**
+   Vercel builds `main` and `integration/*`; a feature branch (`claude/*` etc.) builds
+   only after a commit whose **subject ends with** `[preview]` (sticky once it has built; merely mentioning the token mid-message does not count).
+   Docs-only pushes (`docs/**`, `.claude/**`, root `*.md`) never rebuild, so plan-doc
+   revisions on a train cost nothing and the train's preview URL stays current.
+   `/deploy-pr-preview` handles the opt-in. Production builds are unaffected.
 7. **Browser Automation**: In Claude Code, use the **built-in browser tools** (`mcp__Claude_Browser__*`) for ALL UI testing — `preview_start`, `navigate`, `get_page_text`, `read_page`, `read_console_messages`, `read_network_requests`, `computer`, `resize_window` (viewport + light/dark emulation). NEVER write ad-hoc Node.js browser scripts. **The built-in browser keeps persistent cookies, and both QA Google accounts (`USER_A`, `USER_B`) are signed in there** — so signed-in flows (dashboard, Clerk sign-in via the Google account chooser, OAuth consent) run in the built-in browser too; switching accounts through the chooser is the standing-approved routine step.
 
    **Fall back to Path B (Playwright CLI CDP-attached Chrome, see `/browser-agent`) BY DEFAULT — without asking — whenever the built-in browser cannot drive a flow.** Known triggers, from QA experience:
@@ -345,7 +351,10 @@ user ids are production-instance ids too.
 
 Vercel **Preview deployments run against an isolated Neon branch**, named
 `preview/<git-branch>`, created by the Vercel–Neon integration on the first preview
-deploy of that git branch. Facts that are easy to get wrong:
+deploy of that git branch — **including a deployment the Ignored Build Step then
+cancels** (measured 2026-10-08: the branch appeared ~90 s before the skipped build
+started). Skipping builds saves build minutes, not Neon branches; the pruner reaps
+the unused ones. Facts that are easy to get wrong:
 
 - **`vercel env ls` / `vercel env pull --environment=preview` CANNOT see this.** They
   show the stored project vars, where `POSTGRES_URL` points at production. The

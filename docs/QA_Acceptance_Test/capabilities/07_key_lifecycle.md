@@ -10,7 +10,12 @@
 
 ### A2: Revoked key shows timestamp in dashboard
 - Check the dashboard after revocation
-- **Expected**: Key marked as "Revoked" with timestamp for auditing
+- **Expected**: The profile's tab disappears, and a "N revoked profile(s)"
+  disclosure at the bottom of every profile page (and of the no-profile
+  page) lists it struck through with a "Revoked" badge and the revocation
+  date AND time. Evidence must be the rendered text — the timestamp in the
+  page's data payload alone does not pass (2026-10-09 regression: it was
+  only there)
 
 ### A3: Key rolling generates new value atomically
 - Roll a key — note old value, get new value

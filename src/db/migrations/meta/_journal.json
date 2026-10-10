@@ -141,6 +141,13 @@
       "when": 1791076331943,
       "tag": "0021_resumable_session_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1791596015791,
+      "tag": "0022_drive_full_scope_since",
+      "breakpoints": true
     }
   ]
 }
