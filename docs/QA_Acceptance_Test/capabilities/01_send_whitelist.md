@@ -9,7 +9,7 @@
 - **Expected**: Proxy passes the request, email sent successfully
 
 ### A2: Send to blocked address is refused with an actionable denial
-- Send an email to an address NOT on the send whitelist (e.g., `blocked@untrusted.com`)
+- Send an email to an address NOT on the send whitelist (e.g., `blocked@example.net`)
 - **Expected**: Nothing is sent, and the denial names the offending recipient and
   the reason. Assert on **substance, not an exact string** — the two live shapes are
   `🚫 Unauthorized recipient. '<addr>' is not in the send whitelist.` (a whitelist
@@ -31,8 +31,11 @@
   "Enable sending to anyone" (shown while no all-recipients rule covers the
   profile)
 - **Expected**: A single click creates a "Send to Anyone" send_whitelist rule
-  (pattern `*`) assigned to the Default Profile; `gmail_send` to any address
-  now succeeds on that profile; other profiles are unaffected; deleting the
+  (pattern `*`) assigned to the Default Profile; `gmail_send` to an address not
+  otherwise whitelisted now succeeds on that profile — **prove it with the other
+  QA account (USER_B), never an outside address**: under a `*` rule every send is
+  real, and `blocked@example.net` is for denials only; other profiles are
+  unaffected; deleting the
   rule restores the deny-by-default posture and the button reappears
 
 ### A5: Wildcard rules can be created and re-saved through the form

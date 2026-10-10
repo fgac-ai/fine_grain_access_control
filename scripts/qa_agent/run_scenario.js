@@ -8,9 +8,9 @@ const scenarios = {
     const res1 = await sendEmail(email, 'allowed@example.com', 'Test allowed', 'This should pass');
     console.log(`Response to allowed@example.com: Status ${res1.status}`, res1.data);
     
-    console.log(`\nAttempting to send email to blocked@untrusted.com`);
-    const res2 = await sendEmail(email, 'blocked@untrusted.com', 'Test blocked', 'This should fail');
-    console.log(`Response to blocked@untrusted.com: Status ${res2.status}`, res2.data);
+    console.log(`\nAttempting to send email to blocked@example.net`);
+    const res2 = await sendEmail(email, 'blocked@example.net', 'Test blocked', 'This should fail');
+    console.log(`Response to blocked@example.net: Status ${res2.status}`, res2.data);
   },
   '02_blacklist_read': async (email) => {
     console.log(`\n--- Running Scenario: 02_blacklist_read for ${email} ---`);

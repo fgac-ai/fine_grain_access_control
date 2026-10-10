@@ -54,7 +54,7 @@ curl -X POST http://localhost:18790/api/chat \
 curl -X POST http://localhost:18790/api/chat \
   -H "Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"message": "Send an email to blocked@untrusted.com with subject Blocked using fgac"}'
+  -d '{"message": "Send an email to blocked@example.net with subject Blocked using fgac"}'
 ```
 - [ ] OpenClaw reports whitelist error from skill output
 - [ ] Agent does not crash — handles error gracefully

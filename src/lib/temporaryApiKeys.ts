@@ -148,6 +148,27 @@ export function requestSource(headers: Headers): string {
   return headers.get('x-forwarded-for')?.split(',')[0].trim() || headers.get('x-real-ip')?.trim() || 'unknown';
 }
 
+/**
+ * What the reachability ping reports for a temporary key. Mirrors the proxy's own
+ * checks (src/app/api/proxy/[...path]/route.ts) so `key-valid` means a real call would
+ * authenticate: the key's own revocation/expiry AND its parent profile's. Before
+ * 2026-10-09 the ping skipped the parent, so a key under a revoked profile pinged
+ * valid and then got 401 on every real call (train QA, capability 23).
+ */
+export type TempKeyPingOutcome = 'valid' | 'revoked' | 'expired' | 'parent-revoked' | 'parent-expired' | 'invalid';
+export function tempKeyPingOutcome(
+  key: { revokedAt: Date | null; expiresAt: Date },
+  parent: { revokedAt: Date | null; expiresAt: Date | null } | undefined,
+  now = new Date(),
+): TempKeyPingOutcome {
+  if (key.revokedAt) return 'revoked';
+  if (key.expiresAt < now) return 'expired';
+  if (!parent) return 'invalid';
+  if (parent.revokedAt) return 'parent-revoked';
+  if (parent.expiresAt && parent.expiresAt < now) return 'parent-expired';
+  return 'valid';
+}
+
 /** First line of what the check printed, short, with anything key-shaped removed (it goes to analytics). */
 export function sanitizeCheckOutput(output: string | undefined): string | undefined {
   const line = output?.split('\n').map(l => l.trim()).find(Boolean);
@@ -220,6 +241,7 @@ export function temporaryKeyRecipe(opts: {
       'reachability "unreachable" (error or other reply) or "command_denied" (refused to run). It creates no key ' +
       'and tells you exactly what to tell the user.',
     `  - ${PING_OK} key-invalid: the script is not sending the key you were given. Re-write api_key into KEY_FILE exactly.`,
+    `  - ${PING_OK} key-revoked or key-parent-revoked: the user revoked this key or its agent profile. Stop, and ask the user before creating another one.`,
   ];
   const auth = '-H "Authorization: Bearer $(cat "$KEY_FILE")"';
   const recipes: Record<TempKeyPurpose, string[]> = {

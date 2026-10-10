@@ -31,7 +31,7 @@ import {
   clampTtlMinutes, expectedBytesBucket, generateTemporaryKey, hashTemporaryKey, isTemporaryKey,
   temporaryKeyRecipe, hashUploadId, TEMP_KEY_PREFIX, PROXY_MAX_REQUEST_BYTES, PING_OK,
   deploymentHostCopy, deploymentOrigin, reachabilityFallback, sanitizeCheckOutput, TEMP_KEY_REACHABILITY,
-  createPingEventGate, requestSource,
+  createPingEventGate, requestSource, tempKeyPingOutcome,
 } from '../src/lib/temporaryApiKeys';
 import { TOOL_DEFS } from '../src/app/api/mcp/toolDefs';
 
@@ -221,6 +221,25 @@ async function main() {
     const pingSrc2 = readFileSync(join(__dirname, '..', 'src', 'app', 'api', 'proxy', 'ping', 'route.ts'), 'utf8');
     check('ping: the anonymous event is gated, the response is not', /if \(pingEventGate\(requestSource\(request\.headers\)\)\) captureServerEvent/.test(pingSrc2)
       && /\}\);\n    return text\(PING_OK\);/.test(pingSrc2));
+  }
+  // The ping mirrors the proxy: key-valid only when a real call would authenticate.
+  {
+    const now = new Date('2026-10-09T12:00:00Z');
+    const live = { revokedAt: null, expiresAt: new Date('2026-10-09T12:10:00Z') };
+    const parentOk = { revokedAt: null, expiresAt: null };
+    check('ping outcome: live key under a live profile is valid', tempKeyPingOutcome(live, parentOk, now) === 'valid');
+    check('ping outcome: revoked parent profile → parent-revoked (was valid before 2026-10-09)',
+      tempKeyPingOutcome(live, { revokedAt: new Date('2026-10-09T11:00:00Z'), expiresAt: null }, now) === 'parent-revoked');
+    check('ping outcome: expired parent profile → parent-expired',
+      tempKeyPingOutcome(live, { revokedAt: null, expiresAt: new Date('2026-10-09T11:59:00Z') }, now) === 'parent-expired');
+    check('ping outcome: missing parent → invalid', tempKeyPingOutcome(live, undefined, now) === 'invalid');
+    check('ping outcome: the key\'s own state wins over the parent\'s',
+      tempKeyPingOutcome({ revokedAt: new Date(), expiresAt: live.expiresAt }, undefined, now) === 'revoked'
+      && tempKeyPingOutcome({ revokedAt: null, expiresAt: new Date('2026-10-09T11:00:00Z') }, parentOk, now) === 'expired');
+    const pingSrc3 = readFileSync(join(__dirname, '..', 'src', 'app', 'api', 'proxy', 'ping', 'route.ts'), 'utf8');
+    check('ping route looks up the parent profile and uses tempKeyPingOutcome',
+      pingSrc3.includes('eq(proxyKeys.id, tempKey.parentKeyId)') && pingSrc3.includes('tempKeyPingOutcome(tempKey, parent)'));
+    check('every recipe says what key-revoked / key-parent-revoked mean', allRecipes.every(r => r.includes('key-parent-revoked')));
   }
   const send = allRecipes[2];
   const [iRaw, iMedia, iResumable] = ['{"raw":', 'uploadType=media', 'uploadType=resumable'].map(s => send.indexOf(s));
