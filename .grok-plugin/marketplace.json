@@ -5,7 +5,7 @@
   "plugins": [
     {
       "name": "fgac-mcp",
-      "description": "FGAC.ai hosted MCP server: multiple Gmail accounts, editable Google Sheets & Docs for AI agents, behind deny-by-default access rules. OAuth sign-in on first connect, nothing to install.",
+      "description": "Several Gmail accounts in one connection, plus editable Google Sheets, Docs and Slides, behind per-sender and per-file access rules you control. A blocked action returns a one-click approval link instead of a dead end. Hosted by FGAC.ai: sign in with Google on first use, nothing to install.",
       "category": "productivity",
       "source": { "type": "local", "path": "./public/skills/fgac-mcp" },
       "homepage": "https://fgac.ai/docs",
