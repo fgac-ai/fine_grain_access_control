@@ -3723,3 +3723,67 @@ as everywhere else.
    at the client's permission defaults, not at our egress. A
    `minted_unreported` share that stays high means agents are skipping the
    check; tighten the description.
+
+**7.35 — Template read-rule blocks: what is over-blocking and what is not.**
+Added 2026-10-14. The daily review's read-rule watch spawns an investigation
+whenever a template rule blocks the watched support customer. This section
+records the verdict so a block of the expected kind is reported, not
+re-investigated.
+
+- **Block Sign In Alerts — fixed.** The legacy spaced `Sign In` pattern was
+  the over-blocker (8 of 14 messages in one inbox sweep). Migration 0023
+  (PR #201, train PR #203) moved every stored row to `sign-in`; it reached
+  production 2026-10-10 17:31Z. Every Sign In block in the week to 10-14 came
+  before that time, and there are none after it. **A Sign In block after
+  2026-10-10 17:31Z is a regression — investigate it.**
+- **Block Password Resets / Block Verification Codes — not over-blocking.
+  Leave them alone.** Checked 2026-10-14:
+  - *Stored patterns*: all 22 holders store exactly the current template,
+    `Password Reset` and `Verification Code`. There are no legacy variants, so
+    there is nothing to migrate.
+  - *Volume*: since decoded-body matching shipped (~09-04), Password Resets
+    has blocked 4 reads from 3 people and Verification Codes 1 read from 1
+    person. Sign In blocked 49 reads from 7 people over the same window. Each
+    of these blocks was 1 message out of a sweep of 11–43 distinct messages.
+    The Sign In sweep was 8 of 14.
+  - *What the patterns match*: case-insensitive substring over headers,
+    snippet, filenames and decoded bodies (`collectMessageContent`, flag `i`
+    in `compileRulePattern`). Ordinary account-management prose does not
+    match: "Forgot your password? Reset it here", "Reset password" and
+    "reset your password" all pass, because the noun phrase "password reset"
+    is the reset mail's own idiom. `Verification Code` can match a
+    non-code warning ("never share your verification code"), but these sit
+    in mail from the same senders that send codes. One block in six weeks
+    shows no business-mail exposure.
+  - *Genuineness* (metadata only, no content read): the watched customer's
+    10-12 Password Resets block was on a `format=metadata` read, which
+    returns headers and the snippet, not the body. So the phrase sat in the
+    subject, sender or first lines, which is where a real reset notice puts
+    it. The other blocks were full-format reads and cannot be judged
+    without reading the mail. Nothing points to business mail. **Inferred,
+    not observed:** these were genuine security mails.
+  - **Re-open only if** one person gets ≥ 3 Password Resets or Verification
+    Codes blocks in 7 days, or either rule blocks more than 1 message in one
+    sweep. Either would mean the phrase is reaching prose. Then tighten the
+    template, and migrate stored rows the way 0023 did.
+
+```sql
+-- Template read-rule blocks per rule and person, last 7 days
+SELECT extract(properties.restriction, 'read rule ''([^'']+)''') AS rule,
+       person_id, count() AS blocks, min(timestamp) AS first_at
+FROM events
+WHERE event = 'read_restriction_enforced'
+  AND properties.environment = 'production'
+  AND timestamp > now() - INTERVAL 7 DAY
+GROUP BY rule, person_id ORDER BY blocks DESC
+```
+
+To get the sweep share, join each block to the person's `$mcp_tool_call`
+reads within ±5 minutes: distinct `message_id_hash` refused versus read.
+`format = 'metadata'` on a refused `gmail_read` means the match came from
+headers or the snippet.
+
+One open side issue: a list response (`GET gmail/v1/users/me/threads`) is
+refused as a whole when one thread's snippet matches. One such block was seen
+(10-09, legacy Sign In). That conflicts with the policy that messages may
+still appear in listings. It is tracked separately.
