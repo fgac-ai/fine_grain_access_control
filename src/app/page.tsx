@@ -276,10 +276,11 @@ export default async function LandingPage() {
               </h3>
               <p className="text-sm leading-relaxed text-muted-foreground">
                 Our use of Google API data adheres to the{' '}
-                <Link href="/privacy" className="text-primary underline">
+                <Link href="/privacy#google-limited-use" className="text-primary underline">
                   Google API Services User Data Policy
                 </Link>
-                , including the Limited Use requirements.
+                , including the Limited Use requirements. Google Workspace data is
+                never used to train AI or machine-learning models.
               </p>
             </div>
           </div>

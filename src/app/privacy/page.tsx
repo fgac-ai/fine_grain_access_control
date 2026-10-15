@@ -15,7 +15,7 @@ export const metadata: Metadata = {
    effective date below. The date is a fixed string on purpose: a page that
    stamps today's date on every render reads as a template to a reviewer. */
 
-const EFFECTIVE_DATE = 'October 3, 2026';
+const EFFECTIVE_DATE = 'October 14, 2026';
 
 const LIMITED_USE_URL =
   'https://developers.google.com/terms/api-services-user-data-policy#additional_requirements_for_specific_api_scopes';
@@ -24,7 +24,7 @@ const SUPPORT_EMAIL = 'support@fgac.ai';
 
 const SECTIONS = [
   { id: 'introduction', title: '1. Introduction' },
-  { id: 'google-limited-use', title: '2. Google API Services User Data Policy' },
+  { id: 'google-limited-use', title: '2. Google API Services User Data Policy and Limited Use' },
   { id: 'information-we-collect', title: '3. Information we collect' },
   { id: 'how-we-use', title: '4. How we use information' },
   { id: 'ai-agents', title: '5. AI agents and MCP clients you connect' },
@@ -133,6 +133,12 @@ export default function PrivacyPolicy() {
                 FGAC.ai&rsquo;s use and transfer to any other app of information received from Google APIs will adhere to the{' '}
                 <Ext href={LIMITED_USE_URL}>Google API Services User Data Policy</Ext>, including the Limited Use requirements.
               </p>
+              <p className="mt-2 font-medium text-foreground">
+                The use of raw or derived user data received from Google Workspace APIs will adhere to the Google User Data
+                Policy, including the Limited Use requirements. FGAC.ai does not use, transfer or sell Google user data, whether
+                raw, aggregated, anonymized or derived, to create, train or improve foundational or generalized artificial-intelligence
+                or machine-learning models.
+              </p>
             </div>
             <p>In plain terms, for information FGAC receives from Google APIs, we:</p>
             <ul className="list-disc space-y-2 pl-5">
@@ -155,6 +161,14 @@ export default function PrivacyPolicy() {
                 <strong className="text-foreground">Do not use it to develop, improve or train generalized artificial-intelligence or
                 machine-learning models.</strong> FGAC itself runs no AI models over your data. The only AI involved is the agent you
                 choose to connect (Section 5).
+              </li>
+              <li>
+                <strong className="text-foreground">Have no AI provider of our own.</strong> FGAC does not integrate with, contract with or
+                send your Google data to any AI or machine-learning service on its own initiative. Google data reaches an AI service
+                only when you connect your own agent and that agent asks for it, and then only the results your rules allow. Many
+                consumer AI plans can use conversations for model training unless you turn that off, so we recommend disabling it in
+                the agent you connect (for example &ldquo;Help improve Claude&rdquo; in Claude&rsquo;s privacy settings, or
+                &ldquo;Improve the model for everyone&rdquo; in ChatGPT&rsquo;s data controls).
               </li>
             </ul>
           </Section>
