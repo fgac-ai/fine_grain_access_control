@@ -1678,6 +1678,22 @@ not worth a rule until they recur). On 09-15, the first full day after
 #138, the change labels 82 of the 102 unlabelled `direct` rows (81 mcpdd,
 1 eyrie-validator); the 20 left are LiveAgent 15, `Anthropic` 4, `mcp` 1.
 
+
+**Uptime / status monitors, 2026-10-14.** The unlabelled `direct` `no_token`
+series went from ~110/day (10-11) to 350–450/day, and 7.21b put one source
+behind the jump: `client_name = 'fixter-uptime'` on `fixter-monitoring/1.0`
+(one earlier row on `python-httpx/0.28.1`), a tokenless POST loop since
+2026-10-12 — 145 rows on 10-13, 306 by 10:00Z on 10-14. Alongside it,
+`McpStatus/0.1` with no clientInfo, ~5/day since 10-08. Checked before
+classing (90 days, every event, both strings): **0 `outcome = 'ok'`, 0
+`mcp_client_initialize`, 0 `$mcp_tool_call`** — the only rows are
+`no_token` `mcp_auth_attempt` + its `connector_install_started` twin. Rules:
+`name:fixter-uptime`, `ua:fixter-monitoring/`, `ua:McpStatus/`. The same
+operator's crawler `FixterBot/0.1 (+https://fixter.dev/bot)` was already
+`scanner` via `keyword:bot`. `uptime` and `status` were deliberately not
+added to the vocabulary — too generic to be tells on their own. Rows before
+the deploy keep their `direct` label, so 7.21e drops back toward the
+~110/day remainder from the deploy onward, not retroactively.
 ```sql
 -- 7.21a — daily auth failures by class (14 d). `direct` is the unclassified
 -- remainder: a jump there is either a crawler the classifier misses (add it
