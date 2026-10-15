@@ -5,6 +5,8 @@
  *
  *   npm run qa:mint-link -- --email <owner email> [--action sheets_expose]
  *                           [--file <spreadsheet/document id>] [--base http://localhost:3000]
+ *   npm run qa:mint-link -- --email <owner email> --action send_whitelist --recipient <address>
+ *     (A6's plus-addressed variant: pass the owner's address with a +tag)
  *
  * Read-only against the branch database (owner row + their live Default
  * Profile, else newest live key) and signs with THIS checkout's
@@ -19,7 +21,7 @@ config({ path: '.env.local' });
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import type { ApprovalAction } from '../src/lib/approvalLinks';
 
-type Args = { email?: string; action: string; file: string; base: string };
+type Args = { email?: string; action: string; file: string; base: string; recipient?: string };
 
 function parseArgs(argv: string[]): Args {
   const out: Args = { action: 'sheets_expose', file: '1QaSecondAccountFixtureSheetIdxxxxxxxxxxxx', base: process.env.NEXT_PUBLIC_APP_URL?.trim() || 'http://localhost:3000' };
@@ -30,6 +32,7 @@ function parseArgs(argv: string[]): Args {
     else if (a === '--action') out.action = next() ?? out.action;
     else if (a === '--file') out.file = next() ?? out.file;
     else if (a === '--base') out.base = next() ?? out.base;
+    else if (a === '--recipient') out.recipient = next();
   }
   return out;
 }
@@ -37,7 +40,7 @@ function parseArgs(argv: string[]): Args {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!args.email) {
-    console.error('usage: npm run qa:mint-link -- --email <owner email> [--action sheets_expose|sheets_write|docs_expose|docs_write|slides_expose|slides_write|send_all] [--file <id>] [--base <origin>]');
+    console.error('usage: npm run qa:mint-link -- --email <owner email> [--action sheets_expose|send_whitelist|sheets_write|docs_expose|docs_write|slides_expose|slides_write|send_all] [--file <id>] [--recipient <address>] [--base <origin>]');
     process.exit(2);
   }
   const { db } = await import('../src/db');
@@ -61,6 +64,10 @@ async function main() {
   let action: ApprovalAction;
   switch (args.action) {
     case 'send_all': action = { action: 'send_all' }; break;
+    case 'send_whitelist':
+      if (!args.recipient) { console.error('send_whitelist needs --recipient <address>'); process.exit(2); }
+      action = { action: 'send_whitelist', recipient: args.recipient };
+      break;
     case 'sheets_expose': action = { action: 'sheets_expose', spreadsheetId: args.file, resourceName: 'QA second-account fixture' }; break;
     case 'sheets_write': action = { action: 'sheets_write', spreadsheetId: args.file, resourceName: 'QA second-account fixture' }; break;
     case 'docs_expose': action = { action: 'docs_expose', documentId: args.file }; break;

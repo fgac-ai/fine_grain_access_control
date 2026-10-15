@@ -125,6 +125,46 @@ export function actionTarget(action: ApprovalAction): string {
   }
 }
 
+/**
+ * Wire form of the target in `r` (2026-10-14, capability 14 A6).
+ *
+ * A signed-out owner reaches the approve page through Clerk's sign-in wall
+ * and the Google OAuth return leg, which decodes `redirect_url` one time too
+ * many: `+` arrives as a space, `&` truncates `r`, and `%` is dropped. The
+ * signature then fails and the genuine owner sees "Invalid link". So a
+ * target carrying ANY character outside a decode-proof set travels as
+ * `~<base64url(target)>` instead — base64url and `~` are unreserved, so
+ * there is nothing left for a redundant decode to mangle.
+ *
+ * Plain addresses and Google file ids stay verbatim, so links for them are
+ * byte-identical to the ones minted before this change (A12 determinism
+ * across the deploy). The two forms cannot collide: base64url never contains
+ * `@` while every address does, file ids never start with `~`, and a raw
+ * target starting with `~` is itself outside the safe set and gets encoded.
+ * The signature is over the DECODED target, so both forms of one grant
+ * verify identically — no new grant becomes reachable.
+ */
+const SAFE_TARGET = /^[A-Za-z0-9._@-]*$/;
+const ENCODED_TARGET = /^~([A-Za-z0-9_-]+)$/;
+
+export function encodeApprovalTarget(target: string): string {
+  if (SAFE_TARGET.test(target)) return target;
+  return `~${b64url(new TextEncoder().encode(target).buffer as ArrayBuffer)}`;
+}
+
+/** Inverse of encodeApprovalTarget; a value not in the encoded form is raw. */
+export function decodeApprovalTarget(param: string): string {
+  const m = ENCODED_TARGET.exec(param);
+  if (!m) return param;
+  try {
+    const b64 = m[1].replace(/-/g, '+').replace(/_/g, '/');
+    const bin = atob(b64 + '='.repeat((4 - (b64.length % 4)) % 4));
+    return new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(bin, c => c.charCodeAt(0)));
+  } catch {
+    return param;
+  }
+}
+
 /** Canonical string every derived value is computed over. */
 function canonical(userId: string, proxyKeyId: string, action: string, target: string): string {
   // \n is not valid in any component (ids are UUIDs, actions are an enum, and
@@ -222,7 +262,7 @@ export async function mintApprovalLink(
   const q = new URLSearchParams();
   q.set(APPROVAL_PARAMS.action, action.action);
   q.set(APPROVAL_PARAMS.key, proxyKeyId);
-  if (target) q.set(APPROVAL_PARAMS.target, target);
+  if (target) q.set(APPROVAL_PARAMS.target, encodeApprovalTarget(target));
   q.set(APPROVAL_PARAMS.signature, signature);
   // `query` is what the ledger stores (approval_requests.link_query) so the
   // dashboard's pending-approvals banner can re-open the link as minted.
@@ -266,13 +306,21 @@ export async function verifyApprovalParams(
 ): Promise<VerifyResult> {
   const action = params.a;
   const proxyKeyId = params.k;
-  const target = params.r ?? '';
   const signature = params.s;
   if (!action || !proxyKeyId || !signature) return { ok: false, reason: 'invalid' };
   if (!APPROVAL_ACTIONS.includes(action as ApprovalActionName)) return { ok: false, reason: 'invalid' };
 
-  const expected = await approvalSignature(signedInUserId, proxyKeyId, action, target);
-  if (!safeEqual(expected, signature)) return { ok: false, reason: 'invalid' };
+  // Legacy links (minted before the `~` form) still carry a raw `+` that the
+  // sign-in return leg turns into a space. A space is never valid in an
+  // address or a file id, so on a mismatch retry with spaces read back as
+  // `+` — the signature still gates the result, so this widens nothing.
+  let target = '';
+  let matched = false;
+  for (const candidate of approvalTargetCandidates(params.r ?? '')) {
+    const expected = await approvalSignature(signedInUserId, proxyKeyId, action, candidate);
+    if (safeEqual(expected, signature)) { target = candidate; matched = true; break; }
+  }
+  if (!matched) return { ok: false, reason: 'invalid' };
 
   const name = action as ApprovalActionName;
   const requestId = await approvalRequestId(signedInUserId, proxyKeyId, name, target);
@@ -287,6 +335,12 @@ export async function verifyApprovalParams(
       ...fileIdFields(name, target),
     },
   };
+}
+
+/** Targets a received `r` may stand for, most likely first. */
+function approvalTargetCandidates(param: string): string[] {
+  const decoded = decodeApprovalTarget(param);
+  return decoded.includes(' ') ? [decoded, decoded.replace(/ /g, '+')] : [decoded];
 }
 
 /** `{ <idKey>: target }` for a per-file action, `{}` otherwise. */
