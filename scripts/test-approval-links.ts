@@ -4,13 +4,14 @@
  *
  * These are the unit-level twins of QA capability 14's A5 (wrong user), A7
  * (tampering), A9 (well-formed URL), A10 (action matches), A12 (determinism)
- * and A13 (no expiry).
+ * and A13 (no expiry), plus A6's signed-out `+tag` recipient.
  */
 process.env.CLERK_SECRET_KEY = process.env.CLERK_SECRET_KEY || 'sk_test_unit_only_signing_seed';
 
 import {
   mintApprovalLink, mintApprovalUrl, verifyApprovalParams, describeApproval,
   approvalRequestId, approvalTargetHash, APPROVAL_ACTIONS, actionTarget,
+  encodeApprovalTarget, decodeApprovalTarget, approvalSignature,
   type ApprovalAction, type ApprovalSearchParams,
 } from '../src/lib/approvalLinks';
 
@@ -132,6 +133,64 @@ async function main() {
   // component exists — a link minted "long ago" is byte-identical to one
   // minted now, so it cannot go stale.
   check('no exp/iat/jti anywhere in the url', !/exp|iat|jti/.test(first.url));
+
+  // ── A6: reserved characters survive the sign-in return leg (2026-10-14) ─
+  // Signed out, the link rides Clerk's redirect_url through Google sign-in and
+  // comes back decoded one extra time: `+` → space, `&` truncates `r`, `%`
+  // drops. Simulate that leg and require the owner still verifies.
+  // Addresses are assembled from parts (public-repo email guard).
+  const at = (local: string) => [local, 'example.com'].join('@');
+  /** The query as it lands after one redundant decode on the return leg. */
+  const afterSignInLeg = (url: string): ApprovalSearchParams => {
+    const raw = new URL(url).search.slice(1);
+    let mangled: string;
+    try { mangled = decodeURIComponent(raw); } catch { mangled = raw.replace(/%/g, ''); }
+    const q = new URLSearchParams(mangled);
+    return { a: q.get('a') ?? undefined, k: q.get('k') ?? undefined, r: q.get('r') ?? undefined, s: q.get('s') ?? undefined };
+  };
+  const tricky = [at('owner+tag'), at('a&b'), at('100%real'), at('sp ace'), at('~tilde'), at('o+t&x%y=z#w'), at('ünï')];
+  for (const recipient of tricky) {
+    const minted = await mintApprovalLink(BASE, 'user-1', 'key-1', { action: 'send_whitelist', recipient });
+    const r = new URL(minted.url).searchParams.get('r') ?? '';
+    check(`${JSON.stringify(recipient)} travels decode-proof`, /^~[A-Za-z0-9_-]+$/.test(r));
+    const v = await verifyApprovalParams('user-1', afterSignInLeg(minted.url));
+    check(`${JSON.stringify(recipient)} verifies after the sign-in leg`, v.ok && v.payload.recipient === recipient);
+    check(`${JSON.stringify(recipient)} keeps its request_id`, v.ok && v.payload.requestId === minted.requestId);
+    check(`${JSON.stringify(recipient)} still verifies undamaged`,
+      (await verifyApprovalParams('user-1', paramsOf(minted.url))).ok);
+    // A5/A19: the wrong-account path re-verifies against the resolved owner,
+    // so the mangled link must still fail for a non-owner — and recover.
+    check(`${JSON.stringify(recipient)} still rejects a non-owner`,
+      !(await verifyApprovalParams('user-2', afterSignInLeg(minted.url))).ok);
+    check(`${JSON.stringify(recipient)} target_hash matches the minted one`,
+      (await approvalTargetHash(decodeApprovalTarget(r))) === minted.targetHash);
+  }
+  check('plain address stays verbatim (pre-change links unchanged)',
+    new URL(first.url).searchParams.get('r') === actionTarget(SEND));
+  check('google file id stays verbatim', encodeApprovalTarget('1AbC-d_9xYz') === '1AbC-d_9xYz');
+  check('decode is the inverse of encode', tricky.every(t => decodeApprovalTarget(encodeApprovalTarget(t)) === t));
+  check('a raw value that only looks encoded is left alone', decodeApprovalTarget('~not@base64') === '~not@base64');
+
+  // Legacy links minted before the `~` form carry a raw `+`. Tolerant
+  // verification reads the space back as `+`; the signature still gates it.
+  const plus = at('owner+tag');
+  const legacy = {
+    a: 'send_whitelist', k: 'key-1', r: plus,
+    s: await approvalSignature('user-1', 'key-1', 'send_whitelist', plus),
+  };
+  const legacyMangled = { ...legacy, r: plus.replace('+', ' ') };
+  const lv = await verifyApprovalParams('user-1', legacyMangled);
+  check('legacy +tag link verifies after + → space', lv.ok && lv.payload.recipient === plus);
+  check('legacy +tag link still verifies undamaged', (await verifyApprovalParams('user-1', legacy)).ok);
+  check('legacy mangled link still rejects a non-owner', !(await verifyApprovalParams('user-2', legacyMangled)).ok);
+  const spaced = at('sp ace');
+  check('a genuine space target is not rewritten to +', await (async () => {
+    const s2 = await approvalSignature('user-1', 'key-1', 'send_whitelist', spaced);
+    const v = await verifyApprovalParams('user-1', { a: 'send_whitelist', k: 'key-1', r: spaced, s: s2 });
+    return v.ok && v.payload.recipient === spaced;
+  })());
+  check('tolerance does not accept a different target',
+    !(await verifyApprovalParams('user-1', { ...legacy, r: at('owner tog') })).ok);
 
   // ── A9: well-formed, single-line URLs ────────────────────────────────────
   check('url targets /dashboard/approve', first.url.startsWith('https://fgac.ai/dashboard/approve?'));

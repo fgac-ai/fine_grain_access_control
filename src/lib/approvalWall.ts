@@ -23,6 +23,7 @@ import {
   APPROVAL_ACTIONS,
   APPROVAL_PARAMS,
   approvalTargetHash,
+  decodeApprovalTarget,
   type ApprovalActionName,
 } from './approvalLinks';
 import { classifyApproveClient, type ApproveClient } from './approveClientClass';
@@ -69,7 +70,7 @@ export async function describeApprovalWallHit(url: URL, headers: Headers): Promi
     ? (rawAction as ApprovalActionName)
     : 'unknown';
   const key = url.searchParams.get(APPROVAL_PARAMS.key) ?? undefined;
-  const target = url.searchParams.get(APPROVAL_PARAMS.target) ?? '';
+  const target = decodeApprovalTarget(url.searchParams.get(APPROVAL_PARAMS.target) ?? '');
   const ua = headers.get('user-agent') ?? '';
   return {
     action,

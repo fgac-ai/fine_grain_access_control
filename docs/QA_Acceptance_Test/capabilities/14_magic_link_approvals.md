@@ -68,6 +68,22 @@
 - Open a valid link in a signed-out browser
 - **Expected**: Sign-in is required first; after signing in as the owning
   user the approval proceeds (signing in as anyone else hits A5 behavior)
+- **Required variant — plus-addressed recipient, signed out.** Mint a
+  `send_whitelist` link whose recipient carries a `+tag` (e.g. the owner's
+  own address with `+qa` before the `@`; `scripts/qa-mint-approval-link.ts`
+  mints it deterministically). Open it signed out and complete the Clerk +
+  Google sign-in leg as the owner.
+  - **Expected**: the confirm page names the recipient with the `+tag`
+    intact, and approving grants exactly that address (not a space-for-`+`
+    variant). The minted URL carries the recipient as `r=~<base64url>`, not
+    a raw address — a raw `+`/`&`/`%` in `r` is a regression.
+  - **Expected (non-owner)**: the same link opened signed out and signed in
+    as the OTHER QA account shows the A5/A19 wrong-account card, never the
+    generic "Invalid link" card.
+  - Background (2026-10-14): the sign-in return leg decodes `redirect_url`
+    once too many (`+` → space, `&` truncates `r`, `%` drops), so before the
+    fix the genuine owner of a `+tag` link saw "Invalid link". Plain-address
+    links were unaffected and still carry `r` verbatim.
 
 ### A7: Tampered links are rejected
 - Modify one character of the link's signature or its recipient parameter
