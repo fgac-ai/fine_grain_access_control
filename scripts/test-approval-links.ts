@@ -169,6 +169,12 @@ async function main() {
     new URL(first.url).searchParams.get('r') === actionTarget(SEND));
   check('google file id stays verbatim', encodeApprovalTarget('1AbC-d_9xYz') === '1AbC-d_9xYz');
   check('decode is the inverse of encode', tricky.every(t => decodeApprovalTarget(encodeApprovalTarget(t)) === t));
+  {
+    // atob ignores unused trailing bits: an edited final character must not alias the minted form.
+    const wire = encodeApprovalTarget('a+bc@example.com');
+    const aliases = ['8', '9', '-', '_'].map(c => wire.slice(0, -1) + c).filter(w => w !== wire);
+    check('non-canonical encoded alias does not decode', aliases.every(w => decodeApprovalTarget(w) === w));
+  }
   check('a raw value that only looks encoded is left alone', decodeApprovalTarget('~not@base64') === '~not@base64');
 
   // Legacy links minted before the `~` form carry a raw `+`. Tolerant

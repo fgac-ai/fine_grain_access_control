@@ -159,7 +159,11 @@ export function decodeApprovalTarget(param: string): string {
   try {
     const b64 = m[1].replace(/-/g, '+').replace(/_/g, '/');
     const bin = atob(b64 + '='.repeat((4 - (b64.length % 4)) % 4));
-    return new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(bin, c => c.charCodeAt(0)));
+    const target = new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(bin, c => c.charCodeAt(0)));
+    // atob ignores the unused trailing bits, so several final characters decode
+    // to the same bytes. Accept only the form encodeApprovalTarget mints: one
+    // wire form per link, and any edited character is a tampered link (A7).
+    return encodeApprovalTarget(target) === param ? target : param;
   } catch {
     return param;
   }
