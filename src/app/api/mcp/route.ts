@@ -34,7 +34,7 @@ import { findActiveDelegationOwner } from '@/db/delegationOwner';
 import { delegateLinkPath } from '@/lib/secondAccount';
 import { clerkClient } from '@clerk/nextjs/server';
 import { resolveDbUser } from '@/db/userHelpers';
-import { loadApplicableRules, checkReadRestrictions, decodeB64Url, stripHtmlToText, checkSendWhitelist, type SendDenial } from '@/lib/gmailRules';
+import { loadApplicableRules, checkReadRestrictions, isGmailListingPath, redactListing, decodeB64Url, stripHtmlToText, checkSendWhitelist, type SendDenial } from '@/lib/gmailRules';
 import { captureServerEvent } from '@/lib/posthogServer';
 import { linkBase, runWithLinkOrigin } from '@/lib/linkOrigin';
 import { recordDriveScopeObservation } from '@/lib/driveScopeEpisodeServer';
@@ -2952,6 +2952,17 @@ async function executeRawGoogleCall(
   // for the mailbox the call ran against. The cross-mailbox hint rides on
   // the text only — this is the site the 2026-09-12 thread reads hit.
   if (!result.ok) return errorResult(withMailboxContext(result.error, result.status, resolved));
+
+  if (cls.kind === 'gmail_read' && isGmailListingPath(cleanPath)) {
+    // Listings are never refused whole: matching entries stay listed with
+    // their content (threads.list snippets) withheld — see redactListing.
+    const { body: listing, withheld, ruleNames } = redactListing(rules, result.data);
+    if (withheld > 0) {
+      addToolCallProps({ listing_entries_withheld: withheld });
+      captureServerEvent(conn.user.clerkUserId, 'read_restriction_redacted', { via: 'google_api_get', withheld, rule_names: ruleNames });
+    }
+    return jsonResult(listing);
+  }
 
   if (cls.kind === 'gmail_read') {
     const restriction = checkReadRestrictions(rules, result.data);

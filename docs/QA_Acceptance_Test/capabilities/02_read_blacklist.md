@@ -42,13 +42,19 @@ pattern that fails to compile is silently skipped, which looks identical to
 Drive the REST proxy directly with a profile's `sk_proxy_` key (this needs only
 the local dev server — no preview deploy, no MCP client):
 
+First take any message id: `GET /api/proxy/gmail/v1/users/me/messages?maxResults=1`
+(**200** in both steps — listings are never refused, see A8).
+
 1. Create a `read_blacklist` rule with pattern `*`, assigned to that profile.
-   `GET /api/proxy/gmail/v1/users/me/messages?maxResults=1`
+   `GET /api/proxy/gmail/v1/users/me/messages/{id}`
    → **403** `FGAC read rule '<name>' blocked this message: its content matches the rule's blocked pattern. …`
    A broken expansion yields **200** here, because an uncompilable pattern is
    skipped rather than enforced.
 2. Edit the same rule's pattern to `ZZZNOMATCH*` and repeat the request
-   → **200**, with a real message list.
+   → **200**, with the real message.
+
+(Until 2026-10-16 this step used the `messages` LISTING, which a `*` rule
+refused whole — the behaviour A8 removes.)
 
 Both outcomes are required. Step 1 alone would also pass if the matcher blocked
 everything unconditionally; step 2 alone would also pass if the pattern never
@@ -85,3 +91,25 @@ snippet-visible opening text. Then read it.
 - **Expected**: **403** with the rule-named error — thread reads previously bypassed
   read rules on the REST proxy (the gate matched only `messages` paths) while the MCP
   path checked them; the gate now covers every Gmail GET.
+
+### A8: Listings stay visible; only matching entries' snippets are withheld
+Policy: messages may APPEAR in listings; reading their content respects the rules.
+`threads.list` carries each thread's `snippet` (Gmail's opening text), which IS
+content — so a matching entry stays listed with its snippet withheld, and the
+listing as a whole is never refused. Before 2026-10-16 one matching snippet refused
+the entire listing (production, 2026-10-09: `GET gmail/v1/users/me/threads`
+→ `denied_by_policy` under the 'Block Sign In Alerts' template rule).
+
+With a `read_blacklist` rule whose pattern appears in ONE recent thread's opening
+text (send a QA mail with the phrase in its first line) and not in the others:
+
+- `google_api_get` `gmail/v1/users/me/threads?maxResults=10` (MCP) and
+  `GET /api/proxy/gmail/v1/users/me/threads?maxResults=10` (REST proxy)
+- **Expected**: success (MCP JSON result / proxy **200**), not a 🚫/403. The matching
+  thread is present with `snippet` equal to
+  `[content withheld by FGAC read rule '<name>']`; the blocked phrase appears nowhere
+  in the response; other threads keep their real snippets.
+- Reading that thread (`gmail/v1/users/me/threads/{id}`) is still refused (A7).
+- Telemetry: one `read_restriction_redacted` per call (`via`: `google_api_get` /
+  `rest_proxy`, `withheld` ≥ 1, `rule_names`); the MCP `$mcp_tool_call` carries
+  `listing_entries_withheld` and outcome `success`.

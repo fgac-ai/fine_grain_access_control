@@ -14,7 +14,7 @@ import {
 } from '@/lib/temporaryApiKeys';
 import { linkBase, runWithLinkOrigin } from '@/lib/linkOrigin';
 import { clerkClient } from '@clerk/nextjs/server';
-import { checkReadRestrictions, checkSendWhitelist, loadApplicableRules, type SendDenial } from '@/lib/gmailRules';
+import { checkReadRestrictions, isGmailListingPath, redactListing, checkSendWhitelist, loadApplicableRules, type SendDenial } from '@/lib/gmailRules';
 import { captureServerEvent } from '@/lib/posthogServer';
 import { GOOGLE_FETCH_TIMEOUT_MS, CLERK_TOKEN_TIMEOUT_MS, withTimeout, isUpstreamTimeout } from '@/lib/upstreamTimeouts';
 import { classifyClerkTokenError } from '@/lib/googleTokenFailure';
@@ -1632,6 +1632,22 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
     // every Gmail GET — not just messages/* — because thread (and draft)
     // reads return the same message content and previously bypassed rules on
     // this path while the MCP path checked them.
+    // Listings are never refused whole (the policy above says messages may
+    // APPEAR in listings): matching entries stay listed with their content —
+    // threads.list snippets — withheld. See redactListing.
+    if (cls.kind === 'gmail_read' && isJson && forward.status < 400 && isGmailListingPath(fullPath)) {
+      let parsedListing: unknown = null;
+      try { parsedListing = JSON.parse(returnBody); } catch { /* not JSON */ }
+      if (parsedListing !== null) {
+        const { body: listing, withheld, ruleNames } = redactListing(applicableRules, parsedListing);
+        if (withheld > 0) {
+          captureServerEvent(dbUser.clerkUserId, 'read_restriction_redacted', { via: 'rest_proxy', withheld, rule_names: ruleNames });
+          return passthroughResponse({ ...forward, body: JSON.stringify(listing) }, telemetry);
+        }
+        return passthroughResponse(forward, telemetry);
+      }
+    }
+
     if (cls.kind === 'gmail_read' && isJson) {
       let parsedBody: unknown = null;
       try { parsedBody = JSON.parse(returnBody); } catch { /* not JSON */ }

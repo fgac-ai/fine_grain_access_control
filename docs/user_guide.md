@@ -128,7 +128,7 @@ Access rules let you control what your agent can do. Create them in the **"Acces
 
 | Rule Type | What It Does | Example |
 |-----------|-------------|---------|
-| **Read Blacklist** | Blocks agent from reading emails matching a pattern | `*2FA*` blocks all emails containing "2FA" |
+| **Read Blacklist** | Blocks agent from reading emails matching a pattern. Matching emails still appear in inbox listings, with their preview text withheld | `*2FA*` blocks all emails containing "2FA" |
 | **Send Whitelist** | Only allows sending to addresses matching a pattern | `*@yourcompany.com` limits sending to company emails |
 | **Label Blacklist** | Blocks agent from reading emails that have specific Gmail labels | `Highly-Confidential` blocks reading tagged emails |
 | **Label Whitelist** | Only allows reading emails that have specific Gmail labels | `AI-Allowed` restricts reading to tagged emails only |

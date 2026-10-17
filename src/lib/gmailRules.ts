@@ -169,6 +169,41 @@ function denial(ruleName: string, detail: string): string {
     `The FGAC account owner can review or adjust rules at ${rulesDashboardUrl()}.`;
 }
 
+/** The rule that blocks reading a message, and why — or null. */
+interface ReadRestriction { ruleName: string; detail: string }
+
+function findReadRestriction(rules: ApplicableRules, message: unknown): ReadRestriction | null {
+  const gmailRules = rules.filter(r => r.service === 'gmail');
+  const labelIds = collectLabelIds(message);
+
+  for (const rule of gmailRules.filter(r => r.actionType === 'label_blacklist')) {
+    if (rule.regexPattern && labelIds.includes(rule.regexPattern)) {
+      return { ruleName: rule.ruleName, detail: `it carries the blacklisted label '${rule.regexPattern}'.` };
+    }
+  }
+
+  const whitelists = gmailRules.filter(r => r.actionType === 'label_whitelist' && !!r.regexPattern);
+  if (whitelists.length > 0 && labelIds.length > 0 && !whitelists.some(r => labelIds.includes(r.regexPattern!))) {
+    const names = whitelists.map(r => `'${r.ruleName}'`).join(', ');
+    return { ruleName: whitelists[0].ruleName, detail: `it lacks a label required by the label whitelist (${names}).` };
+  }
+
+  const contentRules = gmailRules.filter(r => r.actionType === 'read_blacklist');
+  if (contentRules.length > 0) {
+    const corpus = collectMessageContent(message) ?? JSON.stringify(message);
+    for (const rule of contentRules) {
+      if (!rule.regexPattern) continue;
+      const regex = compileRulePattern(rule.regexPattern);
+      if (!regex) continue;
+      if (regex.test(corpus)) {
+        return { ruleName: rule.ruleName, detail: `its content matches the rule's blocked pattern.` };
+      }
+    }
+  }
+
+  return null;
+}
+
 /**
  * Read-time enforcement, shared by every path that returns message content.
  * Policy: messages may APPEAR in listings, but reading content must respect
@@ -182,38 +217,97 @@ function denial(ruleName: string, detail: string): string {
  * snippet, filenames, decoded text bodies) — see collectMessageContent — with
  * the raw serialization as a fallback for unrecognized response shapes.
  * Returns a user-facing restriction message, or null if the read is allowed.
+ *
+ * NOT for listing endpoints: a whole listing is never refused because one
+ * entry matches — use redactListing (and isGmailListingPath to tell them apart).
  */
 export function checkReadRestrictions(
   rules: ApplicableRules,
   message: unknown,
 ): string | null {
-  const gmailRules = rules.filter(r => r.service === 'gmail');
-  const labelIds = collectLabelIds(message);
+  const r = findReadRestriction(rules, message);
+  return r ? denial(r.ruleName, r.detail) : null;
+}
 
-  for (const rule of gmailRules.filter(r => r.actionType === 'label_blacklist')) {
-    if (rule.regexPattern && labelIds.includes(rule.regexPattern)) {
-      return denial(rule.ruleName, `it carries the blacklisted label '${rule.regexPattern}'.`);
+// ─── Listings ────────────────────────────────────────────────────────────────
+
+/**
+ * Gmail collection endpoints: messages.list, threads.list, drafts.list,
+ * history.list. Matched on the query-stripped path; a trailing id segment
+ * (messages/<id>, threads/<id>) is a single-resource read, not a listing.
+ */
+const GMAIL_LISTING_PATH = /^\/?gmail\/v1\/users\/[^/]+\/(messages|threads|drafts|history)\/?$/;
+
+export function isGmailListingPath(path: string): boolean {
+  return GMAIL_LISTING_PATH.test(path.split(/[?#]/)[0]);
+}
+
+/** The arrays a Gmail listing response carries its entries in. */
+const LISTING_ARRAY_KEYS = ['messages', 'threads', 'drafts', 'history'] as const;
+
+/** Message-content fields a listing entry can carry (threads.list: snippet). */
+const ENTRY_CONTENT_KEYS = new Set(['snippet', 'payload', 'raw']);
+
+export const withheldSnippet = (ruleName: string) =>
+  `[content withheld by FGAC read rule '${ruleName}']`;
+
+/** Withholds content fields in place; returns how many it withheld. */
+function stripEntryContent(v: unknown, ruleName: string, depth = 0): number {
+  if (depth > MAX_CONTENT_WALK_DEPTH || v === null || typeof v !== 'object') return 0;
+  if (Array.isArray(v)) return v.reduce((n: number, item) => n + stripEntryContent(item, ruleName, depth + 1), 0);
+  const obj = v as Record<string, unknown>;
+  let stripped = 0;
+  for (const key of Object.keys(obj)) {
+    if (ENTRY_CONTENT_KEYS.has(key)) {
+      if (key === 'snippet') obj.snippet = withheldSnippet(ruleName);
+      else delete obj[key];
+      stripped++;
+    } else {
+      stripped += stripEntryContent(obj[key], ruleName, depth + 1);
     }
   }
+  return stripped;
+}
 
-  const whitelists = gmailRules.filter(r => r.actionType === 'label_whitelist' && !!r.regexPattern);
-  if (whitelists.length > 0 && labelIds.length > 0 && !whitelists.some(r => labelIds.includes(r.regexPattern!))) {
-    const names = whitelists.map(r => `'${r.ruleName}'`).join(', ');
-    return denial(whitelists[0].ruleName, `it lacks a label required by the label whitelist (${names}).`);
+export interface ListingRedaction {
+  /** The listing with matching entries' content withheld (a copy; input untouched). */
+  body: unknown;
+  /** How many entries had content actually withheld. */
+  withheld: number;
+  /** Distinct names of the rules that withheld content. */
+  ruleNames: string[];
+}
+
+/**
+ * Listing enforcement — the policy checkReadRestrictions states, applied per
+ * entry: every entry stays in the listing (ids, threadIds, labelIds are not
+ * content), but an entry a rule would refuse to READ has its content fields
+ * withheld. In practice that is threads.list's `snippet` — Gmail's first
+ * ~200 chars of the latest message, i.e. exactly what a content rule such as
+ * "Block Sign In Alerts" protects (the code in the alert).
+ *
+ * Before this, the whole-response check ran on listings, so one matching
+ * snippet refused the entire threads.list (production, 2026-10-09).
+ */
+export function redactListing(rules: ApplicableRules, listing: unknown): ListingRedaction {
+  if (listing === null || typeof listing !== 'object' || Array.isArray(listing)) {
+    return { body: listing, withheld: 0, ruleNames: [] };
   }
-
-  const contentRules = gmailRules.filter(r => r.actionType === 'read_blacklist');
-  if (contentRules.length > 0) {
-    const corpus = collectMessageContent(message) ?? JSON.stringify(message);
-    for (const rule of contentRules) {
-      if (!rule.regexPattern) continue;
-      const regex = compileRulePattern(rule.regexPattern);
-      if (!regex) continue;
-      if (regex.test(corpus)) {
-        return denial(rule.ruleName, `its content matches the rule's blocked pattern.`);
-      }
+  const body = structuredClone(listing) as Record<string, unknown>;
+  let withheld = 0;
+  const ruleNames = new Set<string>();
+  for (const key of LISTING_ARRAY_KEYS) {
+    const entries = body[key];
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      const r = findReadRestriction(rules, entry);
+      if (!r) continue;
+      // ID-only entries carry nothing to withhold (and only "match" via the
+      // raw-serialization fallback) — they count for nothing.
+      if (stripEntryContent(entry, r.ruleName) === 0) continue;
+      withheld++;
+      ruleNames.add(r.ruleName);
     }
   }
-
-  return null;
+  return { body, withheld, ruleNames: [...ruleNames] };
 }
