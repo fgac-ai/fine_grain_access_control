@@ -557,46 +557,25 @@ export async function revokeTemporaryKey(tempKeyId: string) {
   revalidateDashboard();
 }
 
-export async function rollProxyKey(keyId: string) {
+/**
+ * Rotate a profile's secret (the dashboard's "Rotate key"). Same profile row,
+ * new key value — connections, mailboxes, rules and settings stay attached;
+ * see src/db/rotateProfileKey.ts for what is deliberately cut off.
+ * Returns the new key and private key once, like createProxyKey.
+ */
+export async function rollProxyKey(keyId: string): Promise<{ proxyKey: string; privateKey: string | null } | { error: string }> {
   const dbUser = await getDbUser();
+  const { rotateProfileKey } = await import("@/db/rotateProfileKey");
+  const rotated = await rotateProfileKey(dbUser.id, keyId);
+  if (!rotated) return { error: "This profile no longer exists or was revoked." };
 
-  const oldKey = await db.select().from(proxyKeys).where(eq(proxyKeys.id, keyId)).limit(1).then(res => res[0]);
-  if (!oldKey || oldKey.userId !== dbUser.id) throw new Error("Unauthorized");
-
-  // Get old key's email access
-  const oldEmailAccess = await db.select().from(keyEmailAccess).where(eq(keyEmailAccess.proxyKeyId, keyId));
-
-  // Get old key's rule assignments
-  const oldRuleAssignments = await db.select().from(keyRuleAssignments).where(eq(keyRuleAssignments.proxyKeyId, keyId));
-
-  // Create new key with same label
-  const newKey = await db.insert(proxyKeys).values({
-    userId: dbUser.id,
-    key: `sk_proxy_${crypto.randomUUID().replace(/-/g, '')}`,
-    label: oldKey.label,
-  }).returning().then(res => res[0]);
-
-  // Copy email access
-  for (const ea of oldEmailAccess) {
-    await db.insert(keyEmailAccess).values({
-      proxyKeyId: newKey.id,
-      delegationId: ea.delegationId,
-      targetEmail: ea.targetEmail,
-    });
-  }
-
-  // Copy rule assignments
-  for (const ra of oldRuleAssignments) {
-    await db.insert(keyRuleAssignments).values({
-      proxyKeyId: newKey.id,
-      accessRuleId: ra.accessRuleId,
-    });
-  }
-
-  // Revoke old key
-  await db.update(proxyKeys).set({ revokedAt: new Date() }).where(eq(proxyKeys.id, keyId));
-
+  const { captureServerEvent } = await import("@/lib/posthogServer");
+  captureServerEvent(dbUser.clerkUserId, "agent_profile_key_rotated", {
+    temp_keys_revoked: rotated.tempKeysRevoked,
+    has_service_account: rotated.privateKey !== null,
+  });
   revalidateDashboard();
+  return { proxyKey: rotated.proxyKey, privateKey: rotated.privateKey };
 }
 
 // ─── Access Rules ───────────────────────────────────────────────────────────
@@ -1127,6 +1106,10 @@ export type MagicApprovalResult =
        * for this id before telling the user "the agent can retry now"
        * (drive.file grants are eventually consistent — see driveFileGrantCheck). */
       grantedFile?: { kind: DriveFileKind; fileId: string };
+      /** URL slug of the profile the grant was written to — the approve
+       * page's "Back to dashboard" returns to /dashboard/agents/<slug>
+       * instead of the default profile. Absent if the label has no slug. */
+      profileSlug?: string;
     }
   | {
       ok: false;
@@ -1236,7 +1219,7 @@ async function resolveWrongAccountLink(
 export type ResolvedApprovalLink = (
   | { status: "invalid"; reason: InvalidLinkReason }
   | { status: "wrong_account"; details: WrongAccountDetails }
-  | { status: "fresh" | "already_granted"; payload: ApprovalPayload }
+  | { status: "fresh" | "already_granted"; payload: ApprovalPayload; profileSlug?: string }
 ) & {
   /** Who opened it — null only when there was no usable visitor row. */
   visitor: ApprovalVisitor | null;
@@ -1261,7 +1244,16 @@ export async function resolveApprovalLink(params: ApprovalSearchParams): Promise
   }
   const p = verified.payload;
   const active = await grantActiveForApproval(p, p.proxyKeyId);
-  return { status: active ? "already_granted" : "fresh", payload: p, visitor };
+  // Profile the link targets, so the page's "Back to dashboard" lands on it.
+  // Cosmetic: a failed lookup falls back to /dashboard, never fails the page.
+  let profileSlug: string | undefined;
+  try {
+    const key = await db.select({ label: proxyKeys.label }).from(proxyKeys)
+      .where(and(eq(proxyKeys.id, p.proxyKeyId), eq(proxyKeys.userId, dbUser.id), isNull(proxyKeys.revokedAt)))
+      .limit(1).then(r => r[0]);
+    profileSlug = key ? slugifyProfileLabel(key.label) || undefined : undefined;
+  } catch { profileSlug = undefined; }
+  return { status: active ? "already_granted" : "fresh", payload: p, profileSlug, visitor };
 }
 
 /**
@@ -1507,6 +1499,7 @@ export async function approveMagicLink(
   if (!key) {
     return { ok: false, reason: "The agent profile this link targets no longer exists or was revoked." };
   }
+  const profileSlug = slugifyProfileLabel(key.label) || undefined;
 
   // Grant-level idempotency, replacing single-use. Re-approving a grant that
   // is already active writes nothing and reports success, so a double submit
@@ -1529,6 +1522,7 @@ export async function approveMagicLink(
     return {
       ok: true,
       description: `${describeApproval(p)} — this was already approved, so nothing changed. The agent can retry its request now.`,
+      profileSlug,
     };
   }
 
@@ -1545,7 +1539,7 @@ export async function approveMagicLink(
   } else if (p.action === "send_all") {
     await grantSendToAnyone(dbUser.id, key.id);
   } else if (linkKind && p[DRIVE_FILE_KINDS[linkKind].idKey]) {
-    return applyFileGrantApproval({
+    const fileResult = await applyFileGrantApproval({
       kind: linkKind,
       dbUser, key, p,
       fileId: p[DRIVE_FILE_KINDS[linkKind].idKey]!,
@@ -1553,6 +1547,7 @@ export async function approveMagicLink(
       picked: pickedSheets,
       describe: () => describeApproval(p),
     });
+    return fileResult.ok ? { ...fileResult, profileSlug } : fileResult;
   } else {
     return { ok: false, reason: "This approval link is malformed." };
   }
@@ -1560,7 +1555,7 @@ export async function approveMagicLink(
   await markApprovalRequestApproved(p.requestId);
   captureServerEvent(dbUser.clerkUserId, "approval_link_approved", { action: p.action, request_id: p.requestId });
   revalidateDashboard();
-  return { ok: true, description: describeApproval(p) };
+  return { ok: true, description: describeApproval(p), profileSlug };
 }
 
 // ─── Drive tree model (feature-flagged folder-inherited Drive access) ───────

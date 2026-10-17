@@ -18,7 +18,7 @@ import { FileGrantRecovery } from "../FileGrantRecovery";
 export default async function SlidesSetupPage({
   searchParams,
 }: {
-  searchParams: Promise<{ pid?: string; name?: string; from?: string; pickerContext?: string }>;
+  searchParams: Promise<{ pid?: string; name?: string; from?: string; pickerContext?: string; profile?: string }>;
 }) {
   const params = await searchParams;
   const pid = params.pid || params.pickerContext || null;
@@ -28,6 +28,7 @@ export default async function SlidesSetupPage({
       fileId={pid}
       resourceName={params.name || null}
       fromApproval={params.from === "approval"}
+      profileSlug={params.profile ?? null}
     />
   );
 }

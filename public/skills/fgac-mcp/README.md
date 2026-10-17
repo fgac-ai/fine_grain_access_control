@@ -1,35 +1,42 @@
-# fgac-mcp — FGAC.ai hosted MCP plugin
+# FGAC.ai — Gmail, Sheets, Docs and Slides with access rules you control
 
-Connect Grok Build, Grok Bot, Cursor, or Claude Code to **multiple Gmail
-accounts** and **editable Google Sheets & Docs** through the
-[FGAC.ai](https://fgac.ai) hosted MCP server. Every call passes through
-deny-by-default access rules the user controls: read rules hide sensitive mail
-(2FA codes, password resets), send whitelists limit outbound mail, per-file
-rules expose only the spreadsheets and documents chosen. A denied action
-returns a one-click approval link instead of a dead end.
+FGAC.ai lets Claude work across **several Gmail accounts in one connection** (work,
+school, personal, and inboxes teammates delegate to you) and edit the **Google
+Sheets, Docs and Slides** you choose. Every call passes through access rules you
+control. Read rules hide sensitive mail such as 2FA codes and password resets, send
+whitelists limit who the agent can email, and per-file rules expose only the files
+you pick. When the agent hits a rule, it gets a one-click approval link to show you
+instead of a dead end.
 
-This plugin ships **no code**: one hosted MCP server entry, one skill, this
-README and a license.
+This plugin ships **no code**. It contains one hosted MCP server entry, one skill
+that teaches Claude how to work with the rules, this README and a license.
 
-## Install
+## Install in Claude
+
+1. In Claude, open **Directory → Plugins**, find **FGAC.ai** and select **Add**.
+2. On first use, a browser window opens. Sign in to FGAC.ai with the Google account
+   you want Claude to reach.
+3. That's it. The new connection is attached to your **Default Profile**, which is
+   read-only. Claude can read that account's mail, plus any inbox whose owner
+   delegated it to you, straight away. Sending mail and opening Sheets, Docs or
+   Slides each return an approval link the first time. Approve it once and Claude
+   can do it from then on. Review, re-scope or block the connection at any time on
+   the [dashboard](https://fgac.ai/dashboard).
+
+## Other clients
 
 | client | how |
 |---|---|
+| Claude Code (CLI) | `/plugin marketplace add fgac-ai/fine_grain_access_control` then `/plugin install fgac-mcp@fine_grain_access_control` |
 | Grok Build | `/marketplace` → `fgac-mcp` → install, or `grok plugin install fgac-mcp` |
 | Grok Bot | Settings → Plugins → search **FGAC** → Add, then Authorize in the browser |
 | Cursor | Marketplace → **FGAC.ai** → Install, then Settings → Tools & MCP → sign in |
-| Claude Code | `/plugin marketplace add fgac-ai/fine_grain_access_control` then `/plugin install fgac-mcp@fine_grain_access_control` |
 | Any MCP client | add `https://fgac.ai/api/mcp` as a remote (Streamable HTTP) server |
 
-On first use the client opens a browser window: sign in to FGAC.ai with the
-Google account you want to protect. The first tool call then reports
-**pending approval** with a dashboard link; approve the agent there, assign it
-a profile, and every tool works with that profile's rules from then on.
-
-## What the agent gets
+## What Claude gets
 
 Twenty-two tools, all annotated (`readOnlyHint` / `destructiveHint`) so clients can
-auto-run reads and prompt before writes:
+auto-run reads and ask before writes:
 
 - **Gmail**: `list_accounts`, `gmail_list`, `gmail_read`, `gmail_get_attachment`, `gmail_labels`, `gmail_send`
 - **Sheets**: `sheets_get_spreadsheet`, `sheets_read_range`, `sheets_update_range`, `sheets_append_rows`, `sheets_edit`
@@ -37,32 +44,43 @@ auto-run reads and prompt before writes:
 - **Slides**: `slides_get_presentation`, `slides_edit`
 - **Rule-checked raw Google API**: `google_api_get`, `google_api_modify`
 - **Self-service**: `get_my_permissions`, `request_access`
-- **Large files**: `create_temporary_api_key` — a short-lived key so a script can upload or
-  download files too large for tool calls, under the same rules
+- **Large files**: `create_temporary_api_key`, a short-lived key that lets a script
+  upload or download files too large for tool calls, under the same rules
 
 Every tool takes an optional `account` argument, so one connection can reach a
 work inbox, a school inbox, and inboxes teammates have delegated.
 
-## Network endpoints and credentials (for reviewers)
+## Data flows, network endpoints and credentials (for reviewers)
 
-- `https://fgac.ai/api/mcp` — the only endpoint in `.mcp.json` / `mcp.json`.
-  Hosted MCP server over Streamable HTTP; every tool call goes here.
-- OAuth 2.1 authorization server discovered from
-  `https://fgac.ai/.well-known/oauth-protected-resource/mcp` (named in the 401 `WWW-Authenticate` header) and
-  `https://fgac.ai/.well-known/oauth-authorization-server`: authorization code
-  with PKCE (S256), Dynamic Client Registration, and Client ID Metadata
-  Documents both accepted. Unauthenticated calls return 401 with a
-  `WWW-Authenticate` header pointing at the resource metadata.
-- Credentials required: an FGAC.ai account (Google sign-in). The Google grant
-  stays with FGAC.ai; the client only ever holds an FGAC OAuth token, and every
-  call is scoped to the access rules the user approved for this agent.
-- No local files, hooks, environment variables, or scripts.
+- **Where data goes:** the plugin contacts only `fgac.ai`. It has no other endpoints
+  or telemetry. The FGAC.ai service calls Google APIs (Gmail, Sheets, Docs, Slides,
+  Drive) on the user's behalf. It runs on the hosting, sign-in, database and
+  analytics providers named in the [privacy policy](https://fgac.ai/privacy). Gmail
+  and Drive contents are processed in memory and never stored or sent to those
+  providers.
+- `https://fgac.ai/api/mcp` is the only endpoint in `.mcp.json` / `mcp.json`. It is a
+  hosted MCP server over Streamable HTTP, and every tool call goes there.
+- The OAuth 2.1 authorization server is discovered from
+  `https://fgac.ai/.well-known/oauth-protected-resource/mcp` (named in the 401
+  `WWW-Authenticate` header) and `https://fgac.ai/.well-known/oauth-authorization-server`.
+  It uses the authorization code flow with PKCE (S256), and accepts both Dynamic
+  Client Registration and Client ID Metadata Documents. Unauthenticated calls return
+  401 with a `WWW-Authenticate` header pointing at the resource metadata.
+- **Credentials required:** an FGAC.ai account (Google sign-in). The Google grant
+  stays with FGAC.ai. The client only ever holds an FGAC OAuth token, and every
+  call is limited to the access rules the user set for this connection.
+- **What FGAC.ai stores:** the account's email address, access rules and audit
+  metadata. It never stores message bodies, subjects, attachments or file contents.
+  Google OAuth tokens are held by the sign-in provider, never in FGAC.ai's database.
+- No local files, hooks, environment variables or scripts.
 
 ## Links
 
 - Website and docs: https://fgac.ai · https://fgac.ai/docs
 - Dashboard: https://fgac.ai/dashboard
 - Privacy policy: https://fgac.ai/privacy
+- Terms: https://fgac.ai/terms
+- Support: support@fgac.ai
 - Source: https://github.com/fgac-ai/fine_grain_access_control
 
 ## License

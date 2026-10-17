@@ -311,9 +311,9 @@ All your API keys are listed in the **"API Keys"** section. Each key shows:
 - **Key value**: The `sk_proxy_...` string your agent uses.
 - **Email badges**: Which email accounts the key can access.
 
-### Rolling a Key
+### Rotating a Key
 
-Click **"Roll"** to generate a new key value while keeping the same label, email access grants, and rule assignments. The old key value immediately stops working. Use this if you suspect a key has been compromised.
+On a profile's page, click **"Rotate key"** → **"Confirm rotate"** to issue a new `sk_proxy_...` value for that profile. Everything attached to the profile stays: connected agents (MCP connections keep working without re-approval), mailboxes, rules, and Drive settings. What stops working immediately: the old key value, any service-account credentials JSON built on it (download the new one from the confirmation panel), and any temporary API keys an agent minted under the profile. The new key is shown once. Use this if you suspect a key has been compromised.
 
 ### Revoking a Key
 

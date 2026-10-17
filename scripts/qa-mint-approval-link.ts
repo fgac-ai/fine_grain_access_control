@@ -5,6 +5,10 @@
  *
  *   npm run qa:mint-link -- --email <owner email> [--action sheets_expose]
  *                           [--file <spreadsheet/document id>] [--base http://localhost:3000]
+ *                           [--profile <profile slug>]
+ *
+ * `--profile` signs for that profile instead of the default one (capability
+ * 14 A21: "Back to dashboard" must return to the profile the approval changed).
  *
  * Read-only against the branch database (owner row + their live Default
  * Profile, else newest live key) and signs with THIS checkout's
@@ -19,7 +23,7 @@ config({ path: '.env.local' });
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import type { ApprovalAction } from '../src/lib/approvalLinks';
 
-type Args = { email?: string; action: string; file: string; base: string };
+type Args = { email?: string; action: string; file: string; base: string; profile?: string };
 
 function parseArgs(argv: string[]): Args {
   const out: Args = { action: 'sheets_expose', file: '1QaSecondAccountFixtureSheetIdxxxxxxxxxxxx', base: process.env.NEXT_PUBLIC_APP_URL?.trim() || 'http://localhost:3000' };
@@ -30,6 +34,7 @@ function parseArgs(argv: string[]): Args {
     else if (a === '--action') out.action = next() ?? out.action;
     else if (a === '--file') out.file = next() ?? out.file;
     else if (a === '--base') out.base = next() ?? out.base;
+    else if (a === '--profile') out.profile = next();
   }
   return out;
 }
@@ -37,12 +42,13 @@ function parseArgs(argv: string[]): Args {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!args.email) {
-    console.error('usage: npm run qa:mint-link -- --email <owner email> [--action sheets_expose|sheets_write|docs_expose|docs_write|slides_expose|slides_write|send_all] [--file <id>] [--base <origin>]');
+    console.error('usage: npm run qa:mint-link -- --email <owner email> [--action sheets_expose|sheets_write|docs_expose|docs_write|slides_expose|slides_write|send_all] [--file <id>] [--base <origin>] [--profile <slug>]');
     process.exit(2);
   }
   const { db } = await import('../src/db');
   const { users, proxyKeys } = await import('../src/db/schema');
   const { mintApprovalLink } = await import('../src/lib/approvalLinks');
+  const { slugifyProfileLabel } = await import('../src/lib/profileSlugs');
 
   const owner = await db.select({ id: users.id, email: users.email })
     .from(users)
@@ -55,8 +61,13 @@ async function main() {
     .from(proxyKeys)
     .where(and(eq(proxyKeys.userId, owner.id), isNull(proxyKeys.revokedAt)))
     .orderBy(desc(proxyKeys.isDefault), desc(proxyKeys.createdAt));
-  const key = keys[0];
-  if (!key) { console.error(`no live proxy key for ${args.email}`); process.exit(1); }
+  const key = args.profile ? keys.find(k => slugifyProfileLabel(k.label) === args.profile) : keys[0];
+  if (!key) {
+    console.error(args.profile
+      ? `no live profile with slug ${args.profile} for ${args.email} (have: ${keys.map(k => slugifyProfileLabel(k.label)).join(', ') || 'none'})`
+      : `no live proxy key for ${args.email}`);
+    process.exit(1);
+  }
 
   let action: ApprovalAction;
   switch (args.action) {
@@ -71,7 +82,7 @@ async function main() {
   }
 
   const link = await mintApprovalLink(args.base, owner.id, key.id, action);
-  console.log(JSON.stringify({ owner: owner.email, owner_id: owner.id, profile: key.label, proxy_key_id: key.id, action: action.action, url: link.url, request_id: link.requestId }, null, 2));
+  console.log(JSON.stringify({ owner: owner.email, owner_id: owner.id, profile: key.label, profile_slug: slugifyProfileLabel(key.label), proxy_key_id: key.id, action: action.action, url: link.url, request_id: link.requestId }, null, 2));
 }
 
 main().catch(err => { console.error(err); process.exit(1); });

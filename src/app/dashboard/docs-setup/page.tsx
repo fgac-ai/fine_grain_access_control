@@ -16,7 +16,7 @@ import { FileGrantRecovery } from "../FileGrantRecovery";
 export default async function DocsSetupPage({
   searchParams,
 }: {
-  searchParams: Promise<{ did?: string; name?: string; from?: string; pickerContext?: string }>;
+  searchParams: Promise<{ did?: string; name?: string; from?: string; pickerContext?: string; profile?: string }>;
 }) {
   const params = await searchParams;
   const did = params.did || params.pickerContext || null;
@@ -26,6 +26,7 @@ export default async function DocsSetupPage({
       fileId={did}
       resourceName={params.name || null}
       fromApproval={params.from === "approval"}
+      profileSlug={params.profile ?? null}
     />
   );
 }
