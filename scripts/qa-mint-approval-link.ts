@@ -10,6 +10,9 @@
  * `--profile` signs for that profile instead of the default one (capability
  * 14 A21: "Back to dashboard" must return to the profile the approval changed).
  *
+ *   npm run qa:mint-link -- --email <owner email> --action send_whitelist --recipient <address>
+ *     (A6's plus-addressed variant: pass the owner's address with a +tag)
+ *
  * Read-only against the branch database (owner row + their live Default
  * Profile, else newest live key) and signs with THIS checkout's
  * CLERK_SECRET_KEY, so the URL is byte-identical to what the running dev
@@ -23,7 +26,7 @@ config({ path: '.env.local' });
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import type { ApprovalAction } from '../src/lib/approvalLinks';
 
-type Args = { email?: string; action: string; file: string; base: string; profile?: string };
+type Args = { email?: string; action: string; file: string; base: string; profile?: string; recipient?: string };
 
 function parseArgs(argv: string[]): Args {
   const out: Args = { action: 'sheets_expose', file: '1QaSecondAccountFixtureSheetIdxxxxxxxxxxxx', base: process.env.NEXT_PUBLIC_APP_URL?.trim() || 'http://localhost:3000' };
@@ -35,6 +38,7 @@ function parseArgs(argv: string[]): Args {
     else if (a === '--file') out.file = next() ?? out.file;
     else if (a === '--base') out.base = next() ?? out.base;
     else if (a === '--profile') out.profile = next();
+    else if (a === '--recipient') out.recipient = next();
   }
   return out;
 }
@@ -42,7 +46,7 @@ function parseArgs(argv: string[]): Args {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!args.email) {
-    console.error('usage: npm run qa:mint-link -- --email <owner email> [--action sheets_expose|sheets_write|docs_expose|docs_write|slides_expose|slides_write|send_all] [--file <id>] [--base <origin>] [--profile <slug>]');
+    console.error('usage: npm run qa:mint-link -- --email <owner email> [--action sheets_expose|send_whitelist|sheets_write|docs_expose|docs_write|slides_expose|slides_write|send_all] [--file <id>] [--recipient <address>] [--base <origin>] [--profile <slug>]');
     process.exit(2);
   }
   const { db } = await import('../src/db');
@@ -72,6 +76,10 @@ async function main() {
   let action: ApprovalAction;
   switch (args.action) {
     case 'send_all': action = { action: 'send_all' }; break;
+    case 'send_whitelist':
+      if (!args.recipient) { console.error('send_whitelist needs --recipient <address>'); process.exit(2); }
+      action = { action: 'send_whitelist', recipient: args.recipient };
+      break;
     case 'sheets_expose': action = { action: 'sheets_expose', spreadsheetId: args.file, resourceName: 'QA second-account fixture' }; break;
     case 'sheets_write': action = { action: 'sheets_write', spreadsheetId: args.file, resourceName: 'QA second-account fixture' }; break;
     case 'docs_expose': action = { action: 'docs_expose', documentId: args.file }; break;

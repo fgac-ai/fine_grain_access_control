@@ -399,6 +399,12 @@ const SCANNER_CLIENT_NAMES = new Set([
   // authenticated, no `initialize` ever recorded. The whole unlabelled
   // `direct` remainder after PR #138; the name carries no vocabulary.
   'mcpdd',
+  // 2026-10-14: an uptime monitor (`fixter-monitoring/1.0` UA, one earlier
+  // row on `python-httpx/0.28.1`), tokenless POSTs since 2026-10-12 — 145 rows
+  // on 10-13, 306 by 10:00Z on 10-14, tripling the `direct` no_token series.
+  // 0 `outcome = 'ok'`, 0 `mcp_client_initialize` / `$mcp_tool_call` in 90
+  // days. The same operator's crawler `FixterBot/` is already `keyword:bot`.
+  'fixter-uptime',
 ]);
 const SCANNER_UA_PREFIXES = [
   // `python-httpx2/` was here (2026-09-10: the junk-bearer sender behind every
@@ -408,6 +414,12 @@ const SCANNER_UA_PREFIXES = [
   'mcp-selection-lab-',
   'directory-admin-dashboard-inspection',
   'Mozilla/5.0 (compatible)', // the bare "compatible" UA is a bot convention
+  // 2026-10-14, same evidence bar as `fixter-uptime` above: the uptime
+  // monitor's UA, and `McpStatus/0.1` — a status checker, ~5 tokenless rows/day
+  // since 2026-10-08 with no clientInfo, never authenticated. `uptime` and
+  // `status` stay out of the vocabulary: too generic to be tells on their own.
+  'fixter-monitoring/',
+  'McpStatus/',
 ];
 
 /**

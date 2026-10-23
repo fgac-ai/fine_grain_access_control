@@ -74,6 +74,16 @@ check('mcpdd is case-insensitive like every name rule', is('node', 'MCPDD', 'sca
 check('eyrie-validator/0.1.0 → scanner (validator)', is('eyrie-validator/0.1.0', 'eyrie-validator', 'scanner', 'keyword:validator'));
 check('wormhole-survey on a browser UA → scanner (survey)', is('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36', 'wormhole-survey', 'scanner', 'keyword:survey'));
 check('cadastr-seeder/0.1 → scanner (seeder)', is('cadastr-seeder/0.1', 'cadastr-seeder', 'scanner', 'keyword:seeder'));
+console.log('scanners, the 10-14 direct remainder (uptime / status monitors):');
+check('fixter-uptime on fixter-monitoring/1.0 → scanner by exact name', is('fixter-monitoring/1.0', 'fixter-uptime', 'scanner', 'name:fixter-uptime'));
+check('fixter-uptime on a stock python-httpx UA → scanner by name', is('python-httpx/0.28.1', 'fixter-uptime', 'scanner', 'name:fixter-uptime'));
+check('fixter-monitoring/ UA with no name → scanner by UA prefix', is('fixter-monitoring/1.0', undefined, 'scanner', 'ua:fixter-monitoring/'));
+check('`McpStatus/0.1` with no clientInfo → scanner by UA prefix', is('McpStatus/0.1', undefined, 'scanner', 'ua:McpStatus/'));
+check('FixterBot/ is still caught by the vocabulary', is('FixterBot/0.1 (+https://fixter.dev/bot)', 'FixterBot', 'scanner', 'keyword:bot'));
+check('`status` alone is not a tell (no vocabulary change)', (() => {
+  const r = cls('node', 'status-dashboard');
+  return r.client_class === 'direct' && r.client_class_signal === undefined;
+})());
 check('LiveAgent with no UA stays plain direct (`agent` is not a tell)', (() => {
   const r = cls(undefined, 'LiveAgent');
   return r.client_class === 'direct' && r.client_class_signal === undefined;
