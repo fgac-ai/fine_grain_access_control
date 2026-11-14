@@ -35,6 +35,7 @@ import { delegateLinkPath } from '@/lib/secondAccount';
 import { clerkClient } from '@clerk/nextjs/server';
 import { resolveDbUser } from '@/db/userHelpers';
 import { loadApplicableRules, checkReadRestrictions, decodeB64Url, stripHtmlToText, checkSendWhitelist, type SendDenial } from '@/lib/gmailRules';
+import { loadRuleAssignmentsForUser } from '@/lib/ruleAssignments';
 import { captureServerEvent } from '@/lib/posthogServer';
 import { linkBase, runWithLinkOrigin } from '@/lib/linkOrigin';
 import { recordDriveScopeObservation } from '@/lib/driveScopeEpisodeServer';
@@ -1437,7 +1438,7 @@ async function checkFilePermission(kind: DriveFileKind, userId: string, proxyKey
   const allRules = await db.select().from(accessRules).where(eq(accessRules.userId, userId));
   const keyAssignments = await db.select().from(keyRuleAssignments).where(eq(keyRuleAssignments.proxyKeyId, proxyKeyId));
   const assignedRuleIds = new Set(keyAssignments.map(a => a.accessRuleId));
-  const allAssignments = await db.select().from(keyRuleAssignments);
+  const allAssignments = await loadRuleAssignmentsForUser(userId);
   const rulesWithAssignments = new Set(allAssignments.map(a => a.accessRuleId));
 
   const fileRules = allRules.filter(rule => {
@@ -1499,7 +1500,7 @@ function driveMetaFetcher(engine: DriveEngineContext): MetaFetcher {
 async function loadDriveTreeSettings(userId: string, proxyKeyId: string): Promise<{ settings: Map<string, DriveSetting[]>; driveDefault: DriveDefault }> {
   const [allRules, allAssignments, key] = await Promise.all([
     db.select().from(accessRules).where(eq(accessRules.userId, userId)),
-    db.select().from(keyRuleAssignments),
+    loadRuleAssignmentsForUser(userId),
     db.select({ driveDefault: proxyKeys.driveDefault }).from(proxyKeys).where(eq(proxyKeys.id, proxyKeyId)).then(r => r[0]),
   ]);
   const rulesWithAssignments = new Set(allAssignments.map(a => a.accessRuleId));
@@ -4143,7 +4144,7 @@ function registerFgacTools(server: FgacMcpServer) {
         // full rule set leaked rules scoped to other keys/profiles.
         const allRules = await db.select().from(accessRules)
           .where(eq(accessRules.userId, conn.user.id));
-        const allAssignments = await db.select().from(keyRuleAssignments);
+        const allAssignments = await loadRuleAssignmentsForUser(conn.user.id);
         const rulesWithAssignments = new Set(allAssignments.map(a => a.accessRuleId));
         const assignedToThisKey = new Set(
           allAssignments.filter(a => a.proxyKeyId === conn.proxyKeyId).map(a => a.accessRuleId),

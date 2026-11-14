@@ -1,5 +1,5 @@
 import { kindForService } from '@/lib/driveFileKinds';
-import { proxyKeys, keyEmailAccess, accessRules, keyRuleAssignments, temporaryApiKeys, agentConnections } from '@/db/schema';
+import { proxyKeys, keyEmailAccess, accessRules, temporaryApiKeys, agentConnections } from '@/db/schema';
 import { eq, and, isNull, gt } from 'drizzle-orm';
 import { getActiveDelegationsToEmail, filterLiveDelegatedAccess } from '@/db/delegationQueries';
 import { resolveDbUser } from '@/db/userHelpers';
@@ -7,6 +7,7 @@ import { currentUser } from '@clerk/nextjs/server';
 import { headers } from 'next/headers';
 import { linkBase } from '@/lib/linkOrigin';
 import { db } from '@/db';
+import { loadRuleAssignmentsForUser } from '@/lib/ruleAssignments';
 import { checkGoogleAccess, type GoogleAccess } from './googleAccess';
 import { clerkPrimaryEmail } from '@/lib/clerkPrimaryEmail';
 import { slugifyProfileLabel } from '@/lib/profileSlugs';
@@ -158,7 +159,7 @@ export async function loadDashboardData(opts: { driveScopeReturnLeg?: boolean } 
 
   // ─── Rules and their per-profile assignments ─────────────────────────────
   const userRules = await db.select().from(accessRules).where(eq(accessRules.userId, dbUser.id));
-  const allKeyRuleAssignments = await db.select().from(keyRuleAssignments);
+  const allKeyRuleAssignments = await loadRuleAssignmentsForUser(dbUser.id);
 
   const rules = userRules.map(rule => ({
     id: rule.id,
