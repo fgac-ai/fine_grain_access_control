@@ -10,6 +10,7 @@ import { linkBase } from '@/lib/linkOrigin';
 import { db } from '@/db';
 import { accessRules, keyRuleAssignments } from '@/db/schema';
 import { eq } from 'drizzle-orm';
+import { loadRuleAssignmentsForUser } from '@/lib/ruleAssignments';
 import { collectLabelIds } from '@/app/api/mcp/googleApiPolicy';
 import { SEND_DISABLED_MESSAGE, recipientNotWhitelistedMessage } from '@/lib/denialCopy';
 
@@ -21,7 +22,7 @@ export async function loadApplicableRules(userId: string, proxyKeyId: string, ta
     .where(eq(keyRuleAssignments.proxyKeyId, proxyKeyId));
 
   const assignedRuleIds = new Set(keyAssignments.map(a => a.accessRuleId));
-  const allAssignments = await db.select().from(keyRuleAssignments);
+  const allAssignments = await loadRuleAssignmentsForUser(userId);
   const rulesWithAssignments = new Set(allAssignments.map(a => a.accessRuleId));
 
   return allUserRules.filter(rule => {

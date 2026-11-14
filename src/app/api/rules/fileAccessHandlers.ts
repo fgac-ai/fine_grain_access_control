@@ -3,6 +3,7 @@ import { auth } from '@clerk/nextjs/server';
 import { db } from '@/db';
 import { users, accessRules, keyRuleAssignments, proxyKeys } from '@/db/schema';
 import { eq, and, inArray } from 'drizzle-orm';
+import { loadRuleAssignmentsForUser } from '@/lib/ruleAssignments';
 import { verifyFileGrant, getOwnerGoogleToken, type FileGrantState } from '@/lib/driveFileGrantCheck';
 import { DRIVE_FILE_KINDS, type DriveFileKind } from '@/lib/driveFileKinds';
 import { captureServerEvent } from '@/lib/posthogServer';
@@ -178,7 +179,7 @@ export async function grantFileAccessGET(kind: DriveFileKind) {
         )
       );
 
-    const ruleAssignments = await db.select().from(keyRuleAssignments);
+    const ruleAssignments = await loadRuleAssignmentsForUser(dbUser.id);
     const rulesWithKeys = rules.map(rule => {
       const assignedKeyIds = ruleAssignments
         .filter(a => a.accessRuleId === rule.id)

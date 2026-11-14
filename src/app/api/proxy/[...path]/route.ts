@@ -15,6 +15,7 @@ import {
 import { linkBase, runWithLinkOrigin } from '@/lib/linkOrigin';
 import { clerkClient } from '@clerk/nextjs/server';
 import { checkReadRestrictions, checkSendWhitelist, loadApplicableRules, type SendDenial } from '@/lib/gmailRules';
+import { loadRuleAssignmentsForUser } from '@/lib/ruleAssignments';
 import { captureServerEvent } from '@/lib/posthogServer';
 import { GOOGLE_FETCH_TIMEOUT_MS, CLERK_TOKEN_TIMEOUT_MS, withTimeout, isUpstreamTimeout } from '@/lib/upstreamTimeouts';
 import { classifyClerkTokenError } from '@/lib/googleTokenFailure';
@@ -635,7 +636,7 @@ async function proxyDriveTreeEngine(
 
   const [allRules, allAssignments, key] = await Promise.all([
     db.select().from(accessRules).where(eq(accessRules.userId, dbUser.id)),
-    db.select().from(keyRuleAssignments),
+    loadRuleAssignmentsForUser(dbUser.id),
     db.select({ driveDefault: proxyKeys.driveDefault }).from(proxyKeys).where(eq(proxyKeys.id, proxyKeyId)).then(r => r[0]),
   ]);
   const rulesWithAssignments = new Set(allAssignments.map(a => a.accessRuleId));
@@ -772,7 +773,7 @@ async function driveFileDenial(
     .where(eq(keyRuleAssignments.proxyKeyId, profileKeyId));
 
   const assignedRuleIds = new Set(keyAssignments.map(a => a.accessRuleId));
-  const allAssignments = await db.select().from(keyRuleAssignments);
+  const allAssignments = await loadRuleAssignmentsForUser(dbUser.id);
   const rulesWithAssignments = new Set(allAssignments.map(a => a.accessRuleId));
 
   const fileRules = ACTIVE_DRIVE_FILE_KINDS.flatMap(k =>
@@ -1315,7 +1316,7 @@ async function handleProxyRequest(request: NextRequest, params: { path: string[]
         .where(eq(keyRuleAssignments.proxyKeyId, dbKey.id));
 
       const assignedRuleIds = new Set(keyAssignments.map(a => a.accessRuleId));
-      const allAssignments = await db.select().from(keyRuleAssignments);
+      const allAssignments = await loadRuleAssignmentsForUser(dbUser.id);
       const rulesWithAssignments = new Set(allAssignments.map(a => a.accessRuleId));
 
       const applicableRules = applicableFileRules(
